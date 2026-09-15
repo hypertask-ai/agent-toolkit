@@ -22,8 +22,13 @@ until you do it.
   the company pack as the `supervise-board` skill; `~/.local/bin/ht-supervisor`
   is a thin entry point into it. Its columns are roles mapped in `board.yml`,
   so the same checks run on any board.
-- **Feedback command** — `agent-template feedback`, filed the moment a human
-  corrects the bot's work.
+- **Triage** — `scripts/triage.sh`, run by the runner before it starts a
+  ticket that carries neither `easy` nor `hard`. Rules first; one cheap model
+  call only when no rule fires. A `hard` ticket runs on a stronger model and
+  must post a numbered plan as its first comment. QA agents are not scored.
+- **Advisor** — `agent-advisor "<question>"`, for an agent mid-run that has
+  already tried two approaches. Two calls per run, reads the board, never
+  writes to it.
 - **Weekly report** — `agent-template-weekly`, turns a week of corrections
   into checks; `agent-template report` prints this week's scorecard.
 
@@ -50,6 +55,14 @@ Two packs, always in this order:
   pack first, bot pack last. Read in that order on every run.
 - Column names: `board.yml` next to the conf, not a skill file.
 - Its own conf: `<config dir>/<slug>.conf`, 0600.
+- Triage scores: the `easy` / `hard` label on the ticket itself. Every score
+  and its reason is also in `~/.local/state/agent-board-poll/triage.jsonl`. If
+  the board refused the label, the score sits in
+  `~/.local/state/agent-board-poll/triage/<REF>` and the log says so.
+- Per-ticket model overrides: `~/.local/state/agent-board-poll/model-override/<REF>`,
+  one line, `<cli> model <id>`. Written by triage for a hard ticket and by the
+  supervisor for a ticket that has failed three times. Delete the file to put
+  the ticket back on the agent's usual model.
 
 ## Five daily checks
 
@@ -62,7 +75,11 @@ Two packs, always in this order:
 
 ## Running it by hand
 
-- `agent-board-poll --once --dry-run <slug>` — see what it would pick up.
+- `agent-board-poll --once --dry-run <slug>` — see what it would pick up, and
+  what each ticket scores. Writes nothing: no label, no override file, and no
+  model call for the score.
+- `printf '{"title":"...","description":"...","comments":[]}' | triage.sh --rules-only`
+  — score a ticket by hand, without a model.
 - `agent-board-poll --once <slug>` — run one real tick.
 - `agent-template update --dry-run` — see what this host would pull in,
   convert, and clean up without changing anything.
@@ -80,6 +97,9 @@ Two packs, always in this order:
   its name; nothing else should.
 - A config change to the conf is done only after one completed run proves
   it, not on inspection alone.
+- A triage score is a label a human can overrule. If somebody changes `hard` to
+  `easy` on a ticket, the runner takes their word for it and does not re-score.
+  Argue with the rules in `triage.sh`, never with the label.
 - A fact (a number, a name, a date, a path) goes into a doc or the ticket.
   A rule (always or never do X) goes into a skill file.
 - A rule that would still be true for a different board or customer goes into

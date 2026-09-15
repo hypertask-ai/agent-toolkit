@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# agent-advisor: one question, answered by a stronger model, mid-run.
+#
+# An agent that has tried two approaches and is still stuck does not need
+# another turn of the same model; it needs a second opinion that can see the
+# ticket and the diff. That is this. It answers in plain text on stdout and
+# writes nothing, anywhere: not the board, not the repo, not the ticket.
+#
+# Usage:
+#   agent-advisor "<one precise question>"
+#
+# Two calls per run, and the third says so and exits 1. An agent that needs a
+# third opinion is an agent that should write down what it tried and stop.
+#
+# The runner sets these up before it starts a run; there is nothing to pass:
+#   AGENT_ADVISOR_CONTEXT   json file: ref, title, description, board, task id
+#   AGENT_ADVISOR_COUNTER   file holding the number of calls made this run
+#   AGENT_ADVISOR_MAX       call cap, default 2
+#   AGENT_ADVISOR_CLI       the model command, default "claude -p --model opus"
+#
+# Failure contract: every error prints "ERROR: <what>. Do this next: <step>"
+# on stderr and exits non-zero. Nothing is swallowed.
+
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+CORE_ROOT="$(dirname "$(dirname "$SELF")")"
+
+usage() { sed -n '2,24p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+die() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+esac
+
+QUESTION="${*:-}"
+[ -n "$QUESTION" ] || die "agent-advisor was given no question" \
+  "run: agent-advisor \"why does <thing> still <do the wrong thing> after <what you tried>?\""
+
+CONTEXT_FILE="${AGENT_ADVISOR_CONTEXT:-}"
+COUNTER="${AGENT_ADVISOR_COUNTER:-}"
+MAX="${AGENT_ADVISOR_MAX:-2}"
+ADVISOR_CLI="${AGENT_ADVISOR_CLI:-claude -p --model opus}"
+
+# ---------- the cap ----------
+# Checked before the call and written after it, so a model that never answers
+# still costs a go. Two goes is the budget; a run that burns both and is still
+# stuck has a ticket to write on, not a third question to ask.
+if [ -n "$COUNTER" ]; then
+  mkdir -p "$(dirname "$COUNTER")"
+  used="$(cat "$COUNTER" 2>/dev/null || printf '0')"
+  case "$used" in ''|*[!0-9]*) used=0 ;; esac
+  if [ "$used" -ge "$MAX" ]; then
+    printf 'advisor cap reached, write what you tried on the ticket\n'
+    exit 1
+  fi
+  printf '%s\n' "$((used + 1))" > "$COUNTER"
+fi
+
+# ---------- what the advisor gets to see ----------
+TICKET_BLOCK="(no ticket context was passed to this run)"
+COMMENTS_BLOCK="(no comments available)"
+if [ -n "$CONTEXT_FILE" ] && [ -r "$CONTEXT_FILE" ]; then
+  TICKET_BLOCK="$(CF="$CONTEXT_FILE" python3 -c '
+import json, os, re
+doc = json.load(open(os.environ["CF"], encoding="utf-8"))
+def plain(text):
+    text = re.sub(r"<[^>]+>", " ", str(text or ""))
+    return re.sub(r"\s+", " ", text).strip()
+print("Ticket %s: %s" % (doc.get("ref") or "?", plain(doc.get("title"))))
+print(doc.get("url") or "")
+print("")
+print(plain(doc.get("description"))[:6000])')"
+
+  # The last ten comments, oldest first, so the argument reads in order. Read
+  # only: this reaches the board through the same GET the runner uses and has
+  # no path to a write.
+  token_file="$(CF="$CONTEXT_FILE" python3 -c '
+import json, os
+print(json.load(open(os.environ["CF"], encoding="utf-8")).get("token_file") or "")')"
+  adapter_name="$(CF="$CONTEXT_FILE" python3 -c '
+import json, os
+print(json.load(open(os.environ["CF"], encoding="utf-8")).get("adapter") or "")')"
+  task_id="$(CF="$CONTEXT_FILE" python3 -c '
+import json, os
+print(json.load(open(os.environ["CF"], encoding="utf-8")).get("task_id") or "")')"
+  board="$(CF="$CONTEXT_FILE" python3 -c '
+import json, os
+print(json.load(open(os.environ["CF"], encoding="utf-8")).get("board") or "")')"
+
+  if [ -n "$token_file" ] && [ -n "$adapter_name" ] && [ -n "$task_id" ]; then
+    # In a subshell on purpose: core.sh and the adapter define their own die()
+    # and their own helpers, and this script is not handing its error contract
+    # over to them for the sake of one read.
+    COMMENTS_BLOCK="$(
+      set +e
+      # shellcheck disable=SC1091
+      . "$CORE_ROOT/scripts/lib/core.sh" 2>/dev/null || exit 0
+      core_load_adapter "$adapter_name" 2>/dev/null || exit 0
+      declare -F adapter_triage_input >/dev/null 2>&1 || exit 0
+      adapter_triage_input "$token_file" "$board" "" "$task_id" "" "" 2>/dev/null \
+        | python3 -c '
+import json, re, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    print("(comments could not be read)")
+    raise SystemExit(0)
+comments = doc.get("comments") or []
+for raw in comments[-10:]:
+    text = re.sub(r"<[^>]+>", " ", str(raw))
+    text = re.sub(r"\s+", " ", text).strip()
+    if text:
+        print("- " + text[:600])
+' 2>/dev/null
+    )" || COMMENTS_BLOCK=""
+  fi
+fi
+[ -n "$COMMENTS_BLOCK" ] || COMMENTS_BLOCK="(no comments on this ticket yet)"
+
+# The diff is the half of the story the board does not have: what this run has
+# actually changed so far. Capped, because a whole feature branch is not a
+# question.
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  DIFF_BLOCK="$(git diff HEAD 2>/dev/null | head -c 60000)"
+  [ -n "$DIFF_BLOCK" ] || DIFF_BLOCK="(the working tree has no changes yet)"
+else
+  DIFF_BLOCK="(this is not a git working tree, so there is no diff to show)"
+fi
+
+PROMPT="$(cat <<EOF
+You are advising a coding agent that is stuck mid-run. It gets one plain-text
+answer, no preamble and no pleasantries, and it cannot ask a follow-up.
+
+Its question:
+
+$QUESTION
+
+$TICKET_BLOCK
+
+The last comments on the ticket:
+
+$COMMENTS_BLOCK
+
+What it has changed so far:
+
+\`\`\`diff
+$DIFF_BLOCK
+\`\`\`
+
+Answer the question. Name the most likely cause and the next concrete thing to
+try, in the code that is actually in front of it. If the diff shows the wrong
+approach, say so and say what to do instead. If the question cannot be answered
+from what is here, say exactly which one fact would settle it.
+EOF
+)"
+
+read -r -a ADVISOR_ARGV <<< "$ADVISOR_CLI"
+command -v "${ADVISOR_ARGV[0]}" >/dev/null 2>&1 || die \
+  "the advisor model CLI ${ADVISOR_ARGV[0]} is not on PATH" \
+  "install it, or set AGENT_ADVISOR_CLI to a command that is"
+
+printf '%s' "$PROMPT" | "${ADVISOR_ARGV[@]}" || die \
+  "the advisor model call failed" \
+  "read the error above; the run keeps its remaining advisor calls"

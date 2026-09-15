@@ -396,6 +396,55 @@ adapter_task_url() {
   printf 'https://app.hypertask.ai/detail/project-%s/%s' "$board_id" "${ref##*-}"
 }
 
+# ---------- triage ----------
+# Everything the scorer needs about one ticket, as one JSON object on stdout.
+# Core does not know what a QA comment looks like or where a pull request
+# lives; this does, because both are this board's business.
+#
+# adapter_triage_input <token-file> <board-id> <ref> <task-id> <title> <description>
+adapter_triage_input() {
+  local token_file="$1" board_id="$2" ref="$3" task_id="$4" title="$5" description="$6"
+  local comments pr_json="[]" repo="${PR_REPO:-}"
+
+  comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")" \
+    || comments='{"comments":[]}'
+
+  # A pull request that closed without merging is the quietest failed attempt
+  # there is: nothing is written on the ticket when somebody gives up on a
+  # branch. No gh, no claim either way.
+  if [ -n "$repo" ] && command -v gh >/dev/null 2>&1; then
+    pr_json="$(gh pr list --repo "$repo" --state all --search "$ref" \
+                 --json number,state,url,headRefName --limit 10 2>/dev/null || printf '[]')"
+  fi
+
+  printf '%s' "$comments" | \
+  REF="$ref" TITLE="$title" DESCRIPTION="$description" PR_JSON="${pr_json:-[]}" python3 -c '
+import json, os, re, sys
+
+def text_of(comment):
+    return comment.get("text") or comment.get("comment") or comment.get("html") or ""
+
+doc = json.load(sys.stdin)
+comments = [text_of(c) for c in (doc.get("comments") or [])]
+
+ref = os.environ["REF"]
+prs = json.loads(os.environ["PR_JSON"]) or []
+prs = [p for p in prs if ref.casefold() in
+       (str(p.get("headRefName") or "") + " " + str(p.get("url") or "")).casefold()]
+merged = any(str(p.get("state") or "").upper() == "MERGED" for p in prs)
+closed_unmerged = (not merged) and any(
+    str(p.get("state") or "").upper() == "CLOSED" for p in prs)
+
+print(json.dumps({
+    "ref": ref,
+    "title": os.environ["TITLE"],
+    "description": os.environ["DESCRIPTION"],
+    "comments": comments,
+    "closed_unmerged_pr": closed_unmerged,
+}))
+'
+}
+
 # ---------- writes (through the agent's own CLI) ----------
 adapter_post_comment() {
   local board_cli="$1" ref="$2" html="$3"
@@ -405,6 +454,66 @@ adapter_post_comment() {
 adapter_move_task() {
   local board_cli="$1" ref="$2" section="$3"
   "$board_cli" task move "$ref" --section "$section"
+}
+
+# adapter_add_label <board-cli> <token-file> <board-id> <ref> <label>
+# Adds one label and keeps the rest. Three things this board makes you do:
+#
+#  - `task update --labels` SETS the list, so the ticket's current labels have
+#    to go back in with the new one or Bug, CLI and the rest are wiped.
+#  - a label that does not exist on the project is an error, not an implicit
+#    create, so it is created first when it is missing.
+#  - name resolution is fuzzy ("hard" would happily match "intensity:hard"),
+#    so everything here is resolved to label UUIDs before the write.
+adapter_add_label() {
+  local board_cli="$1" token_file="$2" board_id="$3" ref="$4" label="$5"
+  local labels_json label_id task_json current ids
+
+  labels_json="$(_ht_get "$token_file" "/mcp/projects/${board_id}/labels")" || return 1
+  label_id="$(LJ="$labels_json" WANT="$label" python3 -c '
+import json, os
+want = os.environ["WANT"].strip().casefold()
+for row in json.loads(os.environ["LJ"]).get("labels") or []:
+    if str(row.get("name") or "").strip().casefold() == want:
+        print(row.get("id") or "")
+        break')"
+
+  if [ -z "$label_id" ]; then
+    "$board_cli" labels create --project "$board_id" --name "$label" >/dev/null 2>&1 || return 1
+    labels_json="$(_ht_get "$token_file" "/mcp/projects/${board_id}/labels")" || return 1
+    label_id="$(LJ="$labels_json" WANT="$label" python3 -c '
+import json, os
+want = os.environ["WANT"].strip().casefold()
+for row in json.loads(os.environ["LJ"]).get("labels") or []:
+    if str(row.get("name") or "").strip().casefold() == want:
+        print(row.get("id") or "")
+        break')"
+    [ -n "$label_id" ] || return 1
+  fi
+
+  task_json="$(_ht_get "$token_file" "/mcp/tasks?ticket_number=${ref}")" || return 1
+  ids="$(TJ="$task_json" NEW="$label_id" python3 -c '
+import json, os, sys
+tasks = json.loads(os.environ["TJ"]).get("tasks") or []
+if not tasks:
+    sys.exit(1)
+ids = []
+for row in tasks[0].get("labels") or []:
+    got = row.get("id") if isinstance(row, dict) else None
+    if got and got not in ids:
+        ids.append(str(got))
+new = os.environ["NEW"]
+if new in ids:
+    sys.exit(2)          # already there; nothing to write
+ids.append(new)
+print(",".join(ids))')" || {
+    # exit 2 is "the ticket already carries this label", which is a success.
+    [ "$?" = "2" ] && return 0
+    return 1
+  }
+  [ -n "$ids" ] || return 1
+
+  "$board_cli" task update "$ref" --labels "$ids" >/dev/null 2>&1 || return 1
 }
 
 # ---------- which ticket comes next ----------
@@ -640,6 +749,13 @@ push, open the PR, and turn auto-merge on with
 PR sitting green with auto-merge off is work nobody gets. Then move the ticket
 to the review lane the lifecycle skill names. Do not leave commits unpushed:
 this working directory is thrown away when the process exits.
+
+When you are stuck, and you have already tried two different approaches, run
+\`agent-advisor "<one precise question>"\` and read the answer before you try a
+third. It sees this ticket, its last comments and your current diff, and it
+answers in plain text. Two calls for this whole run; it refuses the third. It
+writes nothing on the board, so whatever it tells you still has to reach the
+ticket in your own result comment.
 
 THREE COMMENTS, MAXIMUM, for this whole run. A ticket a human has to scroll is
 a ticket nobody reads.

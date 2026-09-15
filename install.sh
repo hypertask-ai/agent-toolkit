@@ -81,6 +81,7 @@ echo "docs:   $DEST/MAINTAINER.md"
 echo "bin:    $BIN/agent-board-poll -> $DEST/scripts/agent-board-poll"
 echo "bin:    $BIN/agent-template -> $DEST/scripts/agent-template"
 echo "bin:    $BIN/agent-template-weekly -> $DEST/scripts/agent-template-weekly"
+echo "bin:    $BIN/agent-advisor -> $DEST/scripts/agent-advisor"
 echo "version: $(cat "$SRC/VERSION")"
 
 if [ "$DRY_RUN" = "yes" ]; then
@@ -100,6 +101,7 @@ cp -a "$SRC/CHANGELOG.md" "$DEST/CHANGELOG.md"
 cp -a "$SRC/scripts" "$SRC/adapters" "$SRC/evals" "$DEST/"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-weekly" \
+          "$DEST/scripts/agent-advisor" "$DEST/scripts/triage.sh" \
           "$DEST/evals/run-evals.sh"
 
 # A symlink, so the installed runner and the installed skill can never drift
@@ -107,6 +109,9 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
 ln -sfn "$DEST/scripts/agent-board-poll" "$BIN/agent-board-poll"
 ln -sfn "$DEST/scripts/agent-template" "$BIN/agent-template"
 ln -sfn "$DEST/scripts/agent-template-weekly" "$BIN/agent-template-weekly"
+# agent-advisor is on PATH because a run calls it by name from inside a model
+# CLI, where nothing knows where the template is installed.
+ln -sfn "$DEST/scripts/agent-advisor" "$BIN/agent-advisor"
 
 bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
   || fail "the installed create-agent.sh does not run" \
@@ -117,6 +122,13 @@ bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
 "$BIN/agent-template" --help >/dev/null \
   || fail "the installed agent-template does not run" \
           "check that $BIN is on PATH and the symlink resolves"
+"$BIN/agent-advisor" --help >/dev/null \
+  || fail "the installed agent-advisor does not run" \
+          "check that $BIN is on PATH and the symlink resolves"
+printf '{"title":"x","description":"y","comments":[]}' \
+  | bash "$DEST/scripts/triage.sh" --rules-only >/dev/null \
+  || fail "the installed triage scorer does not run" \
+          "run $DEST/scripts/triage.sh --help and check python3 is present"
 bash "$DEST/evals/run-evals.sh" >/dev/null \
   || fail "the installed eval cases do not pass" \
           "run $DEST/evals/run-evals.sh and read the failing case ids"

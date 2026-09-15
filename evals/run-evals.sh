@@ -27,6 +27,11 @@
 #   starts_with_block_tag   the text opens with an HTML block tag
 #   has_section "<title>"   the text has a heading with that title
 #   is_full_https_url       every ticket reference is a full https:// URL
+#   triage_scores "<easy|hard>"  the input is a ticket JSON object, and
+#                           scripts/triage.sh --rules-only scores it that way.
+#                           Rules only: a check that needs a model and a
+#                           network is a check that fails on somebody else's
+#                           machine for a reason that is not the code.
 
 set -euo pipefail
 
@@ -35,7 +40,7 @@ HERE="$(dirname "$SELF")"
 CASES="$HERE/cases.jsonl"
 ONLY=""
 
-usage() { sed -n '2,29p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,34p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -51,10 +56,17 @@ done
   exit 1
 }
 
-CASES="$CASES" ONLY="$ONLY" python3 <<'PYEOF'
+TRIAGE_SH="$(dirname "$HERE")/scripts/triage.sh"
+[ -f "$TRIAGE_SH" ] || {
+  printf 'ERROR: no triage scorer at %s. Do this next: run this from inside the template folder\n' "$TRIAGE_SH" >&2
+  exit 1
+}
+
+CASES="$CASES" ONLY="$ONLY" TRIAGE_SH="$TRIAGE_SH" python3 <<'PYEOF'
 import json
 import os
 import re
+import subprocess
 import sys
 
 BLOCK_TAGS = ("p", "ul", "ol", "h2", "h3", "h4", "blockquote", "pre", "table")
@@ -97,10 +109,38 @@ def is_full_https_url(text, _arg):
     return True, ""
 
 
+def triage_scores(text, arg):
+    # The input is a whole ticket, not a sentence, so this predicate hands it
+    # to the real scorer rather than reimplementing the rules here. A rule that
+    # is tested against a copy of itself is not tested.
+    wanted = (arg or "").strip().casefold()
+    if wanted not in ("easy", "hard"):
+        return False, 'triage_scores needs "easy" or "hard" as its argument'
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as error:
+        return False, "the case input is not ticket JSON: %s" % error
+    result = subprocess.run(
+        ["bash", os.environ["TRIAGE_SH"], "--rules-only"],
+        input=text, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return False, "triage.sh exited %d: %s" % (result.returncode, result.stderr.strip()[:200])
+    try:
+        verdict = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False, "triage.sh printed %r, not JSON" % result.stdout.strip()[:120]
+    got = str(verdict.get("score") or "")
+    if got == wanted:
+        return True, ""
+    return False, "scored %r, not %r (%s)" % (got, wanted, verdict.get("reason"))
+
+
 PREDICATES = {
     "starts_with_block_tag": starts_with_block_tag,
     "has_section": has_section,
     "is_full_https_url": is_full_https_url,
+    "triage_scores": triage_scores,
 }
 
 path = os.environ["CASES"]

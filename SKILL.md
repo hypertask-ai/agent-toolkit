@@ -216,6 +216,38 @@ it never deletes or rewrites an existing case.
 | `RETRY_WINDOW_SECONDS` | length of that window, default 21600 (six hours) |
 | `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
 | `PR_REPO` | the repository whose pull requests say whether a ticket is finished |
+| `TRIAGE` | `yes` to score a ticket before pickup; defaults to `yes` for `AGENT_KIND=dev` and `no` for everything else |
+| `TRIAGE_HARD_MODEL` | the model a `hard` ticket moves to; defaults to `claude-opus-5-thinking-high` for a `cursor-agent` CLI and `opus` for anything else |
+| `TRIAGE_MODEL_CLI` | the cheap model that breaks a tie the rules could not, default `claude -p --model haiku` |
+| `ADVISOR_MAX` | `agent-advisor` calls allowed per run, default 2 |
+| `ADVISOR_CLI` | the model `agent-advisor` asks, default `claude -p --model opus` |
+
+## How hard is this ticket
+
+A ticket carrying neither `easy` nor `hard` is scored before the run starts,
+by `scripts/triage.sh`. Rules decide it, in this order, and the order is the
+design:
+
+1. **hard** — the subject is hard here whoever writes it: realtime, auth,
+   money, database schema, or a bug that only happens sometimes.
+2. **hard** — somebody already tried and failed: a QA FAIL comment, a
+   "Run failed" comment, or a pull request that closed without merging.
+3. **easy** — it names the file, component or screen to change. Checked before
+   the vague rule, because a one-line CSS ticket is short AND easy.
+4. **hard** — it is vague: under 200 characters, no acceptance criteria, and
+   nothing named.
+5. Only if none of those fire, one cheap model call decides.
+
+The score is written on the ticket as a label, so a human can see it and
+overrule it by changing it. A `hard` ticket runs on a stronger model and has to
+post a numbered plan (root cause, files, how it will verify) as its first
+comment, which counts toward its three. An `easy` ticket changes nothing. QA
+agents are never scored: they verify somebody else's work.
+
+When an agent is stuck mid-run, `agent-advisor "<one precise question>"` gets a
+second opinion from a stronger model, given the ticket, its last ten comments
+and the run's current diff. Twice per run; the third call refuses. It reads the
+board and never writes to it.
 
 ## Company pack + bot pack
 

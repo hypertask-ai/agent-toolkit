@@ -84,6 +84,31 @@ esac
 # a retry.
 RETRY_LIMIT="${RETRY_LIMIT:-2}"
 RETRY_WINDOW_SECONDS="${RETRY_WINDOW_SECONDS:-21600}"
+# How hard is this ticket, decided before the run starts, so a hard one gets a
+# stronger model and is made to plan first instead of being discovered halfway
+# through on the cheap model. Only an agent that BUILDS is scored: a QA agent
+# verifies somebody else's work and the difficulty of the fix is not its
+# problem.
+AGENT_KIND="${AGENT_KIND:-dev}"
+case "$AGENT_KIND" in
+  dev) TRIAGE_DEFAULT="yes" ;;
+  *)   TRIAGE_DEFAULT="no" ;;
+esac
+TRIAGE="${TRIAGE:-$TRIAGE_DEFAULT}"
+# The model a hard ticket is moved to. cursor-agent and claude name the same
+# model differently, so the default follows whichever CLI this agent runs.
+if [ -z "${TRIAGE_HARD_MODEL:-}" ]; then
+  case "$MODEL_CLI" in
+    cursor-agent*) TRIAGE_HARD_MODEL="claude-opus-5-thinking-high" ;;
+    *)             TRIAGE_HARD_MODEL="opus" ;;
+  esac
+fi
+# The cheap model that breaks a tie the rules could not. Never the good one:
+# this call decides a label, not a fix.
+TRIAGE_MODEL_CLI="${TRIAGE_MODEL_CLI:-claude -p --model haiku}"
+# Two second opinions per run, through agent-advisor.
+ADVISOR_MAX="${ADVISOR_MAX:-2}"
+ADVISOR_CLI="${ADVISOR_CLI:-claude -p --model opus}"
 # SKILLS_INDEX is a comma-separated LIST: company pack first, bot pack second.
 # One path is a list of one, so every conf written before the split still works.
 core_check_skill_indexes "$SKILLS_INDEX" "SKILLS_INDEX"
@@ -118,11 +143,24 @@ ATTEMPTS="$STATE_DIR/$SLUG.attempts"
 # The same failure posted on the same ticket twice is noise. One line per
 # ticket, holding a fingerprint of the last failure written on it.
 LASTFAIL="$STATE_DIR/$SLUG.lastfail"
-# Per-ticket model overrides, written by the supervisor when a ticket has
-# failed three times: one file per ticket, named for it, holding "<cli> model
-# <name>". Nothing here creates the directory; if it does not exist, no ticket
-# has one.
+# Per-ticket model overrides: one file per ticket, named for it, holding
+# "<cli> model <name>". Two things write one. The supervisor does, when a
+# ticket has failed three times. Triage does, when it scores a ticket hard
+# before anyone has started it. Triage never overwrites a file that is already
+# there: the supervisor has seen three real failures and this has seen a title.
 MODEL_OVERRIDE_DIR="${MODEL_OVERRIDE_DIR:-$HOME/.local/state/agent-board-poll/model-override}"
+# Every score this runner has given, with the reason, one JSON object per line.
+# A triage rule nobody can audit is a rule nobody will trust the first time it
+# sends an easy ticket to the expensive model.
+TRIAGE_LOG="${TRIAGE_LOG:-$STATE_DIR/triage.jsonl}"
+# Where a score is remembered when the board will not take the label. The board
+# is the real home for it: everyone can see a label, nobody can see a file on
+# one machine.
+TRIAGE_STATE_DIR="${TRIAGE_STATE_DIR:-$STATE_DIR/triage}"
+# One directory per run, holding what agent-advisor needs to answer a question
+# about this ticket, and the count of how many it has already answered.
+ADVISOR_DIR="${ADVISOR_DIR:-$STATE_DIR/advisor}"
+TRIAGE_SH="$CORE_ROOT/scripts/triage.sh"
 touch "$SEEN" "$ATTEMPTS" "$LASTFAIL"
 
 # attempts_recent <task-id> : how many goes this ticket has had in the window
@@ -244,6 +282,87 @@ sys.exit(1 if bad else 0)
   fi
 }
 
+# triage_score <ref> <task-id> <board> <title> <description> <labels-csv>
+# How hard this ticket is, printed as "<easy|hard>|<known|new>|<reason>". The
+# middle field says whether the score already existed, so the caller never has
+# to read the wording of a reason to know whether to write it down. A label
+# already on the ticket is the answer: a human who disagreed with a score fixes
+# it by changing the label, and nothing here argues with them.
+#
+# Scoring only reads. The label write and the model override are separate, and
+# both are skipped during --dry-run, so the required dry-run check shows the
+# score without touching the board.
+triage_score() {
+  local ref="$1" task_id="$2" board="$3" title="$4" description="$5" labels="$6"
+  local existing input verdict score reason
+
+  existing="$(LB="$labels" python3 -c '
+import os
+labels = {s.strip().casefold() for s in os.environ["LB"].split(",") if s.strip()}
+print("hard" if "hard" in labels else ("easy" if "easy" in labels else ""))')"
+  if [ -n "$existing" ]; then
+    printf '%s|known|%s\n' "$existing" "the ticket already carries the $existing label"
+    return 0
+  fi
+  # A score this runner wrote down when the board would not take the label.
+  if [ -r "$TRIAGE_STATE_DIR/$ref" ]; then
+    read -r existing < "$TRIAGE_STATE_DIR/$ref" || existing=""
+    case "$existing" in
+      easy|hard) printf '%s|known|%s\n' "$existing" "scored earlier, held in $TRIAGE_STATE_DIR/$ref"; return 0 ;;
+    esac
+  fi
+
+  if declare -F adapter_triage_input >/dev/null 2>&1; then
+    input="$(adapter_triage_input "$TOKEN_FILE" "$board" "$ref" "$task_id" "$title" "$description" 2>>"$LOG")" || input=""
+  fi
+  if [ -z "$input" ]; then
+    input="$(REF="$ref" TITLE="$title" DESCRIPTION="$description" python3 -c '
+import json, os
+print(json.dumps({"ref": os.environ["REF"], "title": os.environ["TITLE"],
+                  "description": os.environ["DESCRIPTION"], "comments": [],
+                  "closed_unmerged_pr": False}))')"
+  fi
+
+  # --dry-run never spends a model call: the operator asked what would happen,
+  # not to be billed for it.
+  local rules_flag=""
+  [ "$DRY_RUN" = "yes" ] && rules_flag="--rules-only"
+  verdict="$(printf '%s' "$input" | TRIAGE_MODEL_CLI="$TRIAGE_MODEL_CLI" \
+               bash "$TRIAGE_SH" $rules_flag 2>>"$LOG")" || verdict=""
+  if [ -z "$verdict" ]; then
+    printf 'easy|new|the scorer did not answer, so this stays on the default model\n'
+    return 0
+  fi
+  score="$(V="$verdict" python3 -c 'import json,os;print(json.loads(os.environ["V"])["score"])')"
+  reason="$(V="$verdict" python3 -c 'import json,os;d=json.loads(os.environ["V"]);print("%s (%s)" % (d["reason"], d["by"]))')"
+  printf '%s|new|%s\n' "$score" "$reason"
+}
+
+# triage_record <ref> <task-id> <board> <score> <reason>
+# The score becomes a label on the ticket, a line in the log, and, when the
+# board refuses the label, a file this runner reads back next tick. Never
+# called during --dry-run.
+triage_record() {
+  local ref="$1" task_id="$2" board="$3" score="$4" reason="$5"
+
+  mkdir -p "$(dirname "$TRIAGE_LOG")"
+  REF="$ref" SCORE="$score" REASON="$reason" SLUG="$SLUG" BOARD="$board" python3 -c '
+import json, os, time
+print(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "agent": os.environ["SLUG"],
+                  "board": os.environ["BOARD"], "ref": os.environ["REF"],
+                  "score": os.environ["SCORE"], "reason": os.environ["REASON"]}))' \
+    >> "$TRIAGE_LOG"
+
+  if declare -F adapter_add_label >/dev/null 2>&1 \
+     && adapter_add_label "$BOARD_CLI" "$TOKEN_FILE" "$board" "$ref" "$score" 2>>"$LOG"; then
+    log "triage $ref: $score, labelled on the board ($reason)"
+  else
+    mkdir -p "$TRIAGE_STATE_DIR"
+    printf '%s\n' "$score" > "$TRIAGE_STATE_DIR/$ref"
+    log "triage $ref: $score, but the board would not take the label, so it is held in $TRIAGE_STATE_DIR/$ref ($reason)"
+  fi
+}
+
 # Why a ticket was chosen or passed over. Always in the log; on stdout when
 # somebody asked. A selection nobody can read is a selection nobody trusts.
 explain() {
@@ -254,6 +373,11 @@ explain() {
 # row_field <row-json> <name>
 row_field() {
   ROW="$1" F="$2" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get(os.environ["F"]) or "")'
+}
+
+# row_labels <row-json> : the ticket's labels, already lowercased, comma joined
+row_labels() {
+  ROW="$1" python3 -c 'import json,os;print(",".join(json.loads(os.environ["ROW"]).get("labels") or []))'
 }
 
 # rank_order : indices of the eligible tickets, best rank first, board order
@@ -441,11 +565,36 @@ done <<< "$CANDIDATES"
 
 if [ "$DRY_RUN" = "yes" ]; then
   order="$(rank_order)"
+  shown=0
   for i in $order; do
     row="${E_ROW[$i]}"
     echo "would pick up $(row_field "$row" ref) (rank ${ELIGIBLE[$i]}): ${E_WHY[$i]}"
     echo "    $(row_field "$row" title)"
     echo "    $(row_field "$row" url)"
+    shown=$((shown + 1))
+    # The score is shown here too, and only shown: no label is written, no
+    # override file is dropped, and no model is called for it. A dry run that
+    # quietly labelled the board would not be a dry run.
+    #
+    # Only for the tickets this tick would actually start. Scoring every
+    # candidate means a comments read and a gh query each, dozens of API calls
+    # for an answer about tickets this tick was never going to touch, and the
+    # board's host starts answering with a bot challenge.
+    if [ "$TRIAGE" = "yes" ] && [ "$shown" -le "$MAX_CONCURRENT_RUNS" ]; then
+      row_board="$(row_field "$row" board)"; [ -n "$row_board" ] || row_board="${BOARD_ID%%,*}"
+      triage_verdict="$(triage_score "$(row_field "$row" ref)" "$(row_field "$row" id)" \
+        "$row_board" "$(row_field "$row" title)" "$(row_field "$row" description)" \
+        "$(row_labels "$row")")"
+      IFS='|' read -r triage_this triage_origin triage_reason <<< "$triage_verdict"
+      echo "    triage: $triage_this ($triage_origin) - $triage_reason"
+      if [ "$triage_this" = "hard" ]; then
+        echo "    would run on $TRIAGE_HARD_MODEL and be told to post a numbered plan first"
+      else
+        echo "    would run on the default model, no plan block"
+      fi
+    elif [ "$TRIAGE" = "yes" ]; then
+      echo "    not scored: this tick starts $MAX_CONCURRENT_RUNS ticket(s), and scoring costs a board read each"
+    fi
   done
   echo "$picked ticket(s) would be picked up; nothing was started."
   exit 0
@@ -486,6 +635,20 @@ print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:120
   fi
   key="$task_id:$comment_id"
 
+  # Scored before the run starts, because both things the score decides (which
+  # model, and whether the agent has to plan first) have to be settled before
+  # the first token is spent.
+  TRIAGE_THIS="easy"
+  if [ "$TRIAGE" = "yes" ]; then
+    triage_verdict="$(triage_score "$ref" "$task_id" "$board" "$title" "$description" \
+                        "$(row_labels "$row")")"
+    IFS='|' read -r TRIAGE_THIS triage_origin triage_reason <<< "$triage_verdict"
+    if [ "$triage_origin" = "new" ]; then
+      triage_record "$ref" "$task_id" "$board" "$TRIAGE_THIS" "$triage_reason"
+    fi
+    log "triage $ref: $TRIAGE_THIS ($triage_reason)"
+  fi
+
   # Three places a prompt can come from, most specific first. An agent with its
   # own job (answer questions, groom a board) says so in PROMPT_FILE and that
   # wins; otherwise the board's adapter writes the prompt if it has an opinion;
@@ -514,6 +677,10 @@ $description
 
 Latest comment: ${comment_text:-none}
 
+When you are stuck, and you have already tried two different approaches, run
+\`agent-advisor "<one precise question>"\` and read the answer before you try a
+third. Two calls for this whole run; it refuses the third.
+
 You are $AGENT_NAME. Do the work, then post your reply with
 \`$BOARD_CLI comment add $ref --text '<p>your reply in HTML block tags</p>'\`
 as this agent, and move the ticket per the skills index. Do not ask for
@@ -532,6 +699,33 @@ edit; the evals check on push is the gate. A fact (a number, a name, a date,
 a path) goes into a doc or the ticket, never into a skill; a rule (always or
 never do X) goes into the skill file. If you are unsure which: would it still
 be true for a different customer? Yes is a rule, no is a fact."
+  fi
+
+  # A hard ticket gets two things the default path does not: a stronger model,
+  # and an instruction to say what it is about to do before it does it. The
+  # plan is the cheapest place to catch a wrong root cause, and it is a comment
+  # a human can disagree with before the code exists.
+  if [ "$TRIAGE_THIS" = "hard" ]; then
+    mkdir -p "$MODEL_OVERRIDE_DIR"
+    read -r -a TRIAGE_ARGV <<< "$MODEL_CLI"
+    if [ -f "$MODEL_OVERRIDE_DIR/$ref" ]; then
+      log "triage $ref: hard, but an override file is already there, leaving it alone"
+    else
+      printf '%s model %s\n' "${TRIAGE_ARGV[0]}" "$TRIAGE_HARD_MODEL" > "$MODEL_OVERRIDE_DIR/$ref"
+      log "triage $ref: hard, running on $TRIAGE_HARD_MODEL"
+    fi
+    PROMPT="This ticket is scored HARD. Before you change any code, post your
+plan as your first comment on $ref: a numbered list, exactly three points.
+
+1. The root cause you think is behind this, in one sentence.
+2. The files you are going to touch.
+3. How you will prove it is fixed.
+
+That plan is one of the three comments you get for this whole run, not an
+extra one. Post it, then do the work, then post your result comment. Do not
+post a fourth comment to say the plan is done.
+
+$PROMPT"
   fi
 
   RUN_DIR="${AGENT_REPO:-}"
@@ -571,11 +765,29 @@ be true for a different customer? Yes is a rule, no is a fact."
       log "model override for $ref: $ov_model"
     fi
   fi
+  # What agent-advisor needs to answer a question about this ticket, and the
+  # counter that caps it at two. Written per run: the cap is a run's budget,
+  # not a ticket's, so a ticket picked up again tomorrow starts fresh.
+  mkdir -p "$ADVISOR_DIR"
+  ADVISOR_CONTEXT="$ADVISOR_DIR/$SLUG-$ref.json"
+  ADVISOR_COUNTER="$ADVISOR_DIR/$SLUG-$ref.count"
+  REF="$ref" URL="$url" TITLE="$title" DESCRIPTION="$description" TASK_ID="$task_id" \
+  BOARD="$board" TOKEN_FILE="$TOKEN_FILE" ADAPTER="$BOARD_ADAPTER" python3 -c '
+import json, os
+print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
+                  "title": os.environ["TITLE"], "description": os.environ["DESCRIPTION"],
+                  "task_id": os.environ["TASK_ID"], "board": os.environ["BOARD"],
+                  "token_file": os.environ["TOKEN_FILE"],
+                  "adapter": os.environ["ADAPTER"]}))' > "$ADVISOR_CONTEXT"
+  printf '0\n' > "$ADVISOR_COUNTER"
+
   (
     # The run happens where the agent's work lives, so the model CLI sees the
     # repo it is meant to change and nothing else.
     if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
     AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
+    AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER" \
+    AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI" \
     PATH="$(dirname "$BOARD_CLI"):$PATH" \
       "${MODEL_ARGV[@]}" "$PROMPT"
   ) >> "$LOG" 2>"$ERRFILE"
