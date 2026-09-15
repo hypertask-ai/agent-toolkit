@@ -238,7 +238,15 @@ for task in doc.get("tasks") or []:
 }
 
 # adapter_latest_comment <token-file> <task-id> <board-id>
-# JSON {"id":..., "html":..., "author":...} or an empty line when there is none.
+# JSON {"id":..., "html":..., "author":..., "agent_id":...} or an empty line
+# when there is none.
+#
+# A comment's real actor is the "agent" field, not "creator": every comment
+# posted through an agent's own board CLI still carries the account owner as
+# creator, because the token is scoped under that account. "agent" is null
+# only for a comment a person typed themselves, so author here is the agent's
+# name when one posted it, the creator's name otherwise, and agent_id is set
+# only in the first case.
 adapter_latest_comment() {
   local token_file="$1" task_id="$2" board_id="$3" json
   json="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")"
@@ -252,13 +260,128 @@ if not comments:
 def key(comment):
     return (comment.get("createdAt") or "", comment.get("id") or 0)
 newest = max(comments, key=key)
-author = newest.get("user") or newest.get("author") or {}
+agent = newest.get("agent") if isinstance(newest.get("agent"), dict) else None
+creator = newest.get("creator") if isinstance(newest.get("creator"), dict) else {}
+author = (agent or creator).get("displayName") or ""
 print(json.dumps({
     "id": newest.get("id"),
-    "html": newest.get("text") or newest.get("comment") or newest.get("html") or "",
-    "author": (author.get("displayName") if isinstance(author, dict) else str(author)) or "",
+    "html": newest.get("text") or newest.get("commentText") or newest.get("html") or "",
+    "author": author,
+    "agent_id": (agent or {}).get("id") or "",
 }))
 '
+}
+
+# _ht_owned_row <token-file> <task-id> <row-json> <board-id> <agent-id>
+# Given a candidate row (already known to be assigned to this agent, or to
+# have at least one comment) and its task id, prints the same row with
+# "trigger": "new_comment" added when its newest comment is a human's and
+# this agent owns the ticket, or nothing at all. One comments read.
+#
+# Ownership here is assigned, or having posted the most recent agent comment
+# before this one: the "claimed by a comment, never assigned" case a plain
+# Q&A agent needs, since it has no claim step of its own. A ticket only ever
+# claimed in words no comment carries (rare, and unusual for this board's own
+# claim-ticket.sh, which assigns) is outside this check's reach.
+_ht_owned_row() {
+  local token_file="$1" task_id="$2" row="$3" board_id="$4" agent_id="$5" comments
+  comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}" 2>/dev/null)" || return 0
+  ROW="$row" CJ="$comments" AID="$agent_id" python3 -c '
+import json, os, sys
+row = json.loads(os.environ["ROW"])
+doc = json.loads(os.environ["CJ"])
+aid = os.environ["AID"]
+comments = doc.get("comments") or []
+if not comments:
+    sys.exit(0)
+comments.sort(key=lambda c: (c.get("createdAt") or "", c.get("id") or 0))
+newest = comments[-1]
+# A comment posted by any agent, this one or another, is not new work for a
+# human-reply trigger: the thread already has the last word from an agent.
+if isinstance(newest.get("agent"), dict):
+    sys.exit(0)
+assigned = aid in (row.get("agent_ids") or [])
+last_agent = None
+for c in reversed(comments[:-1]):
+    a = c.get("agent")
+    if isinstance(a, dict):
+        last_agent = a
+        break
+claimed = bool(last_agent) and str(last_agent.get("id") or "") == aid
+if not (assigned or claimed):
+    sys.exit(0)
+row["trigger"] = "new_comment"
+print(json.dumps(row))
+'
+}
+
+# adapter_new_comments_on_owned <token-file> <board-id> <agent-id> <agent-name>
+# Optional: core calls this only if it is defined (declare -F), the same way
+# it calls adapter_pick_rank. Prints one row per ticket, same shape as
+# adapter_list_candidates plus "trigger": "new_comment", for every ticket this
+# agent owns whose newest comment is a human's -- in any section, not only
+# WATCH_SECTIONS, because a ticket this agent claimed can move to a review
+# column the poll never watches, and a reply there would otherwise be
+# invisible. Bounded by OWNED_COMMENT_READ_CAP (default 20) comments reads per
+# tick, assigned tickets checked first: a busy board must not turn one poll
+# tick into dozens of extra calls.
+adapter_new_comments_on_owned() {
+  local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4"
+  local one json rows cand cand_id reads=0 cap="${OWNED_COMMENT_READ_CAP:-20}"
+  for one in $(printf '%s' "$board_id" | tr ',' ' '); do
+    [ -n "$one" ] || continue
+    json="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&limit=100")"
+    rows="$(printf '%s' "$json" | BOARD="$one" AID="$agent_id" python3 -c '
+import json, os, sys
+board = os.environ["BOARD"]
+aid = os.environ["AID"]
+doc = json.load(sys.stdin)
+assigned_rows, commented_rows = [], []
+for task in doc.get("tasks") or []:
+    section = str(task.get("section") or "")
+    if section.casefold() in ("done", "archive", "shipped"):
+        continue
+    agent_ids = []
+    assignees = task.get("assignees") or []
+    for who in assignees:
+        a = who.get("agent") if isinstance(who, dict) else None
+        if isinstance(a, dict) and a.get("id"):
+            agent_ids.append(str(a["id"]))
+    labels = []
+    for label in task.get("labels") or []:
+        if isinstance(label, dict):
+            name = label.get("name") or label.get("title") or label.get("label") or ""
+        else:
+            name = str(label)
+        if name:
+            labels.append(str(name).strip().casefold())
+    ref = str(task.get("ticketNumber") or "")
+    index = ref.rsplit("-", 1)[-1] if "-" in ref else str(task.get("id"))
+    row = {
+        "id": task.get("id"), "ref": ref, "section": section,
+        "title": task.get("title") or "", "description": task.get("description") or "",
+        "agent_ids": agent_ids, "assignee_count": len(assignees), "labels": labels,
+        "comment_count": task.get("commentCount") or 0, "board": board,
+        "url": "https://app.hypertask.ai/detail/project-%s/%s" % (board, index),
+    }
+    if aid in agent_ids:
+        assigned_rows.append(row)
+    elif row["comment_count"] > 0:
+        commented_rows.append(row)
+for row in assigned_rows + commented_rows:
+    print(json.dumps(row))
+')"
+    while IFS= read -r cand; do
+      [ -n "$cand" ] || continue
+      if [ "$reads" -ge "$cap" ]; then
+        warn "adapter_new_comments_on_owned: hit OWNED_COMMENT_READ_CAP=$cap on board $one, the rest wait for the next tick"
+        break
+      fi
+      reads=$((reads + 1))
+      cand_id="$(ROW="$cand" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["id"])')"
+      _ht_owned_row "$token_file" "$cand_id" "$cand" "$one" "$agent_id"
+    done <<< "$rows"
+  done
 }
 
 # The marker an @mention of this agent leaves in stored comment HTML:

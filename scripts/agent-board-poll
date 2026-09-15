@@ -169,7 +169,7 @@ rank_order() {
 }
 
 # Candidates that passed every gate, waiting to be ranked against each other.
-ELIGIBLE=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=()
+ELIGIBLE=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=(); E_REASON=()
 
 # ---------- one tick at a time ----------
 # The systemd unit is Type=oneshot, so systemd already refuses a second run
@@ -185,7 +185,35 @@ if [ "$DRY_RUN" = "yes" ]; then
   echo "agent $AGENT_NAME ($AGENT_ID) on board $BOARD_ID, sections: $WATCH_SECTIONS"
 fi
 
+# A third source of candidates, alongside the board's own list: tickets this
+# agent already owns, wherever they now sit. A ticket claimed here can move to
+# a review column outside WATCH_SECTIONS, and a reply there is invisible to
+# the read above. adapter_new_comments_on_owned is optional, the same way
+# adapter_pick_rank and adapter_run_prompt are: an adapter that has not
+# implemented it is simply skipped, never a hard stop. Rows are merged and
+# de-duplicated by id, first occurrence wins.
+if declare -F adapter_new_comments_on_owned >/dev/null 2>&1; then
+  OWNED_ROWS="$(adapter_new_comments_on_owned "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" 2>>"$LOG")" || OWNED_ROWS=""
+else
+  OWNED_ROWS=""
+fi
 CANDIDATES="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "$WATCH_SECTIONS")"
+if [ -n "$OWNED_ROWS" ]; then
+  CANDIDATES="$(printf '%s\n%s\n' "$CANDIDATES" "$OWNED_ROWS" | python3 -c '
+import json, sys
+seen = set()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    row = json.loads(line)
+    key = row.get("id")
+    if key in seen:
+        continue
+    seen.add(key)
+    print(line)
+')"
+fi
 
 started=0
 picked=0
@@ -242,12 +270,19 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
     fi
   fi
 
+  # A row from adapter_new_comments_on_owned carries its own trigger, because
+  # deciding it needed the full comment history, not just the newest comment
+  # this loop already has. Core does not recompute that; it only reads the
+  # verdict and folds it in like any other reason.
+  trigger="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get("trigger") or "")')"
+
   reason=""
   if [ "$assigned" = "yes" ]; then reason="assigned"; fi
   if [ "$mentioned" = "yes" ]; then reason="${reason:+$reason+}mentioned"; fi
   if [ -z "$reason" ] && [ "$CLAIM_UNASSIGNED" = "yes" ] && [ "$unclaimed" = "yes" ]; then
     reason="unclaimed"
   fi
+  if [ -n "$trigger" ]; then reason="${reason:+$reason+}$trigger"; fi
   [ -n "$reason" ] || continue
 
   # How this ticket ranks against the others this tick, and why. The board
@@ -305,6 +340,7 @@ sys.exit(0 if author and author == os.environ["NAME"].strip().casefold() else 1)
   E_COMMENT+=("$comment_json")
   E_WHY+=("$why")
   E_TRIES+=("$tries")
+  E_REASON+=("$reason")
 done <<< "$CANDIDATES"
 
 if [ "$DRY_RUN" = "yes" ]; then
@@ -328,6 +364,7 @@ for i in $(rank_order); do
   comment_json="${E_COMMENT[$i]}"
   tries="${E_TRIES[$i]}"
   why="${E_WHY[$i]}"
+  reason="${E_REASON[$i]}"
   task_id="$(row_field "$row" id)"
   ref="$(row_field "$row" ref)"
   title="$(row_field "$row" title)"
@@ -341,6 +378,15 @@ for i in $(rank_order); do
 import html, json, os, re
 doc = json.loads(os.environ["CJ"])
 print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:1200])')"
+    # A comment reaching the ticket only because a human replied on a ticket
+    # this agent owns is not "the latest comment": it is new instruction, and
+    # the prompt should read that way instead of as passive background.
+    case "$reason" in
+      *new_comment*)
+        comment_author="$(CJ="$comment_json" python3 -c 'import json,os;print(json.loads(os.environ["CJ"]).get("author") or "")')"
+        comment_text="New instruction from ${comment_author:-a human}: ${comment_text:-(no text)}"
+        ;;
+    esac
   fi
   key="$task_id:$comment_id"
 
