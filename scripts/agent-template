@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # agent-template: the template talking about itself.
 #
-# One subcommand today:
+# Two subcommands today:
 #
 #   agent-template feedback --what "<one sentence>" --got <file or text> \
 #       --expected "<what should have happened>" \
 #       [--adapter hypertask|linear|none] [--kind bug|rule] \
-#       [--agent <slug>] [--dry-run] [--opt-out]
+#       [--agent <slug>] [--dry-run] [--opt-out] \
+#       [--case --check '<predicate> ["<arg>"]']
 #
-# Run it the moment a human corrects your output. It files the correction on
-# the feedback board so it can become a replayable check, instead of dying in
-# a chat window nobody reads again.
+#   agent-template report [--days N]
+#
+# Run feedback the moment a human corrects your output. It files the
+# correction on the feedback board so it can become a replayable check,
+# instead of dying in a chat window nobody reads again.
 #
 #   --what      one sentence: what went wrong
 #   --got       the bad output: a file path, or the text itself
@@ -21,6 +24,18 @@
 #   --dry-run   print the ticket body, send nothing
 #   --opt-out   this run sends nothing (the conf key FEEDBACK_OPT_OUT=yes
 #               turns sending off for every run)
+#   --case      also propose this as a replayable eval case, appended to
+#               evals/proposed.jsonl in the AGENT_TEMPLATE_REPO checkout
+#               (default ~/projects/vstack); the Monday timer
+#               (agent-template-weekly) promotes it into evals/cases.jsonl
+#               once it passes its own check. Needs --check.
+#   --check     a predicate name from the allowlist in evals/run-evals.sh
+#               (starts_with_block_tag, has_section "<title>",
+#               is_full_https_url), with its argument if it takes one.
+#
+# report prints how many corrections were filed in the last N days (default
+# 7) and how many of those were repeats of something already known, from the
+# local log every feedback call appends to.
 #
 # Failure contract: ERROR: <what happened>. Do this next: <one step>, non-zero.
 
@@ -37,7 +52,12 @@ FEEDBACK_BOARD_ID="${FEEDBACK_BOARD_ID:-5500}"
 FEEDBACK_BOARD_SECTION="${FEEDBACK_BOARD_SECTION:-Inbox}"
 FEEDBACK_BOARD_URL="${FEEDBACK_BOARD_URL:-https://app.hypertask.ai/project?id=5500}"
 
-usage() { sed -n '2,27p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,40p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+# Every feedback call, sent or not, leaves one line here: the local record
+# `report` reads. State, not a board write, so it needs no credentials.
+FEEDBACK_LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-template"
+FEEDBACK_LOG="$FEEDBACK_LOG_DIR/feedback.jsonl"
 
 # ---------- subcommand ----------
 [ $# -gt 0 ] || { usage; exit 0; }
@@ -45,8 +65,45 @@ case "$1" in
   -h|--help|help) usage; exit 0 ;;
   version) cat "$CORE_ROOT/VERSION"; exit 0 ;;
   feedback) shift ;;
+  report) shift; SUBCOMMAND="report" ;;
   *) die "unknown subcommand $1" "run agent-template --help" ;;
 esac
+
+if [ "${SUBCOMMAND:-feedback}" = "report" ]; then
+  DAYS=7
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --days) DAYS="${2:?--days needs a number}"; shift 2 ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option $1" "run agent-template report --help" ;;
+    esac
+  done
+  [ -f "$FEEDBACK_LOG" ] || { echo "no corrections logged yet at $FEEDBACK_LOG"; exit 0; }
+  DAYS="$DAYS" python3 -c '
+import datetime, json, os, sys
+cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=int(os.environ["DAYS"]))
+total, repeats, rows = 0, 0, []
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for line in fh:
+        line = line.strip()
+        if not line:
+            continue
+        row = json.loads(line)
+        when = datetime.datetime.fromisoformat(row["date"])
+        if when < cutoff:
+            continue
+        total += 1
+        if row.get("repeated"):
+            repeats += 1
+        rows.append(row)
+print("=== corrections, last %s day(s) ===" % os.environ["DAYS"])
+print("%d filed, %d repeated" % (total, repeats))
+for row in rows:
+    flag = "REPEAT" if row.get("repeated") else "new   "
+    print("  %s %-4s %s" % (flag, row.get("kind", ""), row.get("what", "")[:100]))
+' "$FEEDBACK_LOG"
+  exit 0
+fi
 
 WHAT=""
 GOT=""
@@ -56,6 +113,8 @@ KIND="bug"
 SLUG=""
 DRY_RUN="no"
 OPT_OUT="no"
+CASE_IT="no"
+CHECK=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -67,6 +126,8 @@ while [ $# -gt 0 ]; do
     --agent) SLUG="${2:?--agent needs a slug}"; shift 2 ;;
     --dry-run) DRY_RUN="yes"; shift ;;
     --opt-out) OPT_OUT="yes"; shift ;;
+    --case) CASE_IT="yes"; shift ;;
+    --check) CHECK="${2:?--check needs a predicate name}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option $1" "run agent-template feedback --help" ;;
   esac
@@ -82,6 +143,15 @@ case "$KIND" in
   bug|rule) ;;
   *) die "--kind must be bug or rule, got '$KIND'" "pass --kind bug or --kind rule" ;;
 esac
+if [ "$CASE_IT" = "yes" ]; then
+  [ -n "$CHECK" ] || die "--case needs --check" \
+    "pass --check '<predicate name>', one of starts_with_block_tag, has_section \"<title>\", is_full_https_url"
+  case "${CHECK%% *}" in
+    starts_with_block_tag|has_section|is_full_https_url) ;;
+    *) die "--check '$CHECK' is not on the allowlist" \
+          "pass one of starts_with_block_tag, has_section \"<title>\", is_full_https_url; evals/run-evals.sh names the full list" ;;
+  esac
+fi
 
 # ---------- who is reporting ----------
 # The poll runner puts AGENT_NAME and AGENT_BOARD_CLI in the child's
@@ -124,10 +194,60 @@ if len(what) > 78:
     what = what[:75].rstrip() + "..."
 print("%s: %s" % (os.environ["KIND"], what))')"
 
+# ---------- repeated? ----------
+# A correction is a repeat when its normalized sentence already matches an
+# existing case id, a proposed one, or a line already accepted into
+# PENDING-FIXES.md. A crude word-overlap check, on purpose: it only has to
+# catch "this again", not stand in for the model that judges the ticket.
+TEMPLATE_EVALS="$CORE_ROOT/evals"
+REPEATED="$(WHAT="$WHAT" CASES="$TEMPLATE_EVALS/cases.jsonl" \
+  PROPOSED="$TEMPLATE_EVALS/proposed.jsonl" PENDING="$TEMPLATE_EVALS/PENDING-FIXES.md" \
+  python3 -c '
+import json, os, re
+
+def words(text):
+    return {w for w in re.findall(r"[a-z0-9]+", text.casefold()) if len(w) > 2}
+
+target = words(os.environ["WHAT"])
+if not target:
+    print("false")
+    raise SystemExit
+
+known = []
+for path_key in ("CASES", "PROPOSED"):
+    path = os.environ[path_key]
+    if not os.path.isfile(path):
+        continue
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                case = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            known.append(case.get("id", "").replace("-", " "))
+
+pending = os.environ["PENDING"]
+if os.path.isfile(pending):
+    with open(pending, encoding="utf-8") as fh:
+        known.extend(fh.readlines())
+
+for line in known:
+    overlap = words(line)
+    if not overlap:
+        continue
+    if len(target & overlap) / len(target) >= 0.6:
+        print("true")
+        raise SystemExit
+print("false")
+')"
+
 BODY_FILE="$(mktemp)"
 trap 'rm -f "$BODY_FILE"' EXIT
 WHAT="$WHAT" GOT_TEXT="$GOT_TEXT" EXPECTED="$EXPECTED" REPO="$REPO" \
-ADAPTER="$ADAPTER" VERSION="$VERSION" AGENT_NAME="$AGENT_NAME" \
+ADAPTER="$ADAPTER" VERSION="$VERSION" AGENT_NAME="$AGENT_NAME" REPEATED="$REPEATED" \
 python3 - "$BODY_FILE" <<'PYEOF'
 import html, os, sys
 
@@ -149,6 +269,7 @@ parts = [
     "<li>adapter: <code>%s</code></li>" % esc(os.environ["ADAPTER"]),
     "<li>template version: <code>%s</code></li>" % esc(os.environ["VERSION"]),
     "<li>agent: <code>%s</code></li>" % esc(os.environ["AGENT_NAME"]),
+    "<li>repeated: <code>%s</code></li>" % esc(os.environ["REPEATED"]),
     "</ul>",
 ]
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
@@ -160,6 +281,7 @@ case "$ADAPTER" in
   hypertask|linear) LABELS="$LABELS,adapter:$ADAPTER" ;;
   none) LABELS="$LABELS,core" ;;
 esac
+[ "$REPEATED" = "true" ] && LABELS="$LABELS,repeated"
 
 print_and_paste() {
   # The honest fallback: no board write is possible, so hand the body to
@@ -171,9 +293,62 @@ print_and_paste() {
     "$FEEDBACK_BOARD_URL" "$FEEDBACK_BOARD_SECTION"
 }
 
+# log_feedback : one line in the local log every call leaves, sent or not.
+# agent-template report reads this; it is not a board write and needs no
+# credentials.
+log_feedback() {
+  mkdir -p "$FEEDBACK_LOG_DIR"
+  WHAT="$WHAT" KIND="$KIND" ADAPTER="$ADAPTER" AGENT_NAME="$AGENT_NAME" \
+  REPEATED="$REPEATED" CASE_IT="$CASE_IT" python3 -c '
+import datetime, json, os
+print(json.dumps({
+    "date": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "what": " ".join(os.environ["WHAT"].split()),
+    "kind": os.environ["KIND"],
+    "adapter": os.environ["ADAPTER"],
+    "agent": os.environ["AGENT_NAME"],
+    "repeated": os.environ["REPEATED"] == "true",
+    "case": os.environ["CASE_IT"] == "yes",
+}))' >> "$FEEDBACK_LOG"
+}
+
+# append_proposed_case <source-url> : evals/proposed.jsonl lives in the
+# vstack checkout, not $CORE_ROOT -- install.sh empties $CORE_ROOT/evals on
+# every install, so anything appended to the installed copy is thrown away
+# on the next one.
+append_proposed_case() {
+  local source="$1" repo_dir proposed
+  [ "$CASE_IT" = "yes" ] || return 0
+  repo_dir="${AGENT_TEMPLATE_REPO:-$HOME/projects/vstack}"
+  proposed="$repo_dir/templates/agent-skills/create-agent/evals/proposed.jsonl"
+  if [ ! -d "$(dirname "$proposed")" ]; then
+    warn "no evals folder at $(dirname "$proposed"): the proposed case was not written. Do this next: set AGENT_TEMPLATE_REPO to the vstack checkout"
+    return 0
+  fi
+  CASE_ID="$(WHAT="$WHAT" python3 -c '
+import os, re, time
+slug = re.sub(r"[^a-z0-9]+", "-", os.environ["WHAT"].casefold()).strip("-")[:50]
+print("%s-%d" % (slug or "case", int(time.time())))')"
+  WHAT="$WHAT" KIND="$KIND" ADAPTER="$ADAPTER" CHECK="$CHECK" \
+  EXPECTED="$EXPECTED" SOURCE="$source" CASE_ID="$CASE_ID" python3 -c '
+import datetime, json, os
+print(json.dumps({
+    "id": os.environ["CASE_ID"],
+    "adapter": os.environ["ADAPTER"],
+    "kind": os.environ["KIND"],
+    "input": os.environ["EXPECTED"].rstrip(),
+    "check": os.environ["CHECK"],
+    "source": os.environ["SOURCE"],
+    "added": datetime.date.today().isoformat(),
+}))' >> "$proposed"
+  echo "proposed case $CASE_ID appended to $proposed"
+}
+
 if [ "$OPT_OUT" = "yes" ]; then
   echo "feedback is opted out (FEEDBACK_OPT_OUT=yes or --opt-out): nothing sent."
   print_and_paste
+  log_feedback
+  append_proposed_case "$FEEDBACK_BOARD_URL (not filed: opted out)"
   exit 0
 fi
 
@@ -190,6 +365,8 @@ fi
 if [ "$ADAPTER" != "hypertask" ] || [ -z "$BOARD_CLI" ] || [ ! -x "$BOARD_CLI" ]; then
   echo "no board CLI for this agent, so this correction cannot be filed automatically." >&2
   print_and_paste
+  log_feedback
+  append_proposed_case "$FEEDBACK_BOARD_URL (not filed: no board CLI)"
   exit 0
 fi
 
@@ -199,7 +376,7 @@ if OUT="$("$BOARD_CLI" task create \
       --title "$TITLE" \
       --description-file "$BODY_FILE" \
       --labels "$LABELS" 2>&1)"; then
-  printf '%s\n' "$OUT" | python3 -c '
+  FILED_LINE="$(printf '%s\n' "$OUT" | python3 -c '
 import json, re, sys
 raw = sys.stdin.read()
 start, end = raw.find("{"), raw.rfind("}")
@@ -219,10 +396,16 @@ if index and project:
     print("filed %s https://app.hypertask.ai/detail/project-%s/%s" % (ref, project, index))
 else:
     print("filed: %s" % raw.strip()[:200])
-'
+')"
+  echo "$FILED_LINE"
+  FILED_URL="$(printf '%s\n' "$FILED_LINE" | grep -oE 'https://\S+' | head -1)"
+  log_feedback
+  append_proposed_case "${FILED_URL:-$FEEDBACK_BOARD_URL}"
 else
   echo "the board refused the ticket, so here it is to paste by hand:" >&2
   printf '%s\n' "$OUT" >&2
   print_and_paste
+  log_feedback
+  append_proposed_case "$FEEDBACK_BOARD_URL (not filed: the board refused it)"
   exit 0
 fi

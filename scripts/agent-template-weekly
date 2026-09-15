@@ -72,6 +72,7 @@ TEMPLATE_DIR="$REPO/templates/agent-skills/create-agent"
 CASES="$TEMPLATE_DIR/evals/cases.jsonl"
 PENDING="$TEMPLATE_DIR/evals/PENDING-FIXES.md"
 RUN_EVALS="$TEMPLATE_DIR/evals/run-evals.sh"
+PROPOSED="$TEMPLATE_DIR/evals/proposed.jsonl"
 [ -f "$CASES" ] || die "no case file at $CASES" \
   "check --repo points at the template checkout"
 
@@ -98,6 +99,7 @@ path_is_allowed() {
   case "$1" in
     templates/agent-skills/create-agent/evals/cases.jsonl) return 0 ;;
     templates/agent-skills/create-agent/evals/PENDING-FIXES.md) return 0 ;;
+    templates/agent-skills/create-agent/evals/proposed.jsonl) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -133,6 +135,79 @@ PYEOF
 DATE="$(date +%Y-%m-%d)"
 BRANCH="template-feedback/$DATE"
 
+# ---------- branch ----------
+# Moved ahead of the inbox read: promotion below needs the same branch, and
+# runs whether or not the inbox has anything in it.
+if [ "$DRY_RUN" = "no" ]; then
+  (cd "$REPO" && git rev-parse --verify "$BRANCH" >/dev/null 2>&1) \
+    || (cd "$REPO" && git branch "$BRANCH" HEAD)
+  (cd "$REPO" && git symbolic-ref --short HEAD) >/dev/null
+  START_BRANCH="$(cd "$REPO" && git symbolic-ref --short HEAD)"
+  (cd "$REPO" && git checkout --quiet "$BRANCH")
+  trap '(cd "$REPO" && git checkout --quiet "$START_BRANCH" >/dev/null 2>&1) || true' EXIT
+fi
+
+ACCEPTED=0
+REJECTED=0
+PROMOTED=0
+handled=0
+
+# ---------- promote proposed cases ----------
+# agent-template feedback --case already vetted these against the allowlist
+# and attached a predicate; no model judgment is needed here, only a replay.
+# A proposed case that fails its own check stays in proposed.jsonl for a
+# human to look at rather than becoming a red check on every future push.
+if [ "$DRY_RUN" = "no" ] && [ -s "$PROPOSED" ]; then
+  KEPT="$(mktemp)"
+  while IFS= read -r pline; do
+    [ -n "$pline" ] || continue
+    pid="$(printf '%s' "$pline" | python3 -c 'import json,sys
+try:
+    print(json.loads(sys.stdin.read()).get("id",""))
+except Exception:
+    print("")' 2>/dev/null)"
+    valid="$(printf '%s' "$pline" | python3 -c '
+import json, sys
+ALLOWED = ("starts_with_block_tag", "has_section", "is_full_https_url")
+try:
+    case = json.loads(sys.stdin.read())
+except json.JSONDecodeError:
+    print("no"); sys.exit()
+for key in ("id", "adapter", "kind", "input", "check", "source", "added"):
+    if not isinstance(case.get(key), str) or not case[key].strip():
+        print("no"); sys.exit()
+if case["adapter"] not in ("hypertask", "linear", "none") or case["kind"] not in ("bug", "rule"):
+    print("no"); sys.exit()
+if case["check"].split(" ", 1)[0] not in ALLOWED:
+    print("no"); sys.exit()
+print("yes")')"
+    if [ "$valid" != "yes" ] || [ -z "$pid" ]; then
+      log "proposed case skipped: does not match the accepted case shape ($pline)"
+      printf '%s\n' "$pline" >> "$KEPT"
+      continue
+    fi
+    if grep -qF "\"id\": \"$pid\"" "$CASES" 2>/dev/null; then
+      log "proposed case $pid already promoted, dropping the duplicate"
+      continue
+    fi
+    printf '%s\n' "$pline" >> "$CASES"
+    if bash "$RUN_EVALS" --case "$pid" >/dev/null 2>&1; then
+      log "promoted proposed case $pid"
+      PROMOTED=$((PROMOTED + 1))
+    else
+      sed -i '$ d' "$CASES"
+      log "proposed case $pid rejected: does not pass its own check, left in proposed.jsonl"
+      printf '%s\n' "$pline" >> "$KEPT"
+    fi
+  done < "$PROPOSED"
+  cp "$KEPT" "$PROPOSED"
+  rm -f "$KEPT"
+  if [ "$PROMOTED" -gt 0 ]; then
+    (cd "$REPO" && git add "$CASES" "$PROPOSED" \
+      && git commit --quiet -m "template-feedback: promote $PROMOTED proposed case(s) to cases.jsonl")
+  fi
+fi
+
 # ---------- read the inbox ----------
 LIST_JSON="$("$BOARD_CLI" task list --project "$BOARD_ID" --section "$INBOX" --limit 50 --json 2>/dev/null)" \
   || die "could not read the feedback board" \
@@ -154,23 +229,8 @@ for task in doc.get("tasks") or []:
 ')"
 
 if [ -z "$TICKETS" ]; then
-  log "inbox empty${ONLY_TICKET:+ for $ONLY_TICKET}: nothing to do"
-  exit 0
+  log "inbox empty${ONLY_TICKET:+ for $ONLY_TICKET}: $PROMOTED proposed case(s) promoted, nothing else to judge"
 fi
-
-# ---------- branch ----------
-if [ "$DRY_RUN" = "no" ]; then
-  (cd "$REPO" && git rev-parse --verify "$BRANCH" >/dev/null 2>&1) \
-    || (cd "$REPO" && git branch "$BRANCH" HEAD)
-  (cd "$REPO" && git symbolic-ref --short HEAD) >/dev/null
-  START_BRANCH="$(cd "$REPO" && git symbolic-ref --short HEAD)"
-  (cd "$REPO" && git checkout --quiet "$BRANCH")
-  trap '(cd "$REPO" && git checkout --quiet "$START_BRANCH" >/dev/null 2>&1) || true' EXIT
-fi
-
-ACCEPTED=0
-REJECTED=0
-handled=0
 
 while IFS= read -r row; do
   [ -n "$row" ] || continue
@@ -370,8 +430,8 @@ if [ "$DRY_RUN" = "yes" ]; then
   exit 0
 fi
 
-if [ "$ACCEPTED" -eq 0 ]; then
-  log "no accepted tickets: no branch pushed, no pull request opened ($REJECTED rejected)"
+if [ "$ACCEPTED" -eq 0 ] && [ "$PROMOTED" -eq 0 ]; then
+  log "no accepted tickets and no promoted cases: no branch pushed, no pull request opened ($REJECTED rejected)"
   exit 0
 fi
 
@@ -393,7 +453,8 @@ BODY="$(mktemp)"
   printf '## Cases added this week\n\n'
   (cd "$REPO" && git log --format='- %s' --grep '^template-feedback:' "origin/main..$BRANCH" 2>/dev/null \
      || git log --format='- %s' --grep '^template-feedback:' -n "$ACCEPTED" "$BRANCH")
-  printf '\n%s accepted, %s rejected.\n' "$ACCEPTED" "$REJECTED"
+  printf '\n%s accepted, %s rejected, %s proposed case(s) already vetted by an agent promoted straight in.\n' \
+    "$ACCEPTED" "$REJECTED" "$PROMOTED"
 } > "$BODY"
 
 (cd "$REPO" && git push --quiet -u origin "$BRANCH")
@@ -401,7 +462,7 @@ PR_URL="$(cd "$REPO" && gh pr create --base main --head "$BRANCH" \
   --title "Template feedback, week of $DATE" --body-file "$BODY" 2>/dev/null \
   || gh pr view "$BRANCH" --json url -q .url)"
 rm -f "$BODY"
-log "pull request $PR_URL ($ACCEPTED accepted, $REJECTED rejected); auto-merge stays off"
+log "pull request $PR_URL ($ACCEPTED accepted, $REJECTED rejected, $PROMOTED promoted); auto-merge stays off"
 
 # Tell every accepted ticket where its fix went.
 (cd "$REPO" && git log --format='%s' --grep '^template-feedback:' "origin/main..$BRANCH" 2>/dev/null) \
