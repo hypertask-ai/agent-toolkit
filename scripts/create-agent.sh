@@ -165,9 +165,9 @@ if [ -n "$MISSION_FILE" ]; then
   [ -f "$MISSION_FILE" ] || die "--mission-file $MISSION_FILE does not exist" "pass a file that is there"
   MISSION="$(cat "$MISSION_FILE")"
 elif [ "$KIND" = "qa" ]; then
-  MISSION="You are $DISPLAY_NAME. You verify, you never fix. Read the literal absolute path $SKILLS_INDEX first, then only the skills it points you to, and follow them exactly. Name the skill you used in your first comment. Corrections go into the skill file, not into chat, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file."
+  MISSION="You are $DISPLAY_NAME. You verify, you never fix. Read the literal absolute path $SKILLS_INDEX first, then only the skills it points you to, and follow them exactly. Name the skill you used in your first comment. Corrections go into the skill file, not into chat, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. A session looking after you reads MAINTAINER.md next to this conf."
 else
-  MISSION="You are $DISPLAY_NAME. Step one, before anything else: open the file at the literal absolute path $SKILLS_INDEX and name the skill whose trigger matches this task in your first comment. Then follow that skill exactly, including its scripts. If no skill matches, say so and stop. Corrections go into the skill file, never into chat memory, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. Unsure which: would it still be true for a different customer? Yes is a rule, no is a fact."
+  MISSION="You are $DISPLAY_NAME. Step one, before anything else: open the file at the literal absolute path $SKILLS_INDEX and name the skill whose trigger matches this task in your first comment. Then follow that skill exactly, including its scripts. If no skill matches, say so and stop. Corrections go into the skill file, never into chat memory, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. Unsure which: would it still be true for a different customer? Yes is a rule, no is a fact. A session looking after you reads MAINTAINER.md next to this conf."
 fi
 
 # ---------- existing identity ----------
@@ -276,6 +276,9 @@ EOF
 if [ "$DRY_RUN" != "yes" ]; then
   mkdir -p "$CONFIG_DIR"
   core_write_missing_keys "$CONF_FILE" "$CONF_CONTENT"
+  # One shared copy next to every bot's conf in this config dir: whoever
+  # looks after any of them starts from the same page.
+  cp -a "$CORE_ROOT/MAINTAINER.md" "$CONFIG_DIR/MAINTAINER.md" 2>/dev/null || true
 fi
 
 # ---------- 4. wiring ----------

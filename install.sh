@@ -34,13 +34,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for item in SKILL.md VERSION scripts adapters evals; do
+for item in SKILL.md MAINTAINER.md VERSION scripts adapters evals; do
   [ -e "$SRC/$item" ] || fail "$SRC/$item is missing" \
     "run install.sh from inside the template folder in the repo"
 done
 
 echo "source: $SRC"
 echo "skill:  $DEST"
+echo "docs:   $DEST/MAINTAINER.md"
 echo "bin:    $BIN/agent-board-poll -> $DEST/scripts/agent-board-poll"
 echo "bin:    $BIN/agent-template -> $DEST/scripts/agent-template"
 echo "bin:    $BIN/agent-template-weekly -> $DEST/scripts/agent-template-weekly"
@@ -54,6 +55,7 @@ fi
 mkdir -p "$DEST" "$BIN"
 rm -rf "$DEST/scripts" "$DEST/adapters" "$DEST/evals"
 cp -a "$SRC/SKILL.md" "$DEST/SKILL.md"
+cp -a "$SRC/MAINTAINER.md" "$DEST/MAINTAINER.md"
 # The version travels with the installed copy, because that is what
 # `agent-template feedback` reports and what a bug report has to name.
 cp -a "$SRC/VERSION" "$DEST/VERSION"

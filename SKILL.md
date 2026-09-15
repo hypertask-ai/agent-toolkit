@@ -282,3 +282,5 @@ one-line wrapper that reads the token file at call time.
 - `scripts/create-agent.sh --help`, `agent-board-poll --help` : every flag
 - `scripts/lib/core.sh` : the adapter contract, as a function list
 - `agent-template feedback --help`, `evals/run-evals.sh --help` : the correction loop
+- `MAINTAINER.md` in this folder (copied next to every bot's conf) : for the
+  session that looks after a bot, not the bot itself
