@@ -202,6 +202,17 @@ rule — always or never do X — goes into the skill file. If it is unclear
 which: would it still be true for a different customer? Yes means rule, no
 means fact.
 
+**Feedback:** change requests and ideas go to the Agent Template board,
+project 5500 (https://app.hypertask.ai/detail/project-5500, prefix AGTE), via
+`agent-template feedback`. A correction (above) is one shape of that same
+command; a change request or an idea is the other: `agent-template feedback
+--kind change --title "<short title>" --body "<html>"` or `--kind idea` for
+the same. Both post as this agent's own identity to the board's Inbox
+section, labelled with the kind when the board carries that label, and print
+the filed ticket's URL. Run `agent-template feedback` with no arguments for
+the board link and the three kinds. `--dry-run` renders the ticket and sends
+nothing.
+
 ## Evals
 
 `evals/cases.jsonl` holds one line per correction: the output that would have

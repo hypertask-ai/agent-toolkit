@@ -140,11 +140,27 @@ SLUG="$(core_slug "$NAME")"
 DISPLAY_NAME="$NAME"
 if [ "$KIND" = "cli" ]; then DISPLAY_NAME="$NAME CLI"; fi
 
+# --resume means "keep every existing value": a flag left off this call is
+# not "unset", it is "use whatever the conf already has". Read those back
+# (not sourced, so an unrelated key in the existing conf cannot shadow a
+# variable this script itself uses) before the flags below get validated,
+# so resuming an identity that was provisioned repo-less on purpose (an
+# answer/Q&A kind with no code to work in, like Product Bot) does not force
+# a --repo it never needed, and resuming one that already has a skills
+# index does not force --skills-index/--skills-repo again either.
+EXISTING_CONF="$(core_config_dir)/$SLUG.conf"
+if [ "$RESUME" = "yes" ] && [ -f "$EXISTING_CONF" ]; then
+  [ -n "$REPO" ] || REPO="$(sed -n 's/^AGENT_REPO="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
+  [ -n "$SKILLS_INDEX" ] || SKILLS_INDEX="$(sed -n 's/^SKILLS_INDEX="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
+  [ -n "$BOARD_ID" ] || BOARD_ID="$(sed -n 's/^BOARD_ID="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
+fi
+
 if [ -n "$REPO" ]; then core_require_abs "$REPO" "--repo"; fi
 if [ -n "$REPO" ] && [ ! -d "$REPO" ]; then
   die "--repo $REPO does not exist" "create the checkout first, or pass the right path"
 fi
-if [ "$KIND" != "cli" ] && [ -z "$REPO" ]; then
+if [ "$KIND" != "cli" ] && [ -z "$REPO" ] \
+   && ! ([ "$RESUME" = "yes" ] && [ -f "$EXISTING_CONF" ]); then
   die "--repo is missing and --kind $KIND needs somewhere to work" \
       "pass --repo /absolute/path/to/the/repo"
 fi
@@ -291,7 +307,7 @@ fi
 if [ "$BOARD" != "none" ]; then
   step 2 "install the board CLI wrapper at $BOARD_CLI (reads the token file at call time)"
   if [ "$DRY_RUN" != "yes" ]; then
-    adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI"
+    adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" "$DISPLAY_NAME"
   fi
 fi
 

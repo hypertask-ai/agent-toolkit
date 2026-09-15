@@ -154,19 +154,147 @@ PYEOF
 # A one-line wrapper so every board write is attributed to the agent. The token
 # is read from its 0600 file at call time; it is never baked into the wrapper,
 # a command line, or a prompt.
+#
+# It also enforces the comment rules a run has to follow, instead of leaving
+# them to the prompt alone: a model that has already decided the ticket
+# needs no action posted the same "Nothing from you." comment three times in
+# ten minutes (20:37, 20:44, 20:47) because nothing in the prompt can make it
+# check what it already said. This checks for real: same first line already
+# posted by this agent, or three comments already on this ticket, refuses
+# the call instead of forwarding it, and says why on stderr and in this
+# agent's own tick log, never on the ticket.
 adapter_install_board_cli() {
-  local slug="$1" token_file="$2" dest="$3"
+  local slug="$1" token_file="$2" dest="$3" agent_name="${4:-}"
   mkdir -p "$(dirname "$dest")"
   cat > "$dest" <<EOF
 #!/usr/bin/env bash
 # $slug: the board CLI acting as this agent.
 set -euo pipefail
 TOKEN_FILE="$token_file"
+AGENT_NAME="$agent_name"
+RUN_LOG="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.log"
+POSTED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.posted-comments"
 [ -r "\$TOKEN_FILE" ] || {
   echo "ERROR: cannot read \$TOKEN_FILE. Do this next: capture the agent token into that file" >&2
   exit 1
 }
-exec hypertask --token "\$(cat "\$TOKEN_FILE")" "\$@"
+TOKEN="\$(cat "\$TOKEN_FILE")"
+
+_comment_cap_note() {
+  # \$1: the message. Stderr so the model sees it now, plus the agent's own
+  # log so a human or the supervisor sees it later without opening the ticket.
+  echo "\$1" >&2
+  mkdir -p "\$(dirname "\$RUN_LOG")" 2>/dev/null || true
+  printf '%s comment-cap: %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$1" >> "\$RUN_LOG" 2>/dev/null || true
+}
+
+if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
+  REF="\$3"
+  TEXT=""
+  args=("\$@")
+  for ((i = 0; i < \${#args[@]}; i++)); do
+    case "\${args[\$i]}" in
+      --text|--body) TEXT="\${args[\$((i + 1))]:-}" ;;
+    esac
+  done
+  if [ -n "\$TEXT" ]; then
+    EXISTING="\$(hypertask --token "\$TOKEN" --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
+    VERDICT="\$(EXISTING="\$EXISTING" NEW_TEXT="\$TEXT" AGENT_NAME="\$AGENT_NAME" python3 -c '
+import json, os, re
+
+def first_line(html):
+    # The bold lead, not the whole comment: "Nothing from you." said three
+    # times with different filler after it is still the same reply. A
+    # leading <strong>/<b> is the bold-lead convention every prompt in this
+    # template uses; fall back to the first sentence when there is none.
+    stripped = html.lstrip()
+    lead = re.match(r"^\s*<(strong|b)[^>]*>(.*?)</\1>", stripped, re.IGNORECASE | re.DOTALL)
+    if lead:
+        text = re.sub(r"<[^>]+>", " ", lead.group(2))
+    else:
+        text = re.sub(r"<[^>]+>", " ", stripped)
+        text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+    return " ".join(text.split())[:80].strip().casefold()
+
+def author_of(c):
+    who = c.get("agent") or c.get("creator") or c.get("user") or {}
+    if isinstance(who, dict):
+        return str(who.get("displayName") or who.get("name") or "")
+    return str(who)
+
+try:
+    comments = json.loads(os.environ["EXISTING"]).get("comments") or []
+except json.JSONDecodeError:
+    comments = []
+agent_name = os.environ["AGENT_NAME"].strip().casefold()
+new_first = first_line(os.environ["NEW_TEXT"])
+
+mine = []
+for c in comments:
+    if agent_name and author_of(c).strip().casefold() != agent_name:
+        continue
+    text = c.get("text") or c.get("commentText") or c.get("comment") or c.get("html") or ""
+    mine.append(first_line(text))
+
+if new_first and new_first in mine:
+    print("DUP")
+elif len(mine) >= 3:
+    print("CAP")
+else:
+    print("OK")
+')"
+    case "\$VERDICT" in
+      DUP)
+        _comment_cap_note "comment add refused on \$REF: this agent already has a comment starting the same way, not posting it again"
+        exit 0 ;;
+      CAP)
+        _comment_cap_note "comment add refused on \$REF: cap reached (3 comments already on this ticket), ending this run's posting"
+        exit 0 ;;
+    esac
+    # Posted for real: run it directly (not exec) so this script can look up
+    # the id the board gave the new comment and hand it to core. Core writes
+    # that id to this agent's seen-state after the run, so the next tick's
+    # state key already matches this agent's own reply and the ticket is not
+    # picked back up as if it were untouched. Without this, only the rank-3
+    # "new work" path skipped an agent's own comment; a claimed-unfinished
+    # ticket (rank 1) had no such guard and got reprocessed every tick.
+    if OUT="\$(hypertask --token "\$TOKEN" "\$@")"; then
+      RC=0
+    else
+      RC=\$?
+    fi
+    printf '%s\n' "\$OUT"
+    if [ "\$RC" -eq 0 ]; then
+      LISTED="\$(hypertask --token "\$TOKEN" --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
+      NEWID="\$(LISTED="\$LISTED" AGENT_NAME="\$AGENT_NAME" python3 -c '
+import json, os
+
+def author_of(c):
+    who = c.get("agent") or c.get("creator") or c.get("user") or {}
+    if isinstance(who, dict):
+        return str(who.get("displayName") or who.get("name") or "")
+    return str(who)
+
+try:
+    comments = json.loads(os.environ["LISTED"]).get("comments") or []
+except json.JSONDecodeError:
+    comments = []
+agent_name = os.environ["AGENT_NAME"].strip().casefold()
+mine = [c for c in comments if not agent_name or author_of(c).strip().casefold() == agent_name]
+if mine:
+    best = max(mine, key=lambda c: c.get("id") or 0)
+    print(best.get("id") or "")
+')"
+      if [ -n "\$NEWID" ]; then
+        mkdir -p "\$(dirname "\$POSTED")" 2>/dev/null || true
+        printf '%s %s\n' "\$REF" "\$NEWID" >> "\$POSTED" 2>/dev/null || true
+      fi
+    fi
+    exit "\$RC"
+  fi
+fi
+
+exec hypertask --token "\$TOKEN" "\$@"
 EOF
   chmod 755 "$dest"
 }

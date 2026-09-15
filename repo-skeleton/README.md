@@ -20,6 +20,14 @@ nobody else can read.
 - `CHANGELOG.md` - one entry per change this agent's own scripts or reports go
   through.
 
+## Feedback
+
+Change requests and improvement ideas for the shared template go to the
+Agent Template board, project 5500
+(https://app.hypertask.ai/detail/project-5500, prefix AGTE), via
+`agent-template feedback --kind change|idea --title "<short title>" --body
+"<html>"`. Run it with no arguments for the board link and the three kinds.
+
 ## Maintainer
 
 See the create-agent skill's `MAINTAINER.md` (installed alongside this

@@ -91,6 +91,17 @@ Two packs, always in this order:
 5. Corrections repeated: same report, the `REPEAT` lines — a repeat means
    the earlier fix did not actually land.
 
+## Feedback
+
+Change requests and improvement ideas for the template go to the Agent
+Template board, project 5500 (https://app.hypertask.ai/detail/project-5500,
+prefix AGTE), via `agent-template feedback --kind change|idea --title "<short
+title>" --body "<html>"`. It posts as this bot's own identity to the board's
+Inbox section and prints the filed ticket's URL; run it with no arguments for
+a reminder of the board link and the three kinds (`bug`, `change`, `idea`).
+The paste-it-yourself fallback only shows when no token is configured for
+this agent.
+
 ## Running it by hand
 
 - `agent-board-poll --once --dry-run <slug>` — see what it would pick up, and

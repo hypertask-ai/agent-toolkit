@@ -173,6 +173,14 @@ STATE_DIR="$(core_state_dir)"
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/$SLUG.log"
 SEEN="$STATE_DIR/$SLUG.seen"
+# Comment ids this agent posted this run, one "<ref> <id>" line per comment,
+# written by the board CLI wrapper (adapter_install_board_cli) and read back
+# by core right after the run so it can add "<task_id>:<id>" to SEEN for
+# every rank, not only rank 3 "new work". Without this, a claimed-unfinished
+# ticket (rank 1) had no guard against its own reply being read back next
+# tick as if it were someone else's: the state key is the newest comment id,
+# which becomes this agent's own reply's id the moment the run finishes.
+POSTED="$STATE_DIR/$SLUG.posted-comments"
 LOCK="$STATE_DIR/$SLUG.lock"
 # The one piece of state a failure needs: when this runner last tried a ticket,
 # keyed by ticket id. Without it a ticket whose run dies on start is retried
@@ -200,7 +208,7 @@ TRIAGE_STATE_DIR="${TRIAGE_STATE_DIR:-$STATE_DIR/triage}"
 # about this ticket, and the count of how many it has already answered.
 ADVISOR_DIR="${ADVISOR_DIR:-$STATE_DIR/advisor}"
 TRIAGE_SH="$CORE_ROOT/scripts/triage.sh"
-touch "$SEEN" "$ATTEMPTS" "$LASTFAIL"
+touch "$SEEN" "$ATTEMPTS" "$LASTFAIL" "$POSTED"
 
 # attempts_recent <task-id> : how many goes this ticket has had in the window
 attempts_recent() {
@@ -265,7 +273,7 @@ EOF
     log "skill push skipped for $ref: $skills_repo is on a detached HEAD"
     return 0
   fi
-  default_branch="$(git -C "$skills_repo" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null)"
+  default_branch="$(git -C "$skills_repo" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null)" || default_branch=""
   default_branch="${default_branch#origin/}"
   [ -n "$default_branch" ] || default_branch="main"
   if [ "$current_branch" != "$default_branch" ]; then
@@ -280,7 +288,7 @@ EOF
   # repo's own root, so "outside the skills folder" has to name what belongs
   # to a skill (INDEX.md, a SKILL.md, its scripts, its own docs) rather than
   # try to name every folder a skill is not.
-  changed="$(git -C "$skills_repo" diff --name-only '@{u}...HEAD' 2>/dev/null)"
+  changed="$(git -C "$skills_repo" diff --name-only '@{u}...HEAD' 2>/dev/null)" || changed=""
   if ! printf '%s\n' "$changed" | python3 -c '
 import sys
 def allowed(rel):
@@ -549,7 +557,22 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
     reason="unclaimed"
   fi
   if [ -n "$trigger" ]; then reason="${reason:+$reason+}$trigger"; fi
-  [ -n "$reason" ] || continue
+  if [ -z "$reason" ]; then
+    # Nothing about this ticket made it eligible for this agent (not
+    # assigned, not mentioned, and either claimed already or this agent does
+    # not pick up unclaimed work). If it is a live emergency and genuinely
+    # unclaimed, that is worth a loud line: the supervisor's 5-minute alert
+    # watches the log for it, because no dev picking up an emergency within
+    # a few ticks is the signal something is stuck, not a bug in any one run.
+    if [ "$unclaimed" = "yes" ]; then
+      case ",$(row_labels "$row")," in
+        *,emergency,*)
+          log "emergency waiting, all devs busy: $ref has no free dev yet"
+          ;;
+      esac
+    fi
+    continue
+  fi
 
   # How this ticket ranks against the others this tick, and why. The board
   # answers it, not a lock file: the adapter looks at who claimed the ticket,
@@ -568,6 +591,19 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
     explain "skip  $ref: $why"
     continue
   fi
+
+  # Two labels override the board's own rank, same meaning on every board:
+  # `emergency` goes first, ahead of even an urgent ticket, and `urgent` goes
+  # ahead of everything else this agent could pick, including a ticket it
+  # still owes (rank 1) or one QA sent back (rank 2). rank_order() already
+  # sorts ascending and handles negative numbers, so this is the whole
+  # mechanism: no process is stopped for either label tonight, a dev already
+  # mid-run on something else finishes it first and picks the emergency or
+  # urgent ticket on its next tick.
+  case ",$(row_labels "$row")," in
+    *,emergency,*) rank=-2; why="$why (emergency: preempts urgent and everything else)" ;;
+    *,urgent,*) rank=-1; why="$why (urgent: ranks above this agent's own unfinished work)" ;;
+  esac
 
   # This agent's own comment is not new work. Without this an agent that
   # finishes and leaves the ticket in a watched column picks it straight back
@@ -789,6 +825,10 @@ $PROMPT"
   fi
 
   ERRFILE="$STATE_DIR/$SLUG.stderr"
+  # Cleared before every run: the wrapper appends to it as this run posts
+  # comments, and only this run's own posts belong to what gets read back
+  # below once it finishes.
+  : > "$POSTED"
   log "run start $ref key=$key dir=${RUN_DIR:-.} attempt=$((tries + 1)): $why"
   # Which skills this run is about to read, by version. A bot behaving oddly is
   # usually a bot reading an old pack, and this is the line that shows it.
@@ -843,14 +883,14 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
   rc=$?
   set -e
   cat "$ERRFILE" >> "$LOG" 2>/dev/null || true
-  # Whether or not this ticket's own run succeeded, a skill edit the agent
-  # made along the way is checked and pushed on its own: it lives in the
-  # skills repo, not this ticket's worktree, and its fate is not this
-  # ticket's fate.
-  push_skill_commits "$ref"
-  if [ "$WORKDIR_MODE" = "per-run" ]; then
-    core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
-  fi
+  # The seen-key and run-done bookkeeping happen first, before any optional
+  # post-run step: push_skill_commits below touches a second git repo (the
+  # skills pack) and a broken clone there (no upstream, no origin/HEAD) must
+  # never cost this ticket its own result. It used to run first and, being
+  # unguarded, a failure inside it under set -e exited the whole script here:
+  # no "run done" line, no seen-key write, so the next tick saw the same
+  # newest-comment key as untouched and reprocessed a ticket this agent had
+  # already answered, over and over until the attempt budget stopped it.
   if [ "$rc" -ne 0 ]; then
     # A failure is written where a human already looks. The ticket does not
     # move: where it sits is the record of how far this got. The state key is
@@ -872,7 +912,28 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       "$ref" "$rc" "$LOG" "$((RETRY_LIMIT - tries - 1))" "$RETRY_LIMIT" >&2
   else
     printf '%s\n' "$key" >> "$SEEN"
+    # Every comment this run posted on this ticket is also this agent's own
+    # last word on it: record each one so the next tick's state key (built
+    # from whatever is now the newest comment) already matches something in
+    # SEEN, at every rank, not only the rank-3 "new work" case that already
+    # had its own separate guard above.
+    if [ -s "$POSTED" ]; then
+      while read -r posted_ref posted_id; do
+        [ "$posted_ref" = "$ref" ] || continue
+        [ -n "$posted_id" ] || continue
+        printf '%s:%s\n' "$task_id" "$posted_id" >> "$SEEN"
+      done < "$POSTED"
+    fi
     log "run done $ref exit=0"
+  fi
+  # Whether or not this ticket's own run succeeded, a skill edit the agent
+  # made along the way is checked and pushed on its own: it lives in the
+  # skills repo, not this ticket's worktree, and its fate is not this
+  # ticket's fate. Guarded: this must never fail the tick, only its own step.
+  push_skill_commits "$ref" \
+    || log "skill push commits step failed for $ref, continuing the tick"
+  if [ "$WORKDIR_MODE" = "per-run" ]; then
+    core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
   fi
 done
 

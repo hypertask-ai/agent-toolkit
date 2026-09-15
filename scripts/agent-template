@@ -94,7 +94,7 @@ CORE_ROOT="${AGENT_TEMPLATE_CORE_ROOT:-$(dirname "$(dirname "$SELF")")}"
 # without editing this file.
 FEEDBACK_BOARD_ID="${FEEDBACK_BOARD_ID:-5500}"
 FEEDBACK_BOARD_SECTION="${FEEDBACK_BOARD_SECTION:-Inbox}"
-FEEDBACK_BOARD_URL="${FEEDBACK_BOARD_URL:-https://app.hypertask.ai/project?id=5500}"
+FEEDBACK_BOARD_URL="${FEEDBACK_BOARD_URL:-https://app.hypertask.ai/detail/project-5500}"
 
 usage() { sed -n '2,76p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
@@ -442,9 +442,31 @@ PYEOF
   exit 0
 fi
 
+# agent-template feedback with no arguments at all says where things go and
+# how, rather than dying on missing --what: a session that has forgotten the
+# flags should not have to go read the source to find the board.
+if [ "$#" -eq 0 ]; then
+  cat <<'EOF'
+Feedback board: https://app.hypertask.ai/detail/project-5500 (project 5500, prefix AGTE)
+
+Three kinds:
+  bug     something broke: agent-template feedback --what "<sentence>" --got <bad output> --expected "<what should have happened>"
+  change  a change request: agent-template feedback --kind change --title "<short title>" --body "<html>"
+  idea    an improvement idea: agent-template feedback --kind idea --title "<short title>" --body "<html>"
+
+A bug report becomes a replayable eval case with --case --check '<predicate>'.
+A change or idea just files the ticket. Both post as this agent's own
+identity to the Inbox section, labelled with the kind when the board carries
+that label. --dry-run prints the ticket, sends nothing.
+EOF
+  exit 0
+fi
+
 WHAT=""
 GOT=""
 EXPECTED=""
+TITLE_ARG=""
+BODY_ARG=""
 ADAPTER=""
 KIND="bug"
 SLUG=""
@@ -459,7 +481,9 @@ while [ $# -gt 0 ]; do
     --got) GOT="${2:?--got needs a file or text}"; shift 2 ;;
     --expected) EXPECTED="${2:?--expected needs a sentence}"; shift 2 ;;
     --adapter) ADAPTER="${2:?--adapter needs a name}"; shift 2 ;;
-    --kind) KIND="${2:?--kind needs bug or rule}"; shift 2 ;;
+    --kind) KIND="${2:?--kind needs bug, rule, change or idea}"; shift 2 ;;
+    --title) TITLE_ARG="${2:?--title needs a short title}"; shift 2 ;;
+    --body) BODY_ARG="${2:?--body needs html}"; shift 2 ;;
     --agent) SLUG="${2:?--agent needs a slug}"; shift 2 ;;
     --dry-run) DRY_RUN="yes"; shift ;;
     --opt-out) OPT_OUT="yes"; shift ;;
@@ -470,15 +494,29 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$WHAT" ] || die "--what is missing" \
-  "pass --what \"<one sentence saying what went wrong>\""
-[ -n "$GOT" ] || die "--got is missing" \
-  "pass --got <path to the bad output>, or the text itself"
-[ -n "$EXPECTED" ] || die "--expected is missing" \
-  "pass --expected \"<what should have happened>\""
+# Two shapes, one board. A correction report (--what/--got/--expected) is
+# how a human-caught mistake becomes a replayable check. A change request or
+# idea (--title/--body) has no "got/expected" to report; it is a ticket, not
+# a case. Which one this call is follows from which flags showed up, not
+# from --kind alone, so --kind change with --what still reads as a
+# correction rather than silently discarding --what.
+if [ -n "$TITLE_ARG" ] || [ -n "$BODY_ARG" ]; then
+  MODE="request"
+  [ -n "$TITLE_ARG" ] || die "--title is missing" "pass --title \"<short title>\""
+  [ -n "$BODY_ARG" ] || die "--body is missing" "pass --body '<html>'"
+else
+  MODE="correction"
+  [ -n "$WHAT" ] || die "--what is missing" \
+    "pass --what \"<one sentence saying what went wrong>\""
+  [ -n "$GOT" ] || die "--got is missing" \
+    "pass --got <path to the bad output>, or the text itself"
+  [ -n "$EXPECTED" ] || die "--expected is missing" \
+    "pass --expected \"<what should have happened>\""
+fi
 case "$KIND" in
-  bug|rule) ;;
-  *) die "--kind must be bug or rule, got '$KIND'" "pass --kind bug or --kind rule" ;;
+  bug|rule|change|idea) ;;
+  *) die "--kind must be bug, rule, change or idea, got '$KIND'" \
+        "pass --kind bug, --kind rule, --kind change or --kind idea" ;;
 esac
 if [ "$CASE_IT" = "yes" ]; then
   [ -n "$CHECK" ] || die "--case needs --check" \
@@ -524,12 +562,21 @@ REPO="$(git remote get-url origin 2>/dev/null \
   | sed -E 's#\.git$##; s#/+$##; s#^.*[:/]([^:/]+/[^/]+)$#\1#' || true)"
 [ -n "$REPO" ] || REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
 
-TITLE="$(WHAT="$WHAT" KIND="$KIND" python3 -c '
+if [ "$MODE" = "request" ]; then
+  TITLE="$(TITLE_ARG="$TITLE_ARG" KIND="$KIND" python3 -c '
+import os
+title = " ".join(os.environ["TITLE_ARG"].split())
+if len(title) > 78:
+    title = title[:75].rstrip() + "..."
+print("%s: %s" % (os.environ["KIND"], title))')"
+else
+  TITLE="$(WHAT="$WHAT" KIND="$KIND" python3 -c '
 import os
 what = " ".join(os.environ["WHAT"].split())
 if len(what) > 78:
     what = what[:75].rstrip() + "..."
 print("%s: %s" % (os.environ["KIND"], what))')"
+fi
 
 # ---------- repeated? ----------
 # A correction is a repeat when its normalized sentence already matches an
@@ -583,9 +630,35 @@ print("false")
 
 BODY_FILE="$(mktemp)"
 trap 'rm -f "$BODY_FILE"' EXIT
-WHAT="$WHAT" GOT_TEXT="$GOT_TEXT" EXPECTED="$EXPECTED" REPO="$REPO" \
-ADAPTER="$ADAPTER" VERSION="$VERSION" AGENT_NAME="$AGENT_NAME" REPEATED="$REPEATED" \
-python3 - "$BODY_FILE" <<'PYEOF'
+if [ "$MODE" = "request" ]; then
+  # A change request or idea has no got/expected to report: --body is
+  # already the ticket body, html as the caller wrote it. Only the footer
+  # (repo, adapter, version, agent) is added, the same footer every kind
+  # gets, so a request ticket is traceable back to the agent and version
+  # that filed it the same way a correction is.
+  BODY_ARG="$BODY_ARG" REPO="$REPO" ADAPTER="$ADAPTER" VERSION="$VERSION" \
+  AGENT_NAME="$AGENT_NAME" python3 - "$BODY_FILE" <<'PYEOF'
+import html, os, sys
+
+def esc(value):
+    return html.escape(value, quote=False)
+
+parts = [
+    os.environ["BODY_ARG"],
+    "<ul>",
+    "<li>repo: <code>%s</code></li>" % esc(os.environ["REPO"]),
+    "<li>adapter: <code>%s</code></li>" % esc(os.environ["ADAPTER"]),
+    "<li>template version: <code>%s</code></li>" % esc(os.environ["VERSION"]),
+    "<li>agent: <code>%s</code></li>" % esc(os.environ["AGENT_NAME"]),
+    "</ul>",
+]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write("".join(parts))
+PYEOF
+else
+  WHAT="$WHAT" GOT_TEXT="$GOT_TEXT" EXPECTED="$EXPECTED" REPO="$REPO" \
+  ADAPTER="$ADAPTER" VERSION="$VERSION" AGENT_NAME="$AGENT_NAME" REPEATED="$REPEATED" \
+  python3 - "$BODY_FILE" <<'PYEOF'
 import html, os, sys
 
 def esc(value):
@@ -612,6 +685,7 @@ parts = [
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     fh.write("".join(parts))
 PYEOF
+fi
 
 LABELS="$KIND"
 case "$ADAPTER" in
@@ -708,12 +782,19 @@ if [ "$ADAPTER" != "hypertask" ] || [ -z "$BOARD_CLI" ] || [ ! -x "$BOARD_CLI" ]
 fi
 
 LABELS_USED="$LABELS"
+# The real board CLI (`hypertask task create`, checked against its own
+# `capabilities --json` catalog) has no --description-file option, only
+# --description <text>. The call used to send --description-file anyway,
+# which this CLI rejects as an unknown flag: STATUS came back non-zero on
+# every single post, and every feedback call fell through to the
+# print-and-paste fallback and looked like "always refused", token and all.
+BODY_TEXT="$(cat "$BODY_FILE")"
 if OUT="$("$BOARD_CLI" task create \
       --project "$FEEDBACK_BOARD_ID" \
       --section "$FEEDBACK_BOARD_SECTION" \
       --title "$TITLE" \
-      --description-file "$BODY_FILE" \
-      --labels "$LABELS" 2>&1)"; then
+      --description "$BODY_TEXT" \
+      --labels "$LABELS" --json 2>&1)"; then
   STATUS=0
 else
   STATUS=$?
@@ -730,7 +811,7 @@ if [ "$STATUS" -ne 0 ] && printf '%s' "$OUT" | grep -qi "LabelNotFound"; then
         --project "$FEEDBACK_BOARD_ID" \
         --section "$FEEDBACK_BOARD_SECTION" \
         --title "$TITLE" \
-        --description-file "$BODY_FILE" 2>&1)"; then
+        --description "$BODY_TEXT" --json 2>&1)"; then
     STATUS=0
   else
     STATUS=$?
@@ -759,7 +840,7 @@ else:
     print("filed: %s" % raw.strip()[:200])
 ')"
   echo "$FILED_LINE"
-  FILED_URL="$(printf '%s\n' "$FILED_LINE" | grep -oE 'https://\S+' | head -1)"
+  FILED_URL="$(printf '%s\n' "$FILED_LINE" | grep -oE 'https://\S+' | head -1)" || FILED_URL=""
   log_feedback
   append_proposed_case "${FILED_URL:-$FEEDBACK_BOARD_URL}"
 else
