@@ -404,10 +404,25 @@ adapter_workdir_checkout() {
     "run git -C $source worktree prune, then try again"
 }
 
+# Refuses, by returning non-zero, when the only copy of some work is in here:
+# uncommitted changes, or commits no remote has. A run that built something and
+# failed to push it leaves evidence, not a hole.
 adapter_workdir_remove() {
   local source="$1" dir="$2"
+  if [ -d "$dir" ]; then
+    if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
+      printf 'the worktree %s has uncommitted changes, keeping it\n' "$dir" >&2
+      return 1
+    fi
+    # Commits reachable from HEAD that no remote-tracking ref holds.
+    if [ -n "$(git -C "$dir" log --oneline HEAD --not --remotes 2>/dev/null | head -1)" ]; then
+      printf 'the worktree %s holds commits no remote has, keeping it\n' "$dir" >&2
+      return 1
+    fi
+  fi
   git -C "$source" worktree remove --force "$dir" >/dev/null 2>&1 || true
   git -C "$source" worktree prune >/dev/null 2>&1 || true
+  return 0
 }
 
 # ---------- the prompt one ticket gets ----------
@@ -438,6 +453,14 @@ names them. $skills_index is the fallback only if that prints NO_ROUTE.
 
 Claim the ticket with \`$claim_sh $ref\` before you write any code. Never
 assign userId 6: only Valentin assigns Valentin.
+
+FINISH IT. The run counts for something only when the work is in a pull
+request that can merge on its own: branch off the production branch, commit,
+push, open the PR, and turn auto-merge on with
+\`gh pr merge --auto --squash <number>\` in the same breath as opening it. A
+PR sitting green with auto-merge off is work nobody gets. Then move the ticket
+to the review lane the lifecycle skill names. Do not leave commits unpushed:
+this working directory is thrown away when the process exits.
 
 THREE COMMENTS, MAXIMUM, for this whole run. A ticket a human has to scroll is
 a ticket nobody reads.

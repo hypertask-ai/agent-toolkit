@@ -213,12 +213,18 @@ core_workdir_create() {
 }
 
 # core_workdir_remove <source> <dir>
+# The adapter gets the last word. If it refuses, the directory stays: it knows
+# what is in there, and losing an agent's only copy of its work to a tidy-up is
+# worse than leaving a directory behind for someone to look at.
 core_workdir_remove() {
   local source="$1" dir="$2"
   [ -n "$dir" ] || return 0
   case "$dir" in /*) : ;; *) return 0 ;; esac
   if declare -F adapter_workdir_remove >/dev/null 2>&1; then
-    adapter_workdir_remove "$source" "$dir" >&2 || true
+    if ! adapter_workdir_remove "$source" "$dir" >&2; then
+      warn "keeping $dir: the adapter says there is work in it that exists nowhere else"
+      return 0
+    fi
   fi
   rm -rf "$dir"
 }
