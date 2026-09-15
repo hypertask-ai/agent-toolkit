@@ -156,7 +156,8 @@ core_read_conf() {
 
 # ---------- model policy ----------
 # One shipped file defines the ladder for this runner and the supervisor.
-MODEL_POLICY_FILE="${MODEL_POLICY_FILE:-$CORE_ROOT/core/model-policy.conf}"
+CORE_POLICY_ROOT="$(dirname "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")")"
+MODEL_POLICY_FILE="${MODEL_POLICY_FILE:-$CORE_POLICY_ROOT/core/model-policy.conf}"
 [ -r "$MODEL_POLICY_FILE" ] || die "model policy is missing at $MODEL_POLICY_FILE" \
   "install the complete create-agent template, including core/model-policy.conf"
 # shellcheck disable=SC1090

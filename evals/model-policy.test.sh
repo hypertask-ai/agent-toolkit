@@ -83,6 +83,14 @@ run_poll() {
 
 cursor_cli='cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust'
 
+# install.sh sources core directly, without defining the runner's CORE_ROOT.
+if env -u CORE_ROOT bash -c '. "$1"; [ "$MODEL_POLICY_HARD_OVERRIDE" = "codex:gpt-5.6-sol:high" ]' \
+     _ "$ROOT/scripts/lib/core.sh"; then
+  ok core-policy-self-location "core finds the shipped policy when sourced by install.sh"
+else
+  bad core-policy-self-location "core still depends on a caller-defined CORE_ROOT"
+fi
+
 # Hard triage visibly selects the first escalation without spending.
 state="$TMP/state-hard-dry"; capture="$TMP/capture-hard-dry"
 write_board TEST-1 '[{"name":"hard"}]'
