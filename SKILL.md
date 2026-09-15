@@ -1,7 +1,7 @@
 ---
 name: create-agent
 description: Provision a skills-driven agent identity : a worker that reads a skills index before it does anything, optionally wired into a tracker board, or just pointed at a repo. Invoke via /create-agent. Dry-run by default; never creates or revokes a real identity without an explicit go-ahead.
-version: 3.1.0
+version: 3.3.0
 ---
 
 # /create-agent : provision an agent identity
