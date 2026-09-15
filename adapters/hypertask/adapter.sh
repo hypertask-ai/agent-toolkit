@@ -398,7 +398,10 @@ _ht_open_branch_for() {
   local ref="$1"
   [ -n "${PR_REPO:-}" ] || return 0
   command -v gh >/dev/null 2>&1 || return 0
-  REF="$ref" gh pr list --repo "$PR_REPO" --state open --search "$ref" \
+  # REF has to be exported: an assignment prefix would only reach gh, not the
+  # python3 on the other side of the pipe.
+  export REF="$ref"
+  gh pr list --repo "$PR_REPO" --state open --search "$ref" \
     --json headRefName,url --limit 10 2>/dev/null | python3 -c '
 import json, os, sys
 ref = os.environ["REF"].casefold()
