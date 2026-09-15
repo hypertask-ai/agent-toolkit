@@ -390,12 +390,44 @@ else:
 # here, because "a checkout" on this board's projects means a git worktree cut
 # from the branch that deploys. Detached, so the run names its own branch when
 # it has something to push, and so two runs never contend for one branch name.
+# The directory name ends in the ticket reference, which is how this finds the
+# branch a previous run already pushed for the same ticket. A ticket with an
+# open pull request resumes on that branch: cutting from the base branch again
+# is how one ticket ends up with two pull requests.
+_ht_open_branch_for() {
+  local ref="$1"
+  [ -n "${PR_REPO:-}" ] || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+  REF="$ref" gh pr list --repo "$PR_REPO" --state open --search "$ref" \
+    --json headRefName,url --limit 10 2>/dev/null | python3 -c '
+import json, os, sys
+ref = os.environ["REF"].casefold()
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for row in rows:
+    branch = row.get("headRefName") or ""
+    if ref in branch.casefold() or ref in (row.get("url") or "").casefold():
+        print(branch)
+        break
+'
+}
+
 adapter_workdir_checkout() {
   local source="$1" dir="$2" name="$3"
   local remote="${WORKDIR_REMOTE:-origin}" branch="${WORKDIR_BASE_BRANCH:-main}"
+  local ref="${name##*-}" open_branch
   [ -d "$source/.git" ] || [ -f "$source/.git" ] || die \
     "$source is not a git checkout, so there is nothing to cut a worktree from" \
     "point AGENT_REPO at a git clone of the repo this agent changes"
+  open_branch="$(_ht_open_branch_for "$ref")"
+  if [ -n "$open_branch" ]; then
+    if git -C "$source" fetch --quiet "$remote" "$open_branch" 2>/dev/null; then
+      branch="$open_branch"
+      printf 'resuming %s on its open pull request branch %s\n' "$ref" "$branch" >&2
+    fi
+  fi
   git -C "$source" fetch --quiet "$remote" "$branch" || die \
     "could not fetch $remote/$branch in $source" \
     "check the remote name in WORKDIR_REMOTE and that this machine can reach it"
@@ -436,7 +468,7 @@ adapter_workdir_remove() {
 #                    <description> <latest-comment>
 adapter_run_prompt() {
   local skills_index="$1" agent_name="$2" board_cli="$3" ref="$4" url="$5"
-  local title="$6" description="$7" latest="$8"
+  local title="$6" description="$7" latest="$8" why="${9:-}"
   local route_sh="$(dirname "$skills_index")/ticket-lifecycle/scripts/route.sh"
   local claim_sh="$(dirname "$skills_index")/ticket-lifecycle/scripts/claim-ticket.sh"
   cat <<EOF
@@ -447,6 +479,11 @@ Ticket $url: $title
 $description
 
 Latest comment: ${latest:-none}
+
+Why you have this ticket: ${why:-it came up next on the board}. If that says
+this ticket already has a pull request, the working directory you are in is
+already on that branch: push more commits to it and fix what is wrong. Opening
+a second pull request for one ticket is the one mistake that wastes everybody.
 
 Run \`$route_sh $ref\` first and follow the named skills, in the order it
 names them. $skills_index is the fallback only if that prints NO_ROUTE.

@@ -352,16 +352,16 @@ print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:120
     PROMPT="$(PF="$PROMPT_FILE" REF="$ref" URL="$url" TITLE="$title" \
               DESCRIPTION="$description" COMMENT="${comment_text:-none}" \
               AGENT_NAME="$AGENT_NAME" BOARD_CLI="$BOARD_CLI" \
-              SKILLS_INDEX="$SKILLS_INDEX" BOARD="$board" python3 -c '
+              SKILLS_INDEX="$SKILLS_INDEX" BOARD="$board" WHY="$why" python3 -c '
 import os, sys
 template = open(os.environ["PF"]).read()
 for name in ("REF", "URL", "TITLE", "DESCRIPTION", "COMMENT", "AGENT_NAME",
-             "BOARD_CLI", "SKILLS_INDEX", "BOARD"):
+             "BOARD_CLI", "SKILLS_INDEX", "BOARD", "WHY"):
     template = template.replace("{{%s}}" % name, os.environ.get(name, ""))
 sys.stdout.write(template)')"
   elif declare -F adapter_run_prompt >/dev/null 2>&1; then
     PROMPT="$(adapter_run_prompt "$SKILLS_INDEX" "$AGENT_NAME" "$BOARD_CLI" \
-                "$ref" "$url" "$title" "$description" "$comment_text")"
+                "$ref" "$url" "$title" "$description" "$comment_text" "$why")"
   else
     PROMPT="Read $SKILLS_INDEX first and follow the skill whose trigger matches this ticket.
 

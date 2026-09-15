@@ -201,7 +201,16 @@ core_workdir_create() {
   dir="$root/$name"
   mkdir -p "$root"
   # A directory left behind by a killed run is stale, never a resume point.
-  if [ -e "$dir" ]; then core_workdir_remove "$source" "$dir"; fi
+  # Unless the adapter refuses to let it go, in which case it holds the only
+  # copy of some work: step around it rather than deadlocking every future run
+  # on this ticket.
+  if [ -e "$dir" ]; then
+    core_workdir_remove "$source" "$dir"
+    if [ -e "$dir" ]; then
+      dir="$root/$name-$(date +%s)"
+      warn "the old directory for $name was kept, so this run works in $dir"
+    fi
+  fi
   if declare -F adapter_workdir_checkout >/dev/null 2>&1; then
     adapter_workdir_checkout "$source" "$dir" "$name" >&2 || return 1
   else
