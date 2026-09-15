@@ -409,9 +409,13 @@ try:
     rows = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
+# The ref has to appear as a whole word. A substring match puts ticket 6459 on
+# the branch of ticket 16459, worse than opening a second pull request.
+import re
+pattern = re.compile(r"(?<![0-9a-z])" + re.escape(ref) + r"(?![0-9a-z])")
 for row in rows:
     branch = row.get("headRefName") or ""
-    if ref in branch.casefold() or ref in (row.get("url") or "").casefold():
+    if pattern.search(branch.casefold()):
         print(branch)
         break
 '
@@ -420,11 +424,15 @@ for row in rows:
 adapter_workdir_checkout() {
   local source="$1" dir="$2" name="$3"
   local remote="${WORKDIR_REMOTE:-origin}" branch="${WORKDIR_BASE_BRANCH:-main}"
-  local ref="${name##*-}" open_branch
+  # The ref is a shape, PREFIX-NUMBER, not "whatever follows the last dash":
+  # the workdir name starts with the agent slug, which has dashes of its own.
+  local ref open_branch
+  ref="$(printf '%s' "$name" | grep -oE '[A-Z][A-Z0-9]*-[0-9]+$' || true)"
   [ -d "$source/.git" ] || [ -f "$source/.git" ] || die \
     "$source is not a git checkout, so there is nothing to cut a worktree from" \
     "point AGENT_REPO at a git clone of the repo this agent changes"
-  open_branch="$(_ht_open_branch_for "$ref")"
+  open_branch=""
+  [ -n "$ref" ] && open_branch="$(_ht_open_branch_for "$ref")"
   if [ -n "$open_branch" ]; then
     if git -C "$source" fetch --quiet "$remote" "$open_branch" 2>/dev/null; then
       branch="$open_branch"
@@ -485,8 +493,10 @@ Latest comment: ${latest:-none}
 
 Why you have this ticket: ${why:-it came up next on the board}. If that says
 this ticket already has a pull request, the working directory you are in is
-already on that branch: push more commits to it and fix what is wrong. Opening
-a second pull request for one ticket is the one mistake that wastes everybody.
+already on that branch, at a detached head: check the branch out by name first
+(\`git checkout -B <branch> --track $remote/<branch>\`), then push more commits
+to it and fix what is wrong. Opening a second pull request for one ticket is
+the one mistake that wastes everybody.
 
 Run \`$route_sh $ref\` first and follow the named skills, in the order it
 names them. $skills_index is the fallback only if that prints NO_ROUTE.
