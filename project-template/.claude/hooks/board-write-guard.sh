@@ -3,6 +3,17 @@
 # Board writes come only from the runner (agent-board-poll) and the supervisor (ht-supervisor), which run as
 # systemd timers outside any session. A session fixes the mechanism and runs it (ht-supervisor --now).
 # Override only when Valentin says so in chat: touch /tmp/ht-board-write-approved (remove it when done).
+#
+# This copy is a reference, not an active gate. A hook only runs when a settings
+# file registers it, and nothing in this repo does; the live registration is in
+# ~/.claude/settings.json and points at the copy in ~/.claude/hooks. It is kept
+# here so the rule travels with the repo and so a host that wants it can point
+# its own settings at this path.
+#
+# It does not, and cannot, stop the fleet working tickets. agent-board-poll and
+# ht-supervisor are systemd timers, not Claude Code sessions, so no PreToolUse
+# hook sees them. An agent claiming a ticket, commenting on it, or recording a
+# QA verdict goes through its runner and is unaffected.
 [ -f /tmp/ht-board-write-approved ] && exit 0
 cmd=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("command",""))' 2>/dev/null)
 block() {
