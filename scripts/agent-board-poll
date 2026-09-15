@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# agent-board-poll: one tick of a skills-driven agent's work loop.
+#
+# A tick reads the agent's board through an adapter, finds the tickets that are
+# newly addressed to this agent, and starts one short-lived process per ticket.
+# Nothing here is specific to a tracker, a vendor or a machine: the board lives
+# behind adapters/<name>/adapter.sh, and the model behind a command template in
+# the agent's conf.
+#
+# Usage:
+#   agent-board-poll [--once] [--dry-run] [-h|--help] <slug>
+#
+# One invocation is always one tick, with or without --once. There is no loop
+# mode: repetition is the timer's job. --once is accepted only so a hand-run
+# reads the same as the unit that calls it.
+#
+# Examples:
+#   agent-board-poll --once --dry-run fp-cro-bot   # what would it pick up?
+#   agent-board-poll --once fp-cro-bot             # do it
+#
+# Failure contract: every error prints "ERROR: <what>. Do this next: <step>"
+# on stderr and exits non-zero. Nothing is swallowed.
+
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+CORE_ROOT="$(dirname "$(dirname "$SELF")")"
+# shellcheck disable=SC1091
+. "$CORE_ROOT/scripts/lib/core.sh"
+
+usage() {
+  sed -n '2,25p' "$SELF" | sed 's/^# \{0,1\}//'
+}
+
+DRY_RUN="no"
+SLUG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --once) shift ;;   # accepted for readability; every run is one tick
+    --dry-run) DRY_RUN="yes"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option $1" "run agent-board-poll --help for the accepted flags" ;;
+    *) [ -z "$SLUG" ] || die "more than one slug given ($SLUG and $1)" \
+         "pass exactly one agent slug"; SLUG="$1"; shift ;;
+  esac
+done
+[ -n "$SLUG" ] || die "no agent slug given" \
+  "run: agent-board-poll --once --dry-run <slug>"
+
+CONF="$(core_find_conf "$SLUG")" || die \
+  "no conf found for agent '$SLUG'" \
+  "run create-agent.sh --name \"<Name>\" --wiring poll to create one, or check the slug"
+core_read_conf "$CONF"
+
+# ---------- required conf keys ----------
+for key in AGENT_ID AGENT_NAME BOARD_ADAPTER BOARD_ID TOKEN_FILE WATCH_SECTIONS \
+           SKILLS_INDEX MODEL_CLI BOARD_CLI; do
+  eval "value=\${$key:-}"
+  [ -n "$value" ] || die "conf $CONF has no $key" \
+    "add $key= to that file; see the key list in the create-agent skill"
+done
+MAX_CONCURRENT_RUNS="${MAX_CONCURRENT_RUNS:-1}"
+core_require_abs "$SKILLS_INDEX" "SKILLS_INDEX"
+core_require_abs "$TOKEN_FILE" "TOKEN_FILE"
+[ -f "$SKILLS_INDEX" ] || die "the skills index $SKILLS_INDEX does not exist" \
+  "point SKILLS_INDEX at a real index file; an agent with no skills has nothing to follow"
+[ -x "$BOARD_CLI" ] || die "the board CLI $BOARD_CLI is missing or not executable" \
+  "re-run create-agent.sh --resume for this agent to reinstall its board wrapper"
+
+core_load_adapter "$BOARD_ADAPTER"
+adapter_require_tools
+
+CORE_STATE_NAME="agent-board-poll"
+STATE_DIR="$(core_state_dir)"
+mkdir -p "$STATE_DIR"
+LOG="$STATE_DIR/$SLUG.log"
+SEEN="$STATE_DIR/$SLUG.seen"
+LOCK="$STATE_DIR/$SLUG.lock"
+touch "$SEEN"
+
+log() {
+  printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"
+  if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
+}
+
+# ---------- one tick at a time ----------
+# The systemd unit is Type=oneshot, so systemd already refuses a second run
+# while one is active. This lock covers hand-runs and any other trigger.
+exec 9>"$LOCK"
+if ! flock -n 9; then
+  log "tick skipped: another tick for $SLUG is still running"
+  exit 0
+fi
+
+MENTION="$(adapter_mention_token "$AGENT_ID")"
+if [ "$DRY_RUN" = "yes" ]; then
+  echo "agent $AGENT_NAME ($AGENT_ID) on board $BOARD_ID, sections: $WATCH_SECTIONS"
+fi
+
+CANDIDATES="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "$WATCH_SECTIONS")"
+
+started=0
+picked=0
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+
+  task_id="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["id"])')"
+  ref="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["ref"])')"
+  title="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["title"])')"
+  url="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["url"])')"
+  section="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["section"])')"
+  description="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["description"])')"
+  assigned="$(ROW="$row" AID="$AGENT_ID" python3 -c 'import json,os;print("yes" if os.environ["AID"] in json.loads(os.environ["ROW"])["agent_ids"] else "no")')"
+
+  # The newest comment decides two things: whether an @mention addressed this
+  # agent, and the state key, so a reply on an old ticket counts as new work.
+  comment_json="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$BOARD_ID")"
+  comment_id=0
+  comment_text=""
+  mentioned="no"
+  if [ -n "$comment_json" ]; then
+    comment_id="$(CJ="$comment_json" python3 -c 'import json,os;print(json.loads(os.environ["CJ"]).get("id") or 0)')"
+    comment_text="$(CJ="$comment_json" python3 -c '
+import html, json, os, re
+doc = json.loads(os.environ["CJ"])
+print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:1200])')"
+    if CJ="$comment_json" M="$MENTION" python3 -c '
+import json, os, sys
+sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or "") else 1)'; then
+      mentioned="yes"
+    fi
+  fi
+
+  reason=""
+  if [ "$assigned" = "yes" ]; then reason="assigned"; fi
+  if [ "$mentioned" = "yes" ]; then reason="${reason:+$reason+}mentioned"; fi
+  [ -n "$reason" ] || continue
+
+  key="$task_id:$comment_id"
+  if grep -qxF "$key" "$SEEN"; then
+    continue
+  fi
+  picked=$((picked + 1))
+
+  if [ "$DRY_RUN" = "yes" ]; then
+    echo "would pick up $ref ($reason, section=$section, state key $key)"
+    echo "    $title"
+    echo "    $url"
+    continue
+  fi
+
+  if [ "$started" -ge "$MAX_CONCURRENT_RUNS" ]; then
+    log "hit MAX_CONCURRENT_RUNS=$MAX_CONCURRENT_RUNS, leaving $ref for the next tick"
+    break
+  fi
+
+  PROMPT="Read $SKILLS_INDEX first and follow the skill whose trigger matches this ticket.
+
+Ticket $url: $title.
+
+$description
+
+Latest comment: ${comment_text:-none}
+
+You are $AGENT_NAME. Do the work, then post your reply with
+\`$BOARD_CLI comment add $ref --text '<p>your reply in HTML block tags</p>'\`
+as this agent, and move the ticket per the skills index. Do not ask for
+permission and do not stop halfway: this process exits when you do.
+
+If a human corrects your output at any point, whether they edit your comment,
+fail your QA, reject your pull request or simply say that is wrong, stop and
+run \`agent-template feedback --what '<one sentence>' --got <the bad output>
+--expected '<what should have happened>'\` before you carry on. A correction
+that lives only in this run is gone the moment this process exits."
+
+  log "run start $ref ($reason) key=$key"
+  started=$((started + 1))
+  set +e
+  # One short-lived process per ticket. Nothing survives it except the board,
+  # the repo, and this log. The agent's token is never in the prompt or the
+  # command line: the board CLI wrapper reads it from its own 0600 file.
+  read -r -a MODEL_ARGV <<< "$MODEL_CLI"
+  (
+    # The run happens where the agent's work lives, so the model CLI sees the
+    # repo it is meant to change and nothing else.
+    if [ -n "${AGENT_REPO:-}" ] && [ -d "$AGENT_REPO" ]; then cd "$AGENT_REPO"; fi
+    AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
+    PATH="$(dirname "$BOARD_CLI"):$PATH" \
+      "${MODEL_ARGV[@]}" "$PROMPT"
+  ) >> "$LOG" 2>&1
+  rc=$?
+  set -e
+  # The key is recorded whatever happened, so a failing ticket is logged loudly
+  # once instead of being retried every sixty seconds.
+  printf '%s\n' "$key" >> "$SEEN"
+  if [ "$rc" -ne 0 ]; then
+    log "run FAILED $ref exit=$rc: see the lines above in $LOG"
+    printf 'ERROR: the run for %s exited %s. Do this next: read %s, fix the cause, then delete the line "%s" from %s to retry it\n' \
+      "$ref" "$rc" "$LOG" "$key" "$SEEN" >&2
+  else
+    log "run done $ref exit=0"
+  fi
+done <<< "$CANDIDATES"
+
+if [ "$DRY_RUN" = "yes" ]; then
+  echo "$picked ticket(s) would be picked up; nothing was started."
+else
+  log "tick finished: $picked new, $started started"
+fi

@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# agent-template: the template talking about itself.
+#
+# One subcommand today:
+#
+#   agent-template feedback --what "<one sentence>" --got <file or text> \
+#       --expected "<what should have happened>" \
+#       [--adapter hypertask|linear|none] [--kind bug|rule] \
+#       [--agent <slug>] [--dry-run] [--opt-out]
+#
+# Run it the moment a human corrects your output. It files the correction on
+# the feedback board so it can become a replayable check, instead of dying in
+# a chat window nobody reads again.
+#
+#   --what      one sentence: what went wrong
+#   --got       the bad output: a file path, or the text itself
+#   --expected  what should have happened
+#   --adapter   which adapter was in play          (default: from the conf)
+#   --kind      bug (it broke) or rule (nobody wrote the rule down)
+#   --agent     agent slug, if the conf cannot be found from the environment
+#   --dry-run   print the ticket body, send nothing
+#   --opt-out   this run sends nothing (the conf key FEEDBACK_OPT_OUT=yes
+#               turns sending off for every run)
+#
+# Failure contract: ERROR: <what happened>. Do this next: <one step>, non-zero.
+
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+CORE_ROOT="$(dirname "$(dirname "$SELF")")"
+# shellcheck disable=SC1091
+. "$CORE_ROOT/scripts/lib/core.sh"
+
+# Where corrections land. Overridable so a fork can point at its own board
+# without editing this file.
+FEEDBACK_BOARD_ID="${FEEDBACK_BOARD_ID:-5500}"
+FEEDBACK_BOARD_SECTION="${FEEDBACK_BOARD_SECTION:-Inbox}"
+FEEDBACK_BOARD_URL="${FEEDBACK_BOARD_URL:-https://app.hypertask.ai/project?id=5500}"
+
+usage() { sed -n '2,27p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+# ---------- subcommand ----------
+[ $# -gt 0 ] || { usage; exit 0; }
+case "$1" in
+  -h|--help|help) usage; exit 0 ;;
+  version) cat "$CORE_ROOT/VERSION"; exit 0 ;;
+  feedback) shift ;;
+  *) die "unknown subcommand $1" "run agent-template --help" ;;
+esac
+
+WHAT=""
+GOT=""
+EXPECTED=""
+ADAPTER=""
+KIND="bug"
+SLUG=""
+DRY_RUN="no"
+OPT_OUT="no"
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --what) WHAT="${2:?--what needs a sentence}"; shift 2 ;;
+    --got) GOT="${2:?--got needs a file or text}"; shift 2 ;;
+    --expected) EXPECTED="${2:?--expected needs a sentence}"; shift 2 ;;
+    --adapter) ADAPTER="${2:?--adapter needs a name}"; shift 2 ;;
+    --kind) KIND="${2:?--kind needs bug or rule}"; shift 2 ;;
+    --agent) SLUG="${2:?--agent needs a slug}"; shift 2 ;;
+    --dry-run) DRY_RUN="yes"; shift ;;
+    --opt-out) OPT_OUT="yes"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option $1" "run agent-template feedback --help" ;;
+  esac
+done
+
+[ -n "$WHAT" ] || die "--what is missing" \
+  "pass --what \"<one sentence saying what went wrong>\""
+[ -n "$GOT" ] || die "--got is missing" \
+  "pass --got <path to the bad output>, or the text itself"
+[ -n "$EXPECTED" ] || die "--expected is missing" \
+  "pass --expected \"<what should have happened>\""
+case "$KIND" in
+  bug|rule) ;;
+  *) die "--kind must be bug or rule, got '$KIND'" "pass --kind bug or --kind rule" ;;
+esac
+
+# ---------- who is reporting ----------
+# The poll runner puts AGENT_NAME and AGENT_BOARD_CLI in the child's
+# environment, so an agent mid-run needs no flags. Outside a run, --agent
+# names the conf to read instead.
+AGENT_NAME="${AGENT_NAME:-}"
+BOARD_CLI="${AGENT_BOARD_CLI:-${BOARD_CLI:-}}"
+BOARD_ADAPTER="${BOARD_ADAPTER:-}"
+if [ -n "$SLUG" ]; then
+  CONF="$(core_find_conf "$SLUG")" || die "no conf found for agent '$SLUG'" \
+    "check the slug, or drop --agent and let the environment supply the name"
+  core_read_conf "$CONF"
+fi
+[ -n "$AGENT_NAME" ] || AGENT_NAME="unknown"
+[ -n "$ADAPTER" ] || ADAPTER="${BOARD_ADAPTER:-none}"
+case "$ADAPTER" in
+  hypertask|linear|none) ;;
+  *) die "--adapter must be hypertask, linear or none, got '$ADAPTER'" \
+        "pass one of those three" ;;
+esac
+[ "${FEEDBACK_OPT_OUT:-no}" = "yes" ] && OPT_OUT="yes"
+
+# ---------- what happened ----------
+if [ -f "$GOT" ]; then
+  GOT_TEXT="$(cat "$GOT")"
+else
+  GOT_TEXT="$GOT"
+fi
+
+VERSION="$(cat "$CORE_ROOT/VERSION" 2>/dev/null || echo unknown)"
+# owner/name, however the remote is written: ssh, https, with or without .git.
+REPO="$(git remote get-url origin 2>/dev/null \
+  | sed -E 's#\.git$##; s#/+$##; s#^.*[:/]([^:/]+/[^/]+)$#\1#' || true)"
+[ -n "$REPO" ] || REPO="$(basename "$(git rev-parse --show-toplevel 2>/dev/null || pwd)")"
+
+TITLE="$(WHAT="$WHAT" KIND="$KIND" python3 -c '
+import os
+what = " ".join(os.environ["WHAT"].split())
+if len(what) > 78:
+    what = what[:75].rstrip() + "..."
+print("%s: %s" % (os.environ["KIND"], what))')"
+
+BODY_FILE="$(mktemp)"
+trap 'rm -f "$BODY_FILE"' EXIT
+WHAT="$WHAT" GOT_TEXT="$GOT_TEXT" EXPECTED="$EXPECTED" REPO="$REPO" \
+ADAPTER="$ADAPTER" VERSION="$VERSION" AGENT_NAME="$AGENT_NAME" \
+python3 - "$BODY_FILE" <<'PYEOF'
+import html, os, sys
+
+def esc(value):
+    return html.escape(value, quote=False)
+
+what = " ".join(os.environ["WHAT"].split())
+got = os.environ["GOT_TEXT"].rstrip()
+expected = os.environ["EXPECTED"].rstrip()
+
+parts = [
+    "<p><strong>%s</strong></p>" % esc(what),
+    "<p><strong>Got</strong></p>",
+    "<pre>%s</pre>" % esc(got),
+    "<p><strong>Expected</strong></p>",
+    "<pre>%s</pre>" % esc(expected),
+    "<ul>",
+    "<li>repo: <code>%s</code></li>" % esc(os.environ["REPO"]),
+    "<li>adapter: <code>%s</code></li>" % esc(os.environ["ADAPTER"]),
+    "<li>template version: <code>%s</code></li>" % esc(os.environ["VERSION"]),
+    "<li>agent: <code>%s</code></li>" % esc(os.environ["AGENT_NAME"]),
+    "</ul>",
+]
+with open(sys.argv[1], "w", encoding="utf-8") as fh:
+    fh.write("".join(parts))
+PYEOF
+
+LABELS="$KIND"
+case "$ADAPTER" in
+  hypertask|linear) LABELS="$LABELS,adapter:$ADAPTER" ;;
+  none) LABELS="$LABELS,core" ;;
+esac
+
+print_and_paste() {
+  # The honest fallback: no board write is possible, so hand the body to
+  # whoever is reading and say exactly where it goes.
+  printf 'Title: %s\nLabels: %s\nBoard: %s (column %s)\n\n' \
+    "$TITLE" "$LABELS" "$FEEDBACK_BOARD_URL" "$FEEDBACK_BOARD_SECTION"
+  cat "$BODY_FILE"
+  printf '\n\nPaste that at %s in the %s column.\n' \
+    "$FEEDBACK_BOARD_URL" "$FEEDBACK_BOARD_SECTION"
+}
+
+if [ "$OPT_OUT" = "yes" ]; then
+  echo "feedback is opted out (FEEDBACK_OPT_OUT=yes or --opt-out): nothing sent."
+  print_and_paste
+  exit 0
+fi
+
+if [ "$DRY_RUN" = "yes" ]; then
+  echo "(dry run: nothing sent)"
+  print_and_paste
+  exit 0
+fi
+
+# ---------- send ----------
+# The board write goes through the agent's own CLI wrapper, so the ticket
+# carries the agent's name and the token stays in its 0600 file. Anything
+# else and there is nothing authenticated to post with.
+if [ "$ADAPTER" != "hypertask" ] || [ -z "$BOARD_CLI" ] || [ ! -x "$BOARD_CLI" ]; then
+  echo "no board CLI for this agent, so this correction cannot be filed automatically." >&2
+  print_and_paste
+  exit 0
+fi
+
+if OUT="$("$BOARD_CLI" task create \
+      --project "$FEEDBACK_BOARD_ID" \
+      --section "$FEEDBACK_BOARD_SECTION" \
+      --title "$TITLE" \
+      --description-file "$BODY_FILE" \
+      --labels "$LABELS" 2>&1)"; then
+  printf '%s\n' "$OUT" | python3 -c '
+import json, re, sys
+raw = sys.stdin.read()
+start, end = raw.find("{"), raw.rfind("}")
+if start == -1 or end <= start:
+    print(raw.strip())
+    sys.exit(0)
+try:
+    doc = json.loads(raw[start:end + 1])
+except json.JSONDecodeError:
+    print(raw.strip())
+    sys.exit(0)
+task = doc.get("task") if isinstance(doc.get("task"), dict) else doc
+ref = task.get("ticketNumber") or ""
+index = task.get("uniqueIndex") or (ref.rsplit("-", 1)[-1] if "-" in ref else "")
+project = task.get("projectId") or task.get("boardId") or ""
+if index and project:
+    print("filed %s https://app.hypertask.ai/detail/project-%s/%s" % (ref, project, index))
+else:
+    print("filed: %s" % raw.strip()[:200])
+'
+else
+  echo "the board refused the ticket, so here it is to paste by hand:" >&2
+  printf '%s\n' "$OUT" >&2
+  print_and_paste
+  exit 0
+fi

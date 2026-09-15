@@ -1,296 +1,359 @@
 #!/usr/bin/env bash
 # create-agent.sh: provision a skills-driven agent identity.
 #
-# Board-agnostic core: name, slug, provider, mission, env file, state dir,
-# a generic oneshot worker unit, and a chat test. Works with any repo.
+# Core is generic. An agent is a name, a mission, a skills index, a model CLI
+# and a place to work. Anything that talks to a specific tracker lives behind
+# an adapter in adapters/<name>/adapter.sh, and nothing here knows about a
+# particular host, fleet or machine.
 #
-# Dry-run is the default. Nothing is created, changed, or installed unless
-# --yes is also passed.
+# Three wiring modes decide how work reaches the agent:
+#   poll   (default) a timer runs one tick per minute; needs only the board CLI
+#          and a model CLI on this machine
+#   fleet  hand the agent to a long-lived worker runtime, allowed only where
+#          the adapter says that runtime is installed
+#   none   identity and skills index only; you trigger it yourself
 #
-# Never prints secrets. If you add board-specific wiring (an identity API,
-# a webhook, a token) on top of this, write its secrets to 0600 files and
-# reference them by path only, never print them.
+# Dry-run is the default: nothing is created, changed or installed without
+# --yes. Creating a real identity has its own hard stop on top of that.
+#
+# Never prints a token. Tokens land in 0600 files and are referenced by path.
+#
+# Examples:
+#   create-agent.sh --name "CRO Bot" --board <adapter> --project <board id> \
+#       --repo /home/me/projects/site --wiring poll --dry-run
+#   create-agent.sh --name "Repo Bot" --board none --repo /home/me/projects/x --yes
 
 set -euo pipefail
 
-SCRIPT_NAME="$(basename "$0")"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+CORE_ROOT="$(dirname "$(dirname "$SELF")")"
+# shellcheck disable=SC1091
+. "$CORE_ROOT/scripts/lib/core.sh"
 
 # ---------- defaults ----------
 NAME=""
-KIND=""                # dev | qa | cli
-PROVIDER="cursor"       # cursor | claude | codex
+KIND="worker"
+BOARD="none"
+BOARD_ID=""
 REPO=""
-SKILLS_REPO="$HOME/projects/agent-skills"
+SKILLS_REPO=""
+SKILLS_INDEX=""
 MISSION_FILE=""
+WIRING="poll"
+SECTIONS=""
+MODEL_CLI="claude -p --model sonnet"
+MAX_CONCURRENT_RUNS="1"
+CHAT_PAGE="no"
+ROLE="write"
 DRY_RUN="yes"
 CONFIRM="no"
 RESUME="no"
 
-CONFIG_DIR="${AGENT_CONFIG_DIR:-$HOME/.config/agents}"
-STATE_ROOT="${AGENT_STATE_ROOT:-$HOME/.local/state}"
-BIN_DIR="$HOME/.local/bin"
-SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+BIN_DIR="${AGENT_BIN_DIR:-$HOME/.local/bin}"
+SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
 
-usage() {
-  cat <<'EOF'
-Usage: create-agent.sh --name "<Name>" --kind dev|qa|cli [options]
+usage() { sed -n '2,25p' "$SELF" | sed 's/^# \{0,1\}//'; cat <<'EOF'
 
-  --name NAME            Display name, e.g. "Cursor Dev 3"   (required)
-  --kind dev|qa|cli       dev/qa run a worker; cli is env-only, no chat
-  --provider cursor|claude|codex   default: cursor
-  --repo PATH             repo the worker's cwd is set to (required for dev/qa)
-  --skills-repo PATH       folder with INDEX.md          default: ~/projects/agent-skills
-  --mission-file PATH      plain-text mission used verbatim instead of the template
-  --resume                 finish an existing identity without replacing env values
+Options:
+  --name NAME              display name                              (required)
+  --kind dev|qa|worker|cli what the agent does; cli is an env-only identity
+  --board NAME             adapter to use: see adapters/            (default none)
+  --project ID             board id inside that adapter
+  --repo PATH              absolute repo path the agent works in
+  --skills-repo PATH       folder holding INDEX.md
+  --skills-index PATH      the index file itself, if it is not <skills-repo>/INDEX.md
+  --mission-file PATH      plain-text mission, used verbatim
+  --wiring poll|fleet|none how work reaches the agent               (default poll)
+  --sections "A,B"         board columns the poll watches
+  --model-cli "CMD"        model command template  (default: claude -p --model sonnet)
+  --max-concurrent N       runs started per tick                    (default 1)
+  --chat-page yes|no       needs a hosted chat lane                 (default no)
+  --role ROLE              identity role on the board               (default write)
+  --resume                 finish an existing identity, keep every existing value
   --yes                    actually do it
-  --dry-run                print the plan, touch nothing    (default)
+  --dry-run                print the plan, change nothing           (default)
   -h, --help               this message
 EOF
 }
 
-# ---------- args ----------
 while [ $# -gt 0 ]; do
   case "$1" in
     --name) NAME="$2"; shift 2 ;;
     --kind) KIND="$2"; shift 2 ;;
-    --provider) PROVIDER="$2"; shift 2 ;;
+    --board) BOARD="$2"; shift 2 ;;
+    --project|--board-id) BOARD_ID="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     --skills-repo) SKILLS_REPO="$2"; shift 2 ;;
+    --skills-index) SKILLS_INDEX="$2"; shift 2 ;;
     --mission-file) MISSION_FILE="$2"; shift 2 ;;
+    --wiring) WIRING="$2"; shift 2 ;;
+    --sections) SECTIONS="$2"; shift 2 ;;
+    --model-cli) MODEL_CLI="$2"; shift 2 ;;
+    --max-concurrent) MAX_CONCURRENT_RUNS="$2"; shift 2 ;;
+    --chat-page) CHAT_PAGE="$2"; shift 2 ;;
+    --role) ROLE="$2"; shift 2 ;;
     --resume) RESUME="yes"; shift ;;
     --yes) CONFIRM="yes"; DRY_RUN="no"; shift ;;
     --dry-run) DRY_RUN="yes"; shift ;;
     -h|--help) usage; exit 0 ;;
-    *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
+    *) die "unknown argument $1" "run create-agent.sh --help for the accepted flags" ;;
   esac
 done
 
-[ -n "$NAME" ] || { echo "error: --name is required" >&2; exit 2; }
-case "$KIND" in
-  dev|qa|cli) ;;
-  *) echo "error: --kind must be dev, qa, or cli" >&2; exit 2 ;;
-esac
-case "$PROVIDER" in
-  cursor|claude|codex) ;;
-  *) echo "error: --provider must be cursor, claude, or codex" >&2; exit 2 ;;
-esac
+[ -n "$NAME" ] || die "--name is missing" "pass --name \"<Display Name>\""
+case "$KIND" in dev|qa|worker|cli) ;; *) die "--kind must be dev, qa, worker or cli, got '$KIND'" "pick one of those four" ;; esac
+case "$WIRING" in poll|fleet|none) ;; *) die "--wiring must be poll, fleet or none, got '$WIRING'" "use poll unless you know this machine runs a worker runtime" ;; esac
+case "$CHAT_PAGE" in yes|no) ;; *) die "--chat-page must be yes or no" "pass --chat-page no unless a hosted chat lane is needed" ;; esac
 
-# ---------- slug ----------
-SLUG="$(printf '%s' "$NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')"
-if [ "$KIND" = "cli" ]; then
-  DISPLAY_NAME="$NAME CLI"
-else
-  DISPLAY_NAME="$NAME"
-fi
+core_load_adapter "$BOARD"
+adapter_require_tools
 
-# An identity check is board-specific (it needs an API to ask "does this
-# name already exist"). This template has none, so --resume here only
-# controls whether local env values get overwritten (see write_missing_keys
-# below). If you wire this into a real board, add a read-only existence
-# check here, before any local file is touched, and exit with a message
-# telling the caller to pass --resume instead of creating a duplicate.
+SLUG="$(core_slug "$NAME")"
+DISPLAY_NAME="$NAME"
+if [ "$KIND" = "cli" ]; then DISPLAY_NAME="$NAME CLI"; fi
 
-if [ "$KIND" != "cli" ] && [ -z "$REPO" ]; then
-  echo "error: --repo is required for --kind $KIND" >&2
-  exit 2
-fi
+if [ -n "$REPO" ]; then core_require_abs "$REPO" "--repo"; fi
 if [ -n "$REPO" ] && [ ! -d "$REPO" ]; then
-  echo "error: --repo $REPO does not exist" >&2
-  exit 2
+  die "--repo $REPO does not exist" "create the checkout first, or pass the right path"
 fi
-if [ -n "$MISSION_FILE" ] && [ ! -f "$MISSION_FILE" ]; then
-  echo "error: --mission-file $MISSION_FILE does not exist" >&2
-  exit 2
+if [ "$KIND" != "cli" ] && [ -z "$REPO" ]; then
+  die "--repo is missing and --kind $KIND needs somewhere to work" \
+      "pass --repo /absolute/path/to/the/repo"
 fi
-INDEX_MD="$SKILLS_REPO/INDEX.md"
-if [ ! -f "$INDEX_MD" ]; then
-  echo "warning: $INDEX_MD not found: the mission points at a file that isn't there yet" >&2
-else
+
+# ---------- skills index ----------
+if [ -z "$SKILLS_INDEX" ]; then
+  [ -n "$SKILLS_REPO" ] || die "neither --skills-index nor --skills-repo was given" \
+    "point the agent at a skills index: an agent with no skills has nothing to follow"
+  SKILLS_INDEX="$SKILLS_REPO/INDEX.md"
+fi
+core_require_abs "$SKILLS_INDEX" "--skills-index"
+[ -f "$SKILLS_INDEX" ] || warn "$SKILLS_INDEX does not exist yet: create it before the first run"
+if [ -f "$SKILLS_INDEX" ]; then
   DOMAIN_WORDS="$(printf '%s' "$SLUG" | tr '-' '\n' | awk 'length($0) > 2 && $0 !~ /^(agent|assistant|bot|claude|cli|codex|cursor|dev|qa|worker)$/')"
   if [ -n "$DOMAIN_WORDS" ]; then
     DOMAIN_PATTERN="$(printf '%s\n' "$DOMAIN_WORDS" | paste -sd '|' -)"
-    if ! grep -Eiq "$DOMAIN_PATTERN" "$INDEX_MD"; then
-      echo "warning: $INDEX_MD has no match for domain words: $(printf '%s' "$DOMAIN_WORDS" | paste -sd ',' -)" >&2
-      echo "warning: create the domain skill before running the chat test" >&2
+    if ! grep -Eiq "$DOMAIN_PATTERN" "$SKILLS_INDEX"; then
+      warn "$SKILLS_INDEX has no match for domain words: $(printf '%s' "$DOMAIN_WORDS" | paste -sd ',' -): create the domain skill before running the chat test"
     fi
   fi
 fi
 
-STATE_DIR="$STATE_ROOT/agent-$SLUG"
-ENV_FILE="$CONFIG_DIR/$SLUG.env"
-WRAPPER="$BIN_DIR/$SLUG"
-
-echo "=== plan: $DISPLAY_NAME ($SLUG), kind=$KIND, provider=$PROVIDER ==="
-[ "$DRY_RUN" = "yes" ] && echo "(dry run: no changes below are executed)"
-[ "$RESUME" = "yes" ] && echo "(resume: existing env values are preserved, only missing keys are added)"
-echo
-
-STEP=0
-plan() {
-  STEP=$((STEP + 1))
-  echo "[$STEP] $1"
-}
-run() {
-  # run <description> -- <command...>
-  local desc="$1"; shift
-  [ "$1" = "--" ] && shift
-  plan "$desc"
-  echo "    + $*"
-  if [ "$DRY_RUN" != "yes" ]; then
-    "$@"
-  fi
-}
-write_missing_keys() {
-  # Create a config file, or append only assignments whose keys are absent.
-  # This is what makes reruns (--resume) safe: an existing value is never
-  # clobbered, only missing keys get added.
-  local path="$1" content="$2"
-  CONTENT="$content" python3 - "$path" <<'PYEOF'
-import os,re,sys
-path=sys.argv[1]; content=os.environ["CONTENT"]
-blocks=[b for b in re.split(r"(?m)(?=^[A-Z][A-Z0-9_]*=)", content) if b]
-existing=""
-if os.path.exists(path):
-    with open(path) as f:
-        existing=f.read()
-keys=set(re.findall(r"(?m)^([A-Z][A-Z0-9_]*)=", existing))
-missing=[b for b in blocks if b.split("=",1)[0] not in keys]
-if not os.path.exists(path):
-    with open(path,"w") as f:
-        f.write(content + "\n")
-elif missing:
-    with open(path,"a") as f:
-        if existing and not existing.endswith("\n"):
-            f.write("\n")
-        f.write("".join(missing).rstrip("\n") + "\n")
-os.chmod(path,0o600)
-PYEOF
-}
-
-# ---------- mission text ----------
-if [ -n "$MISSION_FILE" ]; then
-  MISSION="$(cat "$MISSION_FILE"; printf x)"
-  MISSION="${MISSION%x}"
-elif [ "$KIND" = "qa" ]; then
-  MISSION="You are $DISPLAY_NAME. You verify, you never fix. Read the literal absolute path $INDEX_MD first, then only the skill(s) it points you to for verification, and follow them exactly. Post which skill you used in your first comment. Corrections go into the skill file, not into chat."
-else
-  MISSION="You are $DISPLAY_NAME. Step one, before anything else: open the file at the literal absolute path $INDEX_MD (a tilde will not resolve in your home) and name the skill(s) whose trigger matches this task in your first comment or reply. Then follow the matched skill file(s) exactly, including their saved scripts. If no skill matches, say so and stop. Corrections go into the skill file, never into chat memory."
+# ---------- wiring gate ----------
+if [ "$WIRING" = "fleet" ] && ! adapter_supports_fleet_wiring; then
+  die "fleet wiring was asked for, but this machine has no worker runtime for the '$BOARD' adapter" \
+      "re-run with --wiring poll, which needs only the board CLI and a model CLI on this machine"
 fi
-DOMAIN_LABEL="${DOMAIN_WORDS:-${SLUG//-/ }}"
-DOMAIN_LABEL="$(printf '%s' "$DOMAIN_LABEL" | tr '\n' ' ')"
-CHAT_QUESTION="Describe how you would handle a representative $DOMAIN_LABEL task. Name the skill you would use and the evidence you would report."
+if [ "$CHAT_PAGE" = "yes" ] && [ "$WIRING" != "fleet" ]; then
+  die "a chat page needs a hosted chat lane, which only fleet wiring provides" \
+      "re-run with --chat-page no, or with --wiring fleet on a machine that has the worker runtime"
+fi
+if [ "$BOARD" = "none" ] && [ "$WIRING" = "poll" ]; then
+  WIRING="none"
+  warn "no board adapter, so there is nothing to poll: wiring set to none"
+fi
 
-echo "Mission (${#MISSION} chars):"
-echo "  $MISSION"
+# ---------- paths ----------
+CONFIG_DIR="$(core_config_dir)"
+CONF_FILE="$CONFIG_DIR/$SLUG.conf"
+TOKEN_FILE="$CONFIG_DIR/credentials/$SLUG-agent-token"
+BOARD_CLI="$BIN_DIR/$SLUG-board"
+if [ -z "$SECTIONS" ]; then SECTIONS="In Progress,Backlog"; fi
+
+# ---------- mission ----------
+if [ -n "$MISSION_FILE" ]; then
+  [ -f "$MISSION_FILE" ] || die "--mission-file $MISSION_FILE does not exist" "pass a file that is there"
+  MISSION="$(cat "$MISSION_FILE")"
+elif [ "$KIND" = "qa" ]; then
+  MISSION="You are $DISPLAY_NAME. You verify, you never fix. Read the literal absolute path $SKILLS_INDEX first, then only the skills it points you to, and follow them exactly. Name the skill you used in your first comment. Corrections go into the skill file, not into chat."
+else
+  MISSION="You are $DISPLAY_NAME. Step one, before anything else: open the file at the literal absolute path $SKILLS_INDEX and name the skill whose trigger matches this task in your first comment. Then follow that skill exactly, including its scripts. If no skill matches, say so and stop. Corrections go into the skill file, never into chat memory."
+fi
+
+# ---------- existing identity ----------
+AGENT_ID=""
+IDENTITY_EXISTS="no"
+if [ "$BOARD" != "none" ]; then
+  [ -n "$BOARD_ID" ] || die "--project is missing and the '$BOARD' adapter needs a board id" \
+    "pass --project <id>"
+  AGENT_ID="$(adapter_find_identity "$DISPLAY_NAME" "$SLUG" || true)"
+  if [ -n "$AGENT_ID" ]; then
+    IDENTITY_EXISTS="yes"
+    [ "$RESUME" = "yes" ] || die \
+      "an identity named $DISPLAY_NAME already exists on this board" \
+      "re-run with --resume to finish the missing steps without touching what is already there"
+    echo "identity exists ($AGENT_ID): --resume keeps every existing value and adds only what is missing"
+  fi
+fi
+
+# ---------- plan ----------
+echo "=== plan: $DISPLAY_NAME ($SLUG) ==="
+echo "  kind      $KIND"
+echo "  board     $BOARD${BOARD_ID:+ (id $BOARD_ID)}"
+echo "  wiring    $WIRING"
+echo "  repo      ${REPO:-none}"
+echo "  skills    $SKILLS_INDEX"
+echo "  model CLI $MODEL_CLI"
+echo "  conf      $CONF_FILE"
+echo "  token     $TOKEN_FILE (0600, never printed)"
+if [ "$DRY_RUN" = "yes" ]; then echo "  (dry run: nothing below is executed)"; fi
 echo
 
-# ============================================================
-# CORE: works for any provider, any repo
-# ============================================================
+step() { printf '[%s] %s\n' "$1" "$2"; }
 
-run "make config dir 0700" -- mkdir -p "$CONFIG_DIR"
-run "make state dir" -- mkdir -p "$STATE_DIR"
-
-if [ "$KIND" = "cli" ]; then
-  # env file only, no worker, cannot chat
-  ENV_CONTENT="$(cat <<EOF
-AGENT_NAME="$DISPLAY_NAME"
-AGENT_SLUG="$SLUG"
-AGENT_KIND="cli"
-AGENT_PROVIDER="$PROVIDER"
-AGENT_MISSION="$MISSION"
-EOF
-)"
-  plan "create $ENV_FILE (0600), or add only missing keys; env-only identity, cannot chat"
-  echo "    + preserve existing values in $ENV_FILE; add missing keys only"
-  if [ "$DRY_RUN" != "yes" ]; then
-    umask 077
-    write_missing_keys "$ENV_FILE" "$ENV_CONTENT"
+# ---------- 1. identity and token ----------
+if [ "$BOARD" != "none" ] && [ "$IDENTITY_EXISTS" = "no" ]; then
+  step 1 "create the identity on the $BOARD board (this makes a real account)"
+  echo "    hard stop: this step does not run without --yes"
+  if [ "$DRY_RUN" != "yes" ] && [ "$CONFIRM" = "yes" ]; then
+    # The token is printed exactly once, by this call. Capture it straight to a
+    # 0600 file; never let it reach stdout, a log, or a shell variable that
+    # something else might echo.
+    CREATE_OUT="$(mktemp)"
+    chmod 600 "$CREATE_OUT"
+    trap 'rm -f "$CREATE_OUT"' EXIT
+    ( umask 077; adapter_create_identity "$DISPLAY_NAME" "$BOARD_ID" "$ROLE" > "$CREATE_OUT" ) \
+      || die "the create call failed; its output is in $CREATE_OUT" \
+             "read that file, fix the cause, and re-run with --resume"
+    AGENT_ID="$(adapter_extract_identity_id "$CREATE_OUT" || true)"
+    TOKEN_TMP="$(mktemp)"
+    chmod 600 "$TOKEN_TMP"
+    if ! adapter_extract_token "$CREATE_OUT" > "$TOKEN_TMP"; then
+      rm -f "$TOKEN_TMP" "$CREATE_OUT"
+      die "token not captured" \
+          "run \`$(adapter_rotate_token_hint "${AGENT_ID:-<agent_id>}")\` with the owner's go-ahead and save the token to $TOKEN_FILE"
+    fi
+    # Redirection, not a pipe: a pipe would run the checks in a subshell and a
+    # failed check there could not stop this script.
+    core_save_secret "$TOKEN_FILE" < "$TOKEN_TMP"
+    rm -f "$TOKEN_TMP" "$CREATE_OUT"
+    trap - EXIT
+    [ -n "$AGENT_ID" ] || die "the identity was created but its id could not be read" \
+      "look the id up on the board and put it in AGENT_ID= in $CONF_FILE"
+    echo "    identity $AGENT_ID created; token saved to $TOKEN_FILE ($(stat -c '%a' "$TOKEN_FILE"), $(stat -c '%s' "$TOKEN_FILE") bytes)"
+  else
+    echo "    + adapter_create_identity \"$DISPLAY_NAME\" \"$BOARD_ID\" \"$ROLE\""
+    echo "    + token parsed from that reply and written to $TOKEN_FILE, 0600, never echoed"
   fi
-  echo
-  echo "Note: a CLI identity has no worker. It shows up in logs and commit"
-  echo "trails under its own name; there is no chat test to run for it."
+elif [ "$BOARD" != "none" ]; then
+  step 1 "identity $AGENT_ID already exists; its token stays where it is"
+  if [ "$DRY_RUN" != "yes" ] && [ ! -s "$TOKEN_FILE" ]; then
+    warn "no token at $TOKEN_FILE: the poll runner cannot read the board without it"
+    echo "    fix: run \`$(adapter_rotate_token_hint "$AGENT_ID")\` with the owner's go-ahead and save the reply's token to $TOKEN_FILE"
+  fi
 else
-  ENV_CONTENT="$(cat <<EOF
+  step 1 "no board adapter: no identity to create"
+fi
+
+# ---------- 2. board CLI wrapper ----------
+if [ "$BOARD" != "none" ]; then
+  step 2 "install the board CLI wrapper at $BOARD_CLI (reads the token file at call time)"
+  if [ "$DRY_RUN" != "yes" ]; then
+    adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI"
+  fi
+fi
+
+# ---------- 3. conf ----------
+step 3 "write $CONF_FILE (0600; existing values are kept, only missing keys are added)"
+CONF_CONTENT="$(cat <<EOF
 AGENT_NAME="$DISPLAY_NAME"
 AGENT_SLUG="$SLUG"
 AGENT_KIND="$KIND"
-AGENT_PROVIDER="$PROVIDER"
+AGENT_ID="${AGENT_ID:-}"
 AGENT_REPO="$REPO"
-AGENT_SKILLS_INDEX="$INDEX_MD"
+AGENT_MISSION="$MISSION"
+BOARD_ADAPTER="$BOARD"
+BOARD_ID="$BOARD_ID"
+TOKEN_FILE="$TOKEN_FILE"
+BOARD_CLI="$BOARD_CLI"
+WATCH_SECTIONS="$SECTIONS"
+SKILLS_INDEX="$SKILLS_INDEX"
+MODEL_CLI="$MODEL_CLI"
+MAX_CONCURRENT_RUNS="$MAX_CONCURRENT_RUNS"
+WIRING="$WIRING"
 EOF
 )"
-  plan "create $ENV_FILE (0600), or add only missing keys"
-  echo "    + preserve existing values in $ENV_FILE; add missing keys only"
-  if [ "$DRY_RUN" != "yes" ]; then
-    umask 077
-    write_missing_keys "$ENV_FILE" "$ENV_CONTENT"
-  fi
-
-  # generic per-repo trigger wrapper + a oneshot systemd unit
-  case "$PROVIDER" in
-    claude) PROVIDER_CMD='claude -p "$PROMPT"' ;;
-    cursor) PROVIDER_CMD='cursor-agent -p "$PROMPT"' ;;
-    codex)  PROVIDER_CMD='codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT"' ;;
-  esac
-  printf -v MISSION_SHELL '%q' "$MISSION"
-  WRAPPER_CONTENT="$(cat <<EOF
-#!/usr/bin/env bash
-# $SLUG: generic trigger wrapper. Usage: $SLUG run "<task text>"
-set -euo pipefail
-cd "$REPO"
-MISSION=$MISSION_SHELL
-TASK="\${2:-\$1}"
-PROMPT="\$MISSION
-
-Task: \$TASK"
-$PROVIDER_CMD
-EOF
-)"
-  plan "write $WRAPPER (0755): manual/cron trigger, cwd=$REPO"
-  echo "    + printf '%s\n' \"\$WRAPPER_CONTENT\" > $WRAPPER && chmod 755 $WRAPPER"
-  if [ "$DRY_RUN" != "yes" ]; then
-    printf '%s\n' "$WRAPPER_CONTENT" > "$WRAPPER"
-    chmod 755 "$WRAPPER"
-  fi
-
-  UNIT_PATH="$SYSTEMD_USER_DIR/agent-worker-$SLUG.service"
-  UNIT_CONTENT="$(cat <<EOF
-[Unit]
-Description=$DISPLAY_NAME: one run of the skills-driven worker
-
-[Service]
-Type=oneshot
-WorkingDirectory=$REPO
-ExecStart=$WRAPPER run "\${TASK}"
-EOF
-)"
-  plan "write generic oneshot unit $UNIT_PATH (one process per event)"
-  echo "    + printf '%s\n' \"\$UNIT_CONTENT\" > $UNIT_PATH"
-  if [ "$DRY_RUN" != "yes" ]; then
-    mkdir -p "$SYSTEMD_USER_DIR"
-    printf '%s\n' "$UNIT_CONTENT" > "$UNIT_PATH"
-    systemctl --user daemon-reload
-  fi
-
-  # Chat test: ask about the domain and quote the reply exactly.
-  plan "chat test: send the mission + a domain question to the $PROVIDER CLI"
-  echo "    + $WRAPPER run \"$CHAT_QUESTION\""
-  if [ "$DRY_RUN" != "yes" ]; then
-    CHAT_REPLY="$("$WRAPPER" run "$CHAT_QUESTION")"
-    printf 'Chat test reply (verbatim):\n%s\n' "$CHAT_REPLY"
-  fi
+if [ "$DRY_RUN" != "yes" ]; then
+  mkdir -p "$CONFIG_DIR"
+  core_write_missing_keys "$CONF_FILE" "$CONF_CONTENT"
 fi
 
-echo
-echo "=== Check before you say done ==="
-cat <<EOF
-  [ ] a matching domain skill exists in $SKILLS_REPO/INDEX.md
-  [ ] chat test asked a domain question and its reply is quoted verbatim
-  [ ] $ENV_FILE is 0600
+# ---------- 4. wiring ----------
+case "$WIRING" in
+  poll)
+    step 4 "install the poll units and start the timer"
+    SERVICE="$SYSTEMD_USER_DIR/agent-board-poll@.service"
+    TIMER="$SYSTEMD_USER_DIR/agent-board-poll@.timer"
+    echo "    $SERVICE (Type=oneshot) + $TIMER (every 60s)"
+    echo "    systemctl --user enable --now agent-board-poll@$SLUG.timer"
+    if [ "$DRY_RUN" != "yes" ]; then
+      mkdir -p "$SYSTEMD_USER_DIR"
+      cat > "$SERVICE" <<EOF
+[Unit]
+Description=One work tick for agent %i
+
+[Service]
+# Type=oneshot, so systemd itself refuses to start a second tick while one is
+# still running. That is the concurrency guard: no daemon, no queue, no lock
+# file to go stale. One process per ticket, and the board holds the state.
+Type=oneshot
+ExecStart=$BIN_DIR/agent-board-poll --once %i
 EOF
+      cat > "$TIMER" <<EOF
+[Unit]
+Description=Poll the board for agent %i
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5s
+Unit=agent-board-poll@%i.service
+
+[Install]
+WantedBy=timers.target
+EOF
+      systemctl --user daemon-reload
+      systemctl --user enable --now "agent-board-poll@$SLUG.timer"
+      systemctl --user list-timers "agent-board-poll@$SLUG.timer" --no-pager || true
+    fi
+    ;;
+  fleet)
+    step 4 "hand the agent to the worker runtime installed on this machine"
+    if [ "$DRY_RUN" != "yes" ]; then
+      adapter_fleet_wire "$SLUG"
+    else
+      echo "    + adapter_fleet_wire $SLUG"
+    fi
+    ;;
+  none)
+    step 4 "no wiring: trigger this agent yourself, from cron, CI, or by hand"
+    echo "    agent-board-poll --once $SLUG   # if you later add a board"
+    ;;
+esac
+
+# ---------- 5. acceptance ----------
+echo
+echo "=== check before you say done ==="
+cat <<EOF
+  [ ] $CONF_FILE is 0600 and names the right board, sections and skills index
+  [ ] $SKILLS_INDEX exists and has a skill whose trigger matches this agent's work
+EOF
+if [ "$BOARD" != "none" ]; then
+  cat <<EOF
+  [ ] $TOKEN_FILE is non-empty and 0600, and was never printed
+  [ ] $BOARD_CLI runs as the agent, not as you
+EOF
+fi
+if [ "$WIRING" = "poll" ]; then
+  cat <<EOF
+  [ ] agent-board-poll --once --dry-run $SLUG lists the tickets you expect
+  [ ] agent-board-poll --once $SLUG posts a reply on a test ticket as the agent
+  [ ] agent-board-poll@$SLUG.timer is active
+EOF
+fi
+if [ "$CHAT_PAGE" = "yes" ]; then echo "  [ ] the chat page answers, and the reply is quoted verbatim"; fi
 
 echo
 if [ "$DRY_RUN" = "yes" ]; then
-  echo "Dry run only. Re-run with --yes to actually create $DISPLAY_NAME."
+  echo "Dry run only. Re-run with --yes to create $DISPLAY_NAME."
 fi

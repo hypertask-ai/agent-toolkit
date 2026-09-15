@@ -1,0 +1,276 @@
+#!/usr/bin/env bash
+# adapters/hypertask/adapter.sh
+#
+# Everything in this file talks to a Hypertask board. Core calls these
+# functions and never learns what is behind them.
+#
+# Reads go over REST with the agent's bearer token (same endpoints the `ht`
+# helper uses: Authorization: Bearer <token> against <api>/mcp/...). Writes go
+# through the agent's own CLI wrapper so the board records the agent, not
+# whoever happens to own the shell.
+
+adapter_id() { printf 'hypertask'; }
+
+# Where this tracker's identities already live on a machine.
+adapter_config_dir_default() { printf '%s/.config/hypertask-agents' "$HOME"; }
+
+adapter_require_tools() {
+  command -v hypertask >/dev/null 2>&1 || die \
+    "the hypertask CLI is not on PATH" \
+    "install it (npm i -g @hypertask/hypertask_cli) and re-run"
+  command -v curl >/dev/null 2>&1 || die "curl is not on PATH" "install curl"
+  command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH" "install python3"
+}
+
+# Fleet wiring means a long-lived worker runtime is actually running here, not
+# merely that a unit file was copied in at some point. A machine can have the
+# template and the worker script and still have no router, no webhook receiver
+# and nothing running, which is exactly the dead end this check exists to stop.
+# The proof is a live worker instance.
+adapter_supports_fleet_wiring() {
+  systemctl --user cat 'hypertask-agent-worker@.service' >/dev/null 2>&1 || return 1
+  [ -n "$(systemctl --user list-units 'hypertask-agent-worker@*.service' \
+            --state=active --no-legend --plain 2>/dev/null)" ]
+}
+
+# ---------- REST base ----------
+_ht_api_base() {
+  if [ -n "${BOARD_API_URL:-}" ]; then
+    printf '%s' "$BOARD_API_URL"
+  elif [ -r "$HOME/.hypertask/config.json" ]; then
+    python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["apiUrl"])' \
+      "$HOME/.hypertask/config.json" 2>/dev/null || printf 'https://app.hypertask.ai/api'
+  else
+    printf 'https://app.hypertask.ai/api'
+  fi
+}
+
+# _ht_get <token-file> <path-with-query>
+# `ht` has no -f, so a 404 or a bot-challenge page comes back as exit 0 with a
+# junk body. Check the status code here instead of letting python choke on HTML.
+_ht_get() {
+  local token_file="$1" path="$2" base tok body status
+  [ -r "$token_file" ] || die "cannot read the agent token file $token_file" \
+    "check TOKEN_FILE in the conf, or capture the token again"
+  tok="$(cat "$token_file")"
+  base="$(_ht_api_base)"
+  body="$(curl -sS -w $'\n%{http_code}' -H "Authorization: Bearer $tok" "${base}${path}" 2>/dev/null)" \
+    || die "the board API call to ${base}${path} failed at the network level" \
+           "check connectivity, then re-run"
+  status="${body##*$'\n'}"
+  body="${body%$'\n'*}"
+  if [ "$status" != "200" ]; then
+    die "the board API returned HTTP $status for ${path}" \
+        "if this is 401 the token is wrong or revoked; if it is 403 or an HTML body the host is rate limited, back off before retrying"
+  fi
+  printf '%s' "$body"
+}
+
+# ---------- identity ----------
+# adapter_find_identity <display-name> <slug> : prints the id, or nothing.
+# Read-only, and it runs before any local write so a duplicate name fails early.
+adapter_find_identity() {
+  hypertask agents list --json 2>/dev/null | python3 -c '
+import json, re, sys
+wanted_name = sys.argv[1].casefold()
+wanted_slug = sys.argv[2]
+doc = json.load(sys.stdin)
+agents = doc if isinstance(doc, list) else doc.get("agents", [])
+def slug(value):
+    return re.sub(r"^-+|-+$", "", re.sub(r"[^a-z0-9]+", "-", value.casefold()))
+for agent in agents:
+    name = str(agent.get("display_name") or agent.get("name") or "")
+    if name.casefold() == wanted_name or agent.get("slug") == wanted_slug or slug(name) == wanted_slug:
+        print(agent.get("id", ""))
+        break
+' "$1" "$2"
+}
+
+# The exact command that mints a replacement token, for the error message when
+# capture fails. It is a hint, never run automatically: rotating invalidates
+# the token the agent is using right now.
+adapter_rotate_token_hint() {
+  printf 'hypertask agents rotate-token --id %s' "${1:-<agent_id>}"
+}
+
+# Prints the raw create output on stdout. The bearer token is in there and is
+# shown exactly once, so the caller must persist it immediately.
+adapter_create_identity() {
+  local display_name="$1" board_id="$2" role="${3:-write}"
+  hypertask agents create --name "$display_name" --project "$board_id" --role "$role"
+}
+
+# adapter_extract_token <file-holding-create-output>
+# The documented response is
+#   {"success":true,"agent":{"id":...,"display_name":...},"token":"<jwt>",...}
+# but the CLI may print a human line around it, so pull the outermost JSON
+# object out of the text first and then read the field by name. Never grep:
+# a greedy match on "token" picks up the prose in `message`.
+adapter_extract_token() {
+  python3 - "$1" <<'PYEOF'
+import json, re, sys
+raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+start, end = raw.find("{"), raw.rfind("}")
+if start == -1 or end <= start:
+    sys.exit(1)
+try:
+    doc = json.loads(raw[start:end + 1])
+except json.JSONDecodeError:
+    sys.exit(1)
+candidates = [doc.get("token")]
+agent = doc.get("agent")
+if isinstance(agent, dict):
+    candidates.append(agent.get("token"))
+for key in ("bearer_token", "bearerToken", "agent_token", "agentToken"):
+    candidates.append(doc.get(key))
+for value in candidates:
+    # A Hypertask agent token is a JWT: three dot-separated segments.
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+", value.strip()):
+        sys.stdout.write(value.strip())
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+}
+
+adapter_extract_identity_id() {
+  python3 - "$1" <<'PYEOF'
+import json, sys
+raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+start, end = raw.find("{"), raw.rfind("}")
+if start == -1 or end <= start:
+    sys.exit(1)
+try:
+    doc = json.loads(raw[start:end + 1])
+except json.JSONDecodeError:
+    sys.exit(1)
+agent = doc.get("agent") if isinstance(doc.get("agent"), dict) else doc
+value = agent.get("id") or ""
+if not value:
+    sys.exit(1)
+sys.stdout.write(str(value))
+PYEOF
+}
+
+# A one-line wrapper so every board write is attributed to the agent. The token
+# is read from its 0600 file at call time; it is never baked into the wrapper,
+# a command line, or a prompt.
+adapter_install_board_cli() {
+  local slug="$1" token_file="$2" dest="$3"
+  mkdir -p "$(dirname "$dest")"
+  cat > "$dest" <<EOF
+#!/usr/bin/env bash
+# $slug: the board CLI acting as this agent.
+set -euo pipefail
+TOKEN_FILE="$token_file"
+[ -r "\$TOKEN_FILE" ] || {
+  echo "ERROR: cannot read \$TOKEN_FILE. Do this next: capture the agent token into that file" >&2
+  exit 1
+}
+exec hypertask --token "\$(cat "\$TOKEN_FILE")" "\$@"
+EOF
+  chmod 755 "$dest"
+}
+
+# ---------- reads ----------
+# adapter_list_candidates <token-file> <board-id> <sections-csv>
+# One JSON object per line: id, ref, section, title, description, agent_ids,
+# comment_count, url. agent_ids holds the AGENT ids on the ticket: an
+# agent-assigned ticket still carries the owning user's numeric id at the top
+# of each assignee record, with the agent's uuid nested under "agent".
+adapter_list_candidates() {
+  local token_file="$1" board_id="$2" sections="$3" json
+  json="$(_ht_get "$token_file" "/mcp/tasks?project_id=${board_id}&limit=100")"
+  # The board reply is far too large for an environment variable, so it goes in
+  # on stdin and the program goes in as one argv.
+  printf '%s' "$json" | SECTIONS="$sections" BOARD_ID="$board_id" python3 -c '
+import json, os, sys
+wanted = [s.strip().casefold() for s in os.environ["SECTIONS"].split(",") if s.strip()]
+board = os.environ["BOARD_ID"]
+doc = json.load(sys.stdin)
+for task in doc.get("tasks") or []:
+    section = str(task.get("section") or "")
+    if wanted and section.casefold() not in wanted:
+        continue
+    agent_ids = []
+    for who in task.get("assignees") or []:
+        agent = who.get("agent") if isinstance(who, dict) else None
+        if isinstance(agent, dict) and agent.get("id"):
+            agent_ids.append(str(agent["id"]))
+    ref = str(task.get("ticketNumber") or "")
+    index = ref.rsplit("-", 1)[-1] if "-" in ref else str(task.get("id"))
+    print(json.dumps({
+        "id": task.get("id"),
+        "ref": ref,
+        "section": section,
+        "title": task.get("title") or "",
+        "description": task.get("description") or "",
+        "agent_ids": agent_ids,
+        "comment_count": task.get("commentCount") or 0,
+        "url": "https://app.hypertask.ai/detail/project-%s/%s" % (board, index),
+    }))
+'
+}
+
+# adapter_latest_comment <token-file> <task-id> <board-id>
+# JSON {"id":..., "html":..., "author":...} or an empty line when there is none.
+adapter_latest_comment() {
+  local token_file="$1" task_id="$2" board_id="$3" json
+  json="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")"
+  printf '%s' "$json" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+comments = doc.get("comments") or []
+if not comments:
+    print("")
+    sys.exit(0)
+def key(comment):
+    return (comment.get("createdAt") or "", comment.get("id") or 0)
+newest = max(comments, key=key)
+author = newest.get("user") or newest.get("author") or {}
+print(json.dumps({
+    "id": newest.get("id"),
+    "html": newest.get("text") or newest.get("comment") or newest.get("html") or "",
+    "author": (author.get("displayName") if isinstance(author, dict) else str(author)) or "",
+}))
+'
+}
+
+# The marker an @mention of this agent leaves in stored comment HTML:
+#   <span data-type="mention" class="mention" data-id="<Name>"
+#         data-label="agent-<uuid>">Name</span>
+# A user mention uses data-label="name-<userId>" instead, so matching on
+# "agent-<uuid>" cannot collide with a person.
+adapter_mention_token() { printf 'agent-%s' "$1"; }
+
+adapter_task_url() {
+  local board_id="$1" ref="$2"
+  printf 'https://app.hypertask.ai/detail/project-%s/%s' "$board_id" "${ref##*-}"
+}
+
+# ---------- writes (through the agent's own CLI) ----------
+adapter_post_comment() {
+  local board_cli="$1" ref="$2" html="$3"
+  "$board_cli" comment add "$ref" --text "$html"
+}
+
+adapter_move_task() {
+  local board_cli="$1" ref="$2" section="$3"
+  "$board_cli" task move "$ref" --section "$section"
+}
+
+# ---------- fleet wiring (this tracker only, and only where it exists) ----------
+adapter_fleet_wire() {
+  local slug="$1"
+  adapter_supports_fleet_wiring || die \
+    "this machine has no agent worker runtime, so fleet wiring has nothing to attach to" \
+    "re-run with --wiring poll, which needs only the board CLI and a model CLI"
+  cat <<EOF
+Fleet wiring for $slug is handed to the worker runtime already installed here.
+It owns the webhook receiver, the router entry and the per-agent units; this
+template does not copy another agent's drop-ins, because those are specific to
+the machine that already runs them.
+
+Next: follow the runtime's own provisioning docs for $slug, then come back and
+run the acceptance check.
+EOF
+}
