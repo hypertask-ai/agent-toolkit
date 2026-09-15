@@ -1,7 +1,7 @@
 ---
 name: create-agent
 description: Provision a skills-driven agent identity : a worker that reads a skills index before it does anything, optionally wired into a tracker board, or just pointed at a repo. Invoke via /create-agent. Dry-run by default; never creates or revokes a real identity without an explicit go-ahead.
-version: 3.5.0
+version: 3.6.0
 ---
 
 # /create-agent : provision an agent identity
@@ -284,3 +284,21 @@ one-line wrapper that reads the token file at call time.
 - `agent-template feedback --help`, `evals/run-evals.sh --help` : the correction loop
 - `MAINTAINER.md` in this folder (copied next to every bot's conf) : for the
   session that looks after a bot, not the bot itself
+
+## Changelog
+
+One line per version, newest first. `VERSION` and this file's frontmatter
+move together.
+
+- **3.6.0** — a third wake trigger (a human comment on a ticket the agent
+  owns, even outside `WATCH_SECTIONS`); a skill edit ships and pushes itself
+  in the same run instead of waiting on a pull request; `agent-template
+  feedback --case` turns a correction straight into a proposed eval case,
+  promoted by the weekly run; `agent-template report` scores corrections and
+  repeats; a fact-vs-rule rule in the mission text and this file;
+  `MAINTAINER.md` for whoever looks after a bot.
+- **3.5.0** — one pull request per ticket instead of one for a whole run.
+- **3.4.0** — a worktree holding the only copy of some work is kept, not deleted.
+- **3.3.0** — an excluded label is a hard stop; multiple boards; a prompt per agent.
+- **3.2.0** — a working directory per run, unclaimed tickets, failures written on the board.
+- **3.1.0** — poll wiring mode and safe token capture.
