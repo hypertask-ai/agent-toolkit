@@ -200,6 +200,12 @@ if failed:
     sys.exit(1)
 PYEOF
 
+if [ -z "$ONLY" ]; then
+  echo ""
+  echo "-- agent-chat behavioural checks --"
+  python3 "$HERE/agent-chat.test.py"
+fi
+
 # The case file replays text corrections. sync-project.sh is about what lands
 # on disk when the layout is synced twice into a repo somebody edited in
 # between, which no predicate over a string can express, so it has its own

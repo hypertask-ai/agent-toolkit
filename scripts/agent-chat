@@ -1,0 +1,455 @@
+#!/usr/bin/env python3
+"""One host-level chat lane for every template agent with CHAT=on."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import re
+import shlex
+import signal
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+ERROR_REPLY = "I could not answer this, error logged."
+MAX_WEBHOOK_BODY = 1024 * 1024
+
+
+def parse_conf(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", raw.strip())
+        if not match:
+            continue
+        try:
+            parsed = shlex.split(match.group(2), posix=True)
+        except ValueError:
+            continue
+        values[match.group(1)] = parsed[0] if parsed else ""
+    return values
+
+
+def api_base(values: dict[str, str]) -> str:
+    configured = values.get("BOARD_API_URL", "").rstrip("/")
+    if configured:
+        return configured
+    config = Path.home() / ".hypertask/config.json"
+    try:
+        return str(json.loads(config.read_text())["apiUrl"]).rstrip("/")
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return "https://app.hypertask.ai/api"
+
+
+@dataclass(frozen=True)
+class Agent:
+    slug: str
+    name: str
+    agent_id: str
+    mission: str
+    repo: str
+    token_file: Path
+    model_cli: str
+    skills: tuple[str, ...]
+    api_url: str
+    webhook_secret_file: Path | None
+
+    @classmethod
+    def from_conf(cls, path: Path) -> "Agent | None":
+        values = parse_conf(path)
+        if values.get("CHAT") != "on":
+            return None
+        required = ("AGENT_SLUG", "AGENT_NAME", "AGENT_ID", "TOKEN_FILE", "MODEL_CLI")
+        if any(not values.get(key) for key in required):
+            return None
+        indexes: list[str] = []
+        company = Path.home() / "projects/company-skills/INDEX.md"
+        stamp = Path.home() / ".config/hypertask-agents/company-pack.version"
+        try:
+            stamped = stamp.read_text(encoding="utf-8").strip().split(" ", 2)
+            if len(stamped) == 3 and Path(stamped[2], "INDEX.md").is_file():
+                company = Path(stamped[2], "INDEX.md")
+        except OSError:
+            pass
+        indexes.append(str(company))
+        repo = values.get("AGENT_REPO", "")
+        if repo and Path(repo, ".claude/skills/INDEX.md").is_file():
+            indexes.append(str(Path(repo, ".claude/skills/INDEX.md")))
+        indexes.extend(
+            item.strip()
+            for item in values.get("SKILLS_INDEX", "").split(",")
+            if item.strip()
+        )
+        indexes = list(dict.fromkeys(indexes))
+        secret = values.get("CHAT_WEBHOOK_SECRET_FILE", "")
+        return cls(
+            slug=values["AGENT_SLUG"],
+            name=values["AGENT_NAME"],
+            agent_id=values["AGENT_ID"],
+            mission=values.get("AGENT_MISSION", ""),
+            repo=repo,
+            token_file=Path(values["TOKEN_FILE"]).expanduser(),
+            model_cli=values["MODEL_CLI"],
+            skills=tuple(indexes),
+            api_url=api_base(values),
+            webhook_secret_file=Path(secret).expanduser() if secret else None,
+        )
+
+    def token(self) -> str:
+        return self.token_file.read_text(encoding="utf-8").strip()
+
+
+class HandledState:
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        self.handled: set[str] = set()
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                if row.get("messageId"):
+                    self.handled.add(str(row["messageId"]))
+        except FileNotFoundError:
+            pass
+
+    def contains(self, message_id: str) -> bool:
+        with self.lock:
+            return message_id in self.handled
+
+    def mark(self, agent: Agent, message_id: str, reply: str) -> None:
+        row = {
+            "messageId": message_id,
+            "agent": agent.slug,
+            "handledAt": datetime.now(timezone.utc).isoformat(),
+            "replySha256": hashlib.sha256(reply.encode()).hexdigest(),
+        }
+        with self.lock:
+            if message_id in self.handled:
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            with self.path.open("a", encoding="utf-8") as handle:
+                os.chmod(self.path, 0o600)
+                handle.write(json.dumps(row, sort_keys=True) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            self.handled.add(message_id)
+
+
+class ApiError(RuntimeError):
+    def __init__(self, status: int, detail: str):
+        super().__init__(f"HTTP {status}: {detail[:500]}")
+        self.status = status
+
+
+class AgentApi:
+    def __init__(self, agent: Agent):
+        self.agent = agent
+
+    def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        data = json.dumps(body).encode() if body is not None else None
+        request = urllib.request.Request(
+            self.agent.api_url + path,
+            data=data,
+            method=method,
+            headers={
+                "Authorization": f"Bearer {self.agent.token()}",
+                "Content-Type": "application/json",
+                "User-Agent": "agent-chat/1",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=20) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            raise ApiError(error.code, error.read().decode(errors="replace")) from error
+        if not isinstance(payload, dict) or payload.get("success") is False:
+            raise RuntimeError(f"invalid API response: {payload!r}")
+        return payload
+
+    def pending(self) -> list[dict[str, Any]]:
+        payload = self.request("GET", "/mcp/chat/pending")
+        rows = payload.get("messages")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    def history(self, session_id: str) -> list[dict[str, Any]]:
+        quoted = urllib.parse.quote(session_id, safe="")
+        payload = self.request("GET", f"/mcp/chat/sessions/{quoted}/messages")
+        rows = payload.get("messages")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    def reply(self, session_id: str, message_id: str, text: str) -> None:
+        quoted = urllib.parse.quote(session_id, safe="")
+        self.request(
+            "POST",
+            f"/mcp/chat/sessions/{quoted}/messages",
+            {"text": text[:8000], "replyToMessageId": message_id},
+        )
+
+
+def recent_work(slug: str) -> str:
+    path = Path.home() / ".local/state/agent-board-poll" / f"{slug}.log"
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return "No recent ticket run log is available."
+    useful = [line for line in lines if "run start " in line or "run done " in line or "run FAILED " in line]
+    return "\n".join(useful[-8:]) or "No recent ticket run is recorded."
+
+
+def prompt_for(agent: Agent, message: dict[str, Any], history: list[dict[str, Any]]) -> str:
+    transcript = "\n".join(
+        f"{row.get('role', 'unknown')}: {str(row.get('content', ''))[:4000]}"
+        for row in history[-50:]
+    ) or "(no earlier messages)"
+    indexes = "\n".join(f"- {path}" for path in agent.skills) or "- none configured"
+    return f"""You are {agent.name}. This is a live Hypertask Agent Chat conversation, not ticket work.
+
+Mission:
+{agent.mission or '(no mission configured)'}
+
+Hard lane boundary:
+- Reply to the user in chat only.
+- Never post a ticket comment or make any board write.
+- Never inspect, create, or edit a repository worktree.
+- Do not change files, accounts, connectors, code, or any external system.
+- If the user asks for a change, explain what should be done and that it needs ticket work.
+
+Read the applicable skills from these index paths in order, company pack first:
+{indexes}
+
+Short work brief from this host:
+Who I am: {agent.name} ({agent.slug}).
+What I am working on, from the latest ticket-run log:
+{recent_work(agent.slug)}
+
+Conversation history, oldest first:
+{transcript}
+
+New message from {message.get('userName') or 'the user'}:
+{str(message.get('text') or '')[:8000]}
+
+Return only the concise reply that should appear in Agent Chat. Do not include tool traces or preamble."""
+
+
+def run_provider(agent: Agent, prompt: str, timeout: int = 90) -> str:
+    argv = shlex.split(agent.model_cli)
+    if not argv:
+        raise RuntimeError("MODEL_CLI is empty")
+    executable = Path(argv[0]).name
+    if executable == "claude" and "--effort" not in argv:
+        argv.extend(["--effort", "low"])
+    if executable == "cursor-agent" and "--mode" not in argv and "--plan" not in argv:
+        argv.extend(["--mode", "ask"])
+    scratch = Path(os.environ.get("AGENT_CHAT_STATE_DIR", str(Path.home() / ".local/state/agent-chat"))) / "scratch" / agent.slug
+    scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
+    result = subprocess.run(
+        [*argv, prompt],
+        cwd=scratch,
+        env={**os.environ, "AGENT_NAME": agent.name, "AGENT_ID": agent.agent_id},
+        text=True,
+        capture_output=True,
+        timeout=timeout,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"provider exited {result.returncode}: {result.stderr[-1000:]}")
+    reply = result.stdout.strip()
+    if not reply:
+        raise RuntimeError("provider returned an empty reply")
+    return reply[:8000]
+
+
+class ChatDaemon:
+    def __init__(self, config_dir: Path, state_dir: Path, workers: int = 16):
+        self.config_dir = config_dir
+        self.state_dir = state_dir
+        self.state = HandledState(state_dir / "handled.jsonl")
+        self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agent-chat")
+        self.inflight: set[str] = set()
+        self.inflight_lock = threading.Lock()
+        self.stop = threading.Event()
+
+    def log(self, agent: Agent, text: str) -> None:
+        self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        line = f"{datetime.now(timezone.utc).isoformat()} {text}\n"
+        with (self.state_dir / f"{agent.slug}.log").open("a", encoding="utf-8") as handle:
+            handle.write(line)
+
+    def agents(self) -> list[Agent]:
+        agents: list[Agent] = []
+        for path in sorted(self.config_dir.glob("*.conf")):
+            try:
+                agent = Agent.from_conf(path)
+                if agent:
+                    agents.append(agent)
+            except Exception as error:
+                fallback = path.stem
+                self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                with (self.state_dir / f"{fallback}.log").open("a", encoding="utf-8") as handle:
+                    handle.write(f"{datetime.now(timezone.utc).isoformat()} config error: {error}\n")
+        return agents
+
+    def handle(self, agent: Agent, message: dict[str, Any], api: AgentApi | None = None) -> None:
+        message_id = str(message.get("id") or message.get("messageId") or "")
+        session_id = str(message.get("sessionId") or "")
+        if not message_id or not session_id or self.state.contains(message_id):
+            return
+        client = api or AgentApi(agent)
+        try:
+            history = client.history(session_id)
+            reply = run_provider(agent, prompt_for(agent, message, history))
+        except Exception as error:
+            self.log(agent, f"message {message_id} provider error: {type(error).__name__}: {error}")
+            reply = ERROR_REPLY
+        try:
+            client.reply(session_id, message_id, reply)
+        except ApiError as error:
+            if error.status == 409:
+                self.state.mark(agent, message_id, reply)
+                self.log(agent, f"message {message_id} was already terminal")
+                return
+            self.log(agent, f"message {message_id} reply error: {error}")
+            return
+        except Exception as error:
+            self.log(agent, f"message {message_id} reply error: {type(error).__name__}: {error}")
+            return
+        self.state.mark(agent, message_id, reply)
+        self.log(agent, f"handled message {message_id}; reply={json.dumps(reply, ensure_ascii=False)}")
+
+    def submit(self, agent: Agent, message: dict[str, Any]) -> None:
+        message_id = str(message.get("id") or message.get("messageId") or "")
+        if not message_id or self.state.contains(message_id):
+            return
+        with self.inflight_lock:
+            if message_id in self.inflight:
+                return
+            self.inflight.add(message_id)
+        future = self.executor.submit(self.handle, agent, message)
+        future.add_done_callback(lambda _future: self._finished(message_id))
+
+    def _finished(self, message_id: str) -> None:
+        with self.inflight_lock:
+            self.inflight.discard(message_id)
+
+    def poll_once(self) -> None:
+        for agent in self.agents():
+            try:
+                for message in AgentApi(agent).pending():
+                    self.submit(agent, message)
+            except Exception as error:
+                self.log(agent, f"poll error: {type(error).__name__}: {error}")
+
+    def serve(self, interval: float) -> None:
+        while not self.stop.is_set():
+            self.poll_once()
+            self.stop.wait(interval)
+        self.executor.shutdown(wait=True)
+
+
+class WebhookHandler(BaseHTTPRequestHandler):
+    server_version = "AgentChatWebhook/1"
+
+    def log_message(self, _format: str, *_args: Any) -> None:
+        return
+
+    def send_json(self, status: int, message: str) -> None:
+        body = json.dumps({"status": message}).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        self.send_json(200, "ok") if self.path == "/healthz" else self.send_json(404, "not found")
+
+    def do_POST(self) -> None:  # noqa: N802
+        daemon: ChatDaemon = self.server.daemon_ref  # type: ignore[attr-defined]
+        if self.path != "/webhook/hypertask":
+            self.send_json(404, "not found")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > MAX_WEBHOOK_BODY:
+            self.send_json(413, "invalid body length")
+            return
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            self.send_json(400, "invalid json")
+            return
+        agent = next((item for item in daemon.agents() if item.agent_id == payload.get("agentId")), None)
+        if not agent or not agent.webhook_secret_file:
+            self.send_json(403, "wrong agent")
+            return
+        timestamp = self.headers.get("X-Hypertask-Timestamp", "")
+        delivery = self.headers.get("X-Hypertask-Delivery", "")
+        event = self.headers.get("X-Hypertask-Event", "")
+        signature = self.headers.get("X-Hypertask-Signature", "")
+        try:
+            secret = agent.webhook_secret_file.read_text(encoding="utf-8").strip()
+            fresh = abs(time.time() - int(timestamp)) <= 300
+        except (OSError, ValueError):
+            fresh = False
+            secret = ""
+        expected = "sha256=" + hmac.new(secret.encode(), timestamp.encode() + b"." + raw, hashlib.sha256).hexdigest()
+        if not fresh or not hmac.compare_digest(signature, expected):
+            self.send_json(401, "invalid signature")
+            return
+        if payload.get("deliveryId") != delivery or payload.get("event") != event:
+            self.send_json(400, "header and payload mismatch")
+            return
+        if event == "chat.message" and isinstance(payload.get("chat"), dict):
+            chat = payload["chat"]
+            daemon.submit(agent, {
+                "id": chat.get("messageId"),
+                "sessionId": chat.get("sessionId"),
+                "text": chat.get("text"),
+                "userName": chat.get("userName"),
+            })
+        self.send_json(202, "accepted")
+
+
+def main() -> int:
+    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+        print("agent-chat: poll and answer Agent Chat for every conf with CHAT=on")
+        return 0
+    config_dir = Path(os.environ.get("AGENT_CHAT_CONFIG_DIR", str(Path.home() / ".config/hypertask-agents")))
+    state_dir = Path(os.environ.get("AGENT_CHAT_STATE_DIR", str(Path.home() / ".local/state/agent-chat")))
+    interval = float(os.environ.get("AGENT_CHAT_POLL_SECONDS", "3"))
+    if interval <= 0:
+        raise SystemExit("AGENT_CHAT_POLL_SECONDS must be greater than zero")
+    daemon = ChatDaemon(config_dir, state_dir)
+    signal.signal(signal.SIGTERM, lambda *_args: daemon.stop.set())
+    signal.signal(signal.SIGINT, lambda *_args: daemon.stop.set())
+    port = int(os.environ.get("AGENT_CHAT_WEBHOOK_PORT", "0"))
+    server = None
+    if port:
+        server = ThreadingHTTPServer(("127.0.0.1", port), WebhookHandler)
+        server.daemon_ref = daemon  # type: ignore[attr-defined]
+        threading.Thread(target=server.serve_forever, daemon=True, name="agent-chat-webhook").start()
+    try:
+        daemon.serve(interval)
+    finally:
+        if server:
+            server.shutdown()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

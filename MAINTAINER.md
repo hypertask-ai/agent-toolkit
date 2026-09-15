@@ -56,6 +56,29 @@ Assigned to it, @mentioned, or a human comment on a ticket it already owns
 (assigned, or its own comment is the one right before). Plus chat, on boards
 with a chat lane wired.
 
+## Chat lane
+
+`agent-chat.service` is shared by every agent on the host whose conf says
+`CHAT="on"`. It polls the agent-authenticated chat inbox every three seconds by
+default, so it works behind Cloudflare and without a public port. Set
+`AGENT_CHAT_POLL_SECONDS` in a systemd override to change that cadence. The
+optional webhook receiver is localhost-only and starts when
+`AGENT_CHAT_WEBHOOK_PORT` is set; each webhook-enabled conf also needs
+`CHAT_WEBHOOK_SECRET_FILE`. Register it only after a public HTTPS route exists.
+
+Chat and ticket runs are separate concurrent processes. A chat prompt reads
+the company skills index first, then the agent's own indexes, plus a short
+brief from the conf and latest ticket log. It explicitly forbids ticket
+comments, board writes, and worktrees. A message id is both the app reply's
+idempotency key and a row in
+`~/.local/state/agent-chat/handled.jsonl`. Provider failures still post `I
+could not answer this, error logged.`
+
+Check `systemctl --user is-active agent-chat.service`, then read
+`~/.local/state/agent-chat/<slug>.log`. Test through
+`https://app.hypertask.ai/agents/chat?agent=<slug>` with a human account and
+quote the timestamped reply. Do not test with the owner's CLI token.
+
 ## Where things live
 
 Two packs, always in this order:

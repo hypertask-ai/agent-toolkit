@@ -55,7 +55,7 @@ WIRING="poll"
 SECTIONS=""
 MODEL_CLI="claude -p --model sonnet"
 MAX_CONCURRENT_RUNS="1"
-CHAT_PAGE="no"
+CHAT_PAGE="yes"
 ROLE="write"
 DRY_RUN="yes"
 CONFIRM="no"
@@ -85,7 +85,7 @@ Options:
   --sections "A,B"         board columns the poll watches
   --model-cli "CMD"        model command template  (default: claude -p --model sonnet)
   --max-concurrent N       runs started per tick                    (default 1)
-  --chat-page yes|no       needs a hosted chat lane                 (default no)
+  --chat-page yes|no       enable the host chat lane               (default yes)
   --role ROLE              identity role on the board               (default write)
   --resume                 finish an existing identity, keep every existing value
   --yes                    actually do it
@@ -125,7 +125,10 @@ done
 [ -n "$NAME" ] || die "--name is missing" "pass --name \"<Display Name>\""
 case "$KIND" in dev|qa|worker|cli) ;; *) die "--kind must be dev, qa, worker or cli, got '$KIND'" "pick one of those four" ;; esac
 case "$WIRING" in poll|fleet|none) ;; *) die "--wiring must be poll, fleet or none, got '$WIRING'" "use poll unless you know this machine runs a worker runtime" ;; esac
-case "$CHAT_PAGE" in yes|no) ;; *) die "--chat-page must be yes or no" "pass --chat-page no unless a hosted chat lane is needed" ;; esac
+case "$CHAT_PAGE" in yes|no) ;; *) die "--chat-page must be yes or no" "pass --chat-page yes or --chat-page no" ;; esac
+if [ "$KIND" = "cli" ] || [ "$BOARD" = "none" ]; then CHAT_PAGE="no"; fi
+CHAT="off"
+[ "$CHAT_PAGE" = "yes" ] && CHAT="on"
 if [ -n "$PR_REPO" ]; then
   case "$PR_REPO" in
     */*) ;;
@@ -200,10 +203,6 @@ if [ "$WIRING" = "fleet" ] && ! adapter_supports_fleet_wiring; then
   die "fleet wiring was asked for, but this machine has no worker runtime for the '$BOARD' adapter" \
       "re-run with --wiring poll, which needs only the board CLI and a model CLI on this machine"
 fi
-if [ "$CHAT_PAGE" = "yes" ] && [ "$WIRING" != "fleet" ]; then
-  die "a chat page needs a hosted chat lane, which only fleet wiring provides" \
-      "re-run with --chat-page no, or with --wiring fleet on a machine that has the worker runtime"
-fi
 if [ "$BOARD" = "none" ] && [ "$WIRING" = "poll" ]; then
   WIRING="none"
   warn "no board adapter, so there is nothing to poll: wiring set to none"
@@ -252,6 +251,11 @@ echo "  pr-repo   ${PR_REPO:-none (agent-board-poll will refuse to tick without 
 echo "  skills    $SKILLS_INDEX"
 echo "            (read in order: company pack first, bot pack last)"
 echo "  model CLI $MODEL_CLI"
+if [ "$CHAT" = "on" ]; then
+  echo "  chat      on (https://app.hypertask.ai/agents/chat?agent=$SLUG)"
+else
+  echo "  chat      off"
+fi
 echo "  conf      $CONF_FILE"
 echo "  token     $TOKEN_FILE (0600, never printed)"
 if [ "$DRY_RUN" = "yes" ]; then echo "  (dry run: nothing below is executed)"; fi
@@ -422,6 +426,7 @@ SKILLS_INDEX="$SKILLS_INDEX"
 MODEL_CLI="$MODEL_CLI"
 MAX_CONCURRENT_RUNS="$MAX_CONCURRENT_RUNS"
 WIRING="$WIRING"
+CHAT="$CHAT"
 EOF
 )"
 # PR_REPO only when given: an empty PR_REPO="" written to a conf that has
@@ -490,7 +495,10 @@ if [ "$WIRING" = "poll" ]; then
   [ ] agent-board-poll@$SLUG.timer is active
 EOF
 fi
-if [ "$CHAT_PAGE" = "yes" ]; then echo "  [ ] the chat page answers, and the reply is quoted verbatim"; fi
+if [ "$CHAT_PAGE" = "yes" ]; then
+  echo "  [ ] agent-chat.service is active"
+  echo "  [ ] https://app.hypertask.ai/agents/chat?agent=$SLUG answers, and the reply is quoted verbatim"
+fi
 
 echo
 if [ "$DRY_RUN" = "yes" ]; then

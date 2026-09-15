@@ -5,6 +5,34 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.13.0 - 2026-09-16
+
+Agent Chat now works for poll-wired agents on hosts with no public inbound port.
+
+- `agent-chat.service` is one always-on daemon per host. It scans template
+  confs with `CHAT="on"`, heartbeats and polls each agent's authenticated chat
+  inbox every three seconds, and runs each chat turn independently of ticket
+  work and other agents.
+- Chat turns load the last 50 conversation messages, the company skills index
+  first, each agent's own index paths, its mission, and recent ticket-run log.
+  The prompt forbids ticket comments, board writes, and worktrees.
+- Replies run through the conf's `MODEL_CLI` at low Claude effort with a
+  90-second timeout. Provider errors still receive a one-line error reply.
+  Reply idempotency and `~/.local/state/agent-chat/handled.jsonl` prevent a
+  restart from answering twice.
+- Polling needs no inbound port. A localhost signed-webhook receiver is
+  available through `AGENT_CHAT_WEBHOOK_PORT` and the existing Hypertask HMAC
+  headers when a host has a public HTTPS route.
+- New non-CLI board agents default to `CHAT="on"`; `agent-template update`
+  adds it to existing poll or fleet template confs. Provisioning prints the
+  agent's chat URL and the acceptance checklist requires a quoted reply.
+- `install.sh` installs, enables, and restarts `agent-chat.service`. Test
+  installs still skip the real systemd user directory unless `--unit-dir` is
+  explicitly passed.
+- The eval suite proves one message is handled once, provider failure gets the
+  error reply, and two agents on one host answer independently.
+
+ACTION: after the app polling endpoint is live, run `agent-template update` on each bot host, send a human chat message, and quote the timestamped reply from `~/.local/state/agent-chat/<slug>.log`.
 ## 3.12.1 - 2026-09-16
 
 - The AGENTS.md the sync lays into a project repo, and the README the

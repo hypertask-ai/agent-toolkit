@@ -146,6 +146,7 @@ echo "source: $SRC"
 echo "skill:  $DEST"
 echo "docs:   $DEST/MAINTAINER.md"
 echo "bin:    $BIN/agent-board-poll -> $DEST/scripts/agent-board-poll"
+echo "bin:    $BIN/agent-chat -> $DEST/scripts/agent-chat"
 echo "bin:    $BIN/agent-template -> $DEST/scripts/agent-template"
 echo "bin:    $BIN/agent-template-weekly -> $DEST/scripts/agent-template-weekly"
 echo "bin:    $BIN/agent-advisor -> $DEST/scripts/agent-advisor"
@@ -187,6 +188,7 @@ for dir in scripts adapters evals repo-skeleton project-template; do
   fi
 done
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
+          "$DEST/scripts/agent-chat" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/triage.sh" \
           "$DEST/scripts/sync-project.sh" \
@@ -197,6 +199,7 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
 # A symlink, so the installed runner and the installed skill can never drift
 # apart, and so the runner still finds its adapters through readlink -f.
 ln -sfn "$DEST/scripts/agent-board-poll" "$BIN/agent-board-poll"
+ln -sfn "$DEST/scripts/agent-chat" "$BIN/agent-chat"
 ln -sfn "$DEST/scripts/agent-template" "$BIN/agent-template"
 ln -sfn "$DEST/scripts/agent-template-weekly" "$BIN/agent-template-weekly"
 # agent-advisor is on PATH because a run calls it by name from inside a model
@@ -209,6 +212,9 @@ bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
 "$BIN/agent-board-poll" --help >/dev/null \
   || fail "the installed agent-board-poll does not run" \
           "check that $BIN is on PATH and the symlink resolves"
+"$BIN/agent-chat" --help >/dev/null \
+  || fail "the installed agent-chat does not run" \
+          "check python3 is present and the symlink resolves"
 "$BIN/agent-template" --help >/dev/null \
   || fail "the installed agent-template does not run" \
           "check that $BIN is on PATH and the symlink resolves"
@@ -241,6 +247,23 @@ elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >
   # shellcheck disable=SC1091
   . "$DEST/scripts/lib/core.sh"
   core_write_poll_units "$SYSTEMD_USER_DIR" "$BIN"
+  cat > "$SYSTEMD_USER_DIR/agent-chat.service" <<EOF
+[Unit]
+Description=Hypertask Agent Chat lane for this host
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$BIN/agent-chat
+Restart=always
+RestartSec=2
+TimeoutStopSec=100
+
+[Install]
+WantedBy=default.target
+EOF
 
   # agent-template-update.timer is how a bot host stays in sync with this
   # template on its own, without anyone explaining the fix to it by hand:
@@ -275,8 +298,11 @@ Unit=agent-template-update.service
 WantedBy=timers.target
 EOF
   systemctl --user daemon-reload
+  systemctl --user enable agent-chat.service
+  systemctl --user restart agent-chat.service
   systemctl --user enable --now agent-template-update.timer
   echo "poll units: $SYSTEMD_USER_DIR/agent-board-poll@.service + .timer (refreshed, daemon-reload done)"
+  echo "chat service: agent-chat.service (enabled and restarted)"
   echo "update timer: agent-template-update.timer, daily 06:30 local ($(systemctl --user list-timers agent-template-update.timer --no-pager 2>/dev/null | sed -n '2p'))"
 else
   echo "WARNING: no systemd --user session here: skipped refreshing agent-board-poll@.service/.timer and agent-template-update.timer" >&2

@@ -54,9 +54,8 @@ Claude: [runs the script with --yes] ... FP CRO Bot picked up the test ticket
    - **Kind** : dev (ships fixes), QA (verifies, never fixes), plain worker, or
      a CLI identity (a name for logs and commit trails, nothing else).
    - **Which board** : the tracker and the board id, or "just a repo".
-   - **Chat page?** : default **no**. Say yes only if a person needs to message
-     the agent in a hosted chat window. It is the one thing poll wiring cannot
-     give you.
+   - **Chat page?** : default **yes** for every non-CLI board agent. Say no
+     only when this identity must not answer in the hosted chat window.
    Never show a flag name to him: map his words yourself.
 3. **Show a five-line plan and ask "go?"** before anything real happens. If the
    skills index has no skill matching this agent's domain, write that skill
@@ -71,8 +70,8 @@ Claude: [runs the script with --yes] ... FP CRO Bot picked up the test ticket
 
 | Mode | What it needs | What you get | When to pick it |
 |---|---|---|---|
-| **poll** (default) | the board CLI and a model CLI on this machine, nothing else | a 60-second timer; each tick reads the board and starts one short-lived process per new ticket | almost always, and always for a growth, CRO or support bot |
-| **fleet** | a long-lived worker runtime already installed on this machine, which the adapter checks for | webhooks, a chat lane, the runtime's own queue and retries | only where that runtime is already running |
+| **poll** (default) | the board CLI and a model CLI on this machine, nothing else | a 60-second board timer plus the shared 3-second chat lane | almost always, and always for a growth, CRO or support bot |
+| **fleet** | a long-lived worker runtime already installed on this machine, which the adapter checks for | webhooks, the shared chat lane, the runtime's own queue and retries | only where that runtime is already running |
 | **none** | nothing | an identity, a conf, a skills index; you trigger it from cron, CI or by hand | repo-only agents, and CLI identities |
 
 **Poll mode runs on any machine that has the board CLI and a model CLI. It
@@ -80,8 +79,36 @@ needs no shared fleet infrastructure and no second machine.** If `--wiring
 fleet` is asked for where the runtime is absent, the script stops and names
 poll mode instead of dead-ending.
 
-A chat page is the one capability poll mode does not have, which is why the
-question defaults to no.
+Chat is independent of board wiring. Poll mode is the default because it works
+behind Cloudflare and on hosts with no public port.
+
+## Chat lane
+
+`agent-chat.service` is one always-on process per host. Every three seconds it
+finds each conf with `CHAT="on"`, heartbeats the agent's polling runtime, and
+asks for its newest unanswered message. Each agent runs concurrently with the
+others and with ticket work. It reads conversation history, the company skills
+index first, then the agent's own indexes, and a short brief from the conf and
+the latest `agent-board-poll` log. Chat prompts forbid board writes and
+worktrees.
+
+Replies use the conf's `MODEL_CLI`, low effort for Claude, and a 90-second
+timeout. The MCP reply uses the human message id as its idempotency key, and
+`~/.local/state/agent-chat/handled.jsonl` records it after the reply lands, so
+a restart cannot duplicate it. Provider errors are logged and answered with a
+one-line error instead of leaving the conversation silent. Per-agent logs are
+`~/.local/state/agent-chat/<slug>.log`.
+
+Polling is the default and needs no inbound port. Set
+`AGENT_CHAT_POLL_SECONDS` on the service to change the three-second cadence.
+An optional signed receiver can run on localhost by setting
+`AGENT_CHAT_WEBHOOK_PORT`; an agent using it also needs
+`CHAT_WEBHOOK_SECRET_FILE` in its conf. Expose and register that receiver only
+on a host with a real public HTTPS route. Both modes call the same handler.
+
+Provisioning prints `https://app.hypertask.ai/agents/chat?agent=<slug>`. Send a
+message there with a human account, then quote the timestamped reply from the
+agent log. Never send that test with the owner's CLI token.
 
 ## Where the agent runs
 
@@ -126,6 +153,7 @@ CHANGELOG.md                  one entry per version; ACTION: lines are read by u
 core
   scripts/create-agent.sh     provisioning: identity, conf, wrapper, wiring
   scripts/agent-board-poll    one work tick: read, decide, spawn, log
+  scripts/agent-chat          shared host daemon: poll, answer, deduplicate
   scripts/agent-template      feedback: file a correction where it can be replayed;
                                update: pull, reinstall, convert old-schema confs
   scripts/agent-template-weekly  turn a week of corrections into one pull request
@@ -243,6 +271,7 @@ it never deletes or rewrites an existing case.
 | `SKILLS_INDEX` | the indexes the agent reads first, comma separated, **company pack first, bot pack last** |
 | `MODEL_CLI` | command template, default `claude -p --model sonnet` |
 | `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
+| `CHAT` | `on` to answer through the host chat daemon, default `on` for non-CLI board agents |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
 | `EXCLUDE_LABELS` | labels that make a ticket off limits, comma separated |
 | `WORKDIR_MODE` | `repo` (default) runs in `AGENT_REPO`; `per-run` gives each ticket its own checkout |
