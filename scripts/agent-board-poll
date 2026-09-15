@@ -440,8 +440,15 @@ if ! flock -n 9; then
 fi
 
 MENTION="$(adapter_mention_token "$AGENT_ID")"
+# Which skills this tick will read, by version, logged before any ticket is
+# picked. A bot behaving oddly is usually a bot reading an old pack, and this
+# is the line that shows it. It belongs to the tick, not to the ticket run, so
+# an idle tick and a --dry-run tick say it too.
+SKILLS_LINE="skills: company $COMPANY_PACK_NAME $COMPANY_SKILLS_VERSION at $COMPANY_SKILLS_DIR; repo ${REPO_SKILLS_VERSION} at ${REPO_SKILLS_DIR:-none}"
+log "$SKILLS_LINE"
 if [ "$DRY_RUN" = "yes" ]; then
   echo "agent $AGENT_NAME ($AGENT_ID) on board $BOARD_ID, sections: $WATCH_SECTIONS"
+  echo "$SKILLS_LINE"
 fi
 
 # A third source of candidates, alongside the board's own list: tickets this
@@ -785,7 +792,7 @@ $PROMPT"
   log "run start $ref key=$key dir=${RUN_DIR:-.} attempt=$((tries + 1)): $why"
   # Which skills this run is about to read, by version. A bot behaving oddly is
   # usually a bot reading an old pack, and this is the line that shows it.
-  log "skills: company $COMPANY_PACK_NAME $COMPANY_SKILLS_VERSION at $COMPANY_SKILLS_DIR; repo ${REPO_SKILLS_VERSION} at ${REPO_SKILLS_DIR:-none}"
+  log "$SKILLS_LINE"
   printf '%s %s\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
   started=$((started + 1))
   set +e
