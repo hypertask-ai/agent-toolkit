@@ -18,9 +18,13 @@
 # still on the old HT_* fleet schema forward onto the current one, so a bot
 # host nobody is watching does not silently drift. Steps:
 #   1. git pull --ff-only in AGENT_TEMPLATE_REPO (default ~/projects/vstack)
-#   2. run install.sh, which also refreshes the shared systemd units and
-#      runs the eval suite; either failing stops here, non-zero, and
-#      nothing below runs
+#   2. run install.sh, which also refreshes the shared systemd units, clones
+#      or fast-forwards the shared company skills pack to
+#      ~/projects/company-skills, and runs the eval suite; either failing
+#      stops here, non-zero, and nothing below runs
+#   2c. print where the company pack landed and what commit it is on, so a
+#       daily run says out loud whether every bot on this host is reading
+#       the current shared rules
 #   2b. print every CHANGELOG.md line marked ACTION: (something this
 #       template cannot do for itself) and log each one once per version to
 #       ~/.local/state/agent-template/actions.log, so a maintainer session
@@ -200,6 +204,18 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   bash "$TEMPLATE_DIR/install.sh" \
     || die "install.sh failed (see its output above)" \
         "fix the failing step and re-run agent-template update; no conf was touched and no timer was restarted"
+
+  echo "== 2c. shared company skills pack =="
+  # install.sh above clones or fast-forwards it; this prints where it landed
+  # and what it is on, so a daily update run says out loud whether every bot
+  # on this host is reading the current shared rules. A pack that cannot be
+  # reached is a warning, never a failure: a stale pack still runs.
+  COMPANY_SKILLS_DIR="${COMPANY_SKILLS_DIR:-$HOME/projects/company-skills}"
+  if [ -d "$COMPANY_SKILLS_DIR/.git" ]; then
+    echo "  $COMPANY_SKILLS_DIR @ $(git -C "$COMPANY_SKILLS_DIR" log -1 --format='%h %s' 2>/dev/null || echo unknown)"
+  else
+    echo "  WARNING: no company pack at $COMPANY_SKILLS_DIR. Every bot here is running on its own pack only." >&2
+  fi
 
   echo "== 2b. CHANGELOG.md ACTION lines =="
   # A line marked ACTION: is a step this template cannot do for itself (a

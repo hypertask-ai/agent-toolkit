@@ -180,6 +180,80 @@ core_require_abs() {
   esac
 }
 
+# ---------- skill packs ----------
+# SKILLS_INDEX is a LIST, not one path: the company pack first, then this
+# bot's own pack. Every bot in a company does the same things to a board and
+# builds different things on top, so the shared half lives in one repo every
+# bot reads, and the bot pack only carries what is its own. An agent reads
+# them in order, and the first pack wins a name collision, which is why the
+# company pack goes first.
+#
+# Comma-separated, like WATCH_SECTIONS and EXCLUDE_LABELS. One path is still
+# a valid list of one, so every conf written before this change keeps working.
+
+# core_skill_indexes <value> : print one absolute index path per line.
+core_skill_indexes() {
+  # `read` returns false on the final line when it has no trailing newline, so
+  # the loop has to keep going while the variable still holds something, or the
+  # last pack in the list is silently dropped.
+  printf '%s\n' "$1" | tr ',' '\n' | while IFS= read -r one || [ -n "$one" ]; do
+    one="$(printf '%s' "$one" | tr -d '[:space:]')"
+    [ -n "$one" ] && printf '%s\n' "$one"
+  done
+}
+
+# core_check_skill_indexes <value> <key name> : every entry absolute and real.
+core_check_skill_indexes() {
+  local value="$1" key="$2" found=0 one
+  while IFS= read -r one; do
+    [ -n "$one" ] || continue
+    found=1
+    core_require_abs "$one" "$key"
+    [ -f "$one" ] || die "the skills index $one does not exist" \
+      "point $key at a real index file; an agent with no skills has nothing to follow"
+  done <<EOF
+$(core_skill_indexes "$value")
+EOF
+  [ "$found" = "1" ] || die "$key is empty" \
+    "set $key to one or more absolute index paths, comma-separated, company pack first"
+}
+
+# core_skill_index_at <value> <first|last> : one entry, without piping into
+# head or tail. Under `set -o pipefail` the writer gets SIGPIPE the moment head
+# closes the pipe, and the whole script dies with 141 before it prints a word.
+core_skill_index_at() {
+  local which="$2" one out=""
+  while IFS= read -r one; do
+    [ -n "$one" ] || continue
+    if [ "$which" = "first" ]; then
+      printf '%s' "$one"
+      return 0
+    fi
+    out="$one"
+  done <<EOF
+$(core_skill_indexes "$1")
+EOF
+  printf '%s' "$out"
+}
+
+# core_skill_index_sentence <value> : the phrase a prompt uses for the list.
+core_skill_index_sentence() {
+  local value="$1" n one out=""
+  n=0
+  while IFS= read -r one; do
+    [ -n "$one" ] || continue
+    n=$((n + 1))
+    if [ -z "$out" ]; then out="$one"; else out="$out, then $one"; fi
+  done <<EOF
+$(core_skill_indexes "$value")
+EOF
+  if [ "$n" -gt 1 ]; then
+    printf '%s (the company pack first, then your own)' "$out"
+  else
+    printf '%s' "$out"
+  fi
+}
+
 # ---------- a working directory per run ----------
 # Some agents change code, and two runs sharing one checkout overwrite each
 # other's edits. WORKDIR_MODE=per-run gives each run its own directory under

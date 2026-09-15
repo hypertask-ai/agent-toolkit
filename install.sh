@@ -12,6 +12,11 @@
 #   ./install.sh --dry-run          # show what would be copied where
 #   ./install.sh                    # install for the current user
 #
+# It also clones or fast-forwards the shared company skills pack to
+# ~/projects/company-skills, because every bot reads that pack before its own.
+# SKIP_COMPANY_SKILLS=yes to leave it alone; COMPANY_SKILLS_DIR / _REPO to
+# point it elsewhere.
+#
 # Failure contract: ERROR: <what happened>. Do this next: <one step>, non-zero.
 
 set -euo pipefail
@@ -24,6 +29,36 @@ SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
 DRY_RUN="no"
 
 fail() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
+
+# ---------- the shared company skills pack ----------
+# Every bot reads a company pack before its own, so the pack has to exist on
+# every host the template is installed on, not only the one where somebody
+# remembered to clone it. Clone it if missing, fast-forward if present, and
+# warn rather than fail if the host cannot reach GitHub: a stale pack still
+# runs, a missing install does not.
+COMPANY_SKILLS_REPO="${COMPANY_SKILLS_REPO:-git@github.com:hypertask-ai/company-skills.git}"
+COMPANY_SKILLS_DIR="${COMPANY_SKILLS_DIR:-$HOME/projects/company-skills}"
+
+sync_company_skills() {
+  if [ "${SKIP_COMPANY_SKILLS:-no}" = "yes" ]; then
+    echo "company pack: skipped (SKIP_COMPANY_SKILLS=yes)"
+    return 0
+  fi
+  if [ -d "$COMPANY_SKILLS_DIR/.git" ]; then
+    if git -C "$COMPANY_SKILLS_DIR" pull --ff-only -q 2>/dev/null; then
+      echo "company pack: up to date at $COMPANY_SKILLS_DIR"
+    else
+      echo "WARNING: could not fast-forward $COMPANY_SKILLS_DIR (local changes, or no network). Using the copy that is there." >&2
+    fi
+  else
+    mkdir -p "$(dirname "$COMPANY_SKILLS_DIR")"
+    if git clone -q "$COMPANY_SKILLS_REPO" "$COMPANY_SKILLS_DIR" 2>/dev/null; then
+      echo "company pack: cloned to $COMPANY_SKILLS_DIR"
+    else
+      echo "WARNING: could not clone $COMPANY_SKILLS_REPO to $COMPANY_SKILLS_DIR. Bots on this host will run on their own pack only." >&2
+    fi
+  fi
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -49,6 +84,7 @@ echo "bin:    $BIN/agent-template-weekly -> $DEST/scripts/agent-template-weekly"
 echo "version: $(cat "$SRC/VERSION")"
 
 if [ "$DRY_RUN" = "yes" ]; then
+  echo "company pack: would sync $COMPANY_SKILLS_REPO -> $COMPANY_SKILLS_DIR"
   echo "(dry run: nothing copied)"
   exit 0
 fi
@@ -135,6 +171,8 @@ EOF
 else
   echo "WARNING: no systemd --user session here: skipped refreshing agent-board-poll@.service/.timer and agent-template-update.timer" >&2
 fi
+
+sync_company_skills
 
 echo "installed. Next: run create-agent.sh --help, or agent-board-poll --once --dry-run <slug>"
 echo "corrections: agent-template feedback --what ... --got ... --expected ..."

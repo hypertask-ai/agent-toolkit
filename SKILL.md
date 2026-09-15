@@ -205,7 +205,7 @@ it never deletes or rewrites an existing case.
 | `TOKEN_FILE` | absolute path to the 0600 token file |
 | `BOARD_CLI` | the wrapper that runs board writes as this agent |
 | `WATCH_SECTIONS` | comma-separated columns to watch |
-| `SKILLS_INDEX` | absolute path to the index the agent reads first |
+| `SKILLS_INDEX` | the indexes the agent reads first, comma separated, **company pack first, bot pack last** |
 | `MODEL_CLI` | command template, default `claude -p --model sonnet` |
 | `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
@@ -216,6 +216,33 @@ it never deletes or rewrites an existing case.
 | `RETRY_WINDOW_SECONDS` | length of that window, default 21600 (six hours) |
 | `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
 | `PR_REPO` | the repository whose pull requests say whether a ticket is finished |
+
+## Company pack + bot pack
+
+`SKILLS_INDEX` is a list, not one path. Every bot in a company does the same
+things to a board (claim a ticket, shape a comment, escalate a decision, write
+to the owner) and different things on top. So there are two packs:
+
+- the **company pack**, one repo every bot reads first. `install.sh` clones or
+  fast-forwards it to `~/projects/company-skills` on every host, and
+  `agent-template update` says which commit it is on.
+- the **bot pack**, what this bot alone does.
+
+The runner concatenates them for the prompt, in order, and the first pack wins
+a name collision, which is why the company pack goes first. A conf with one
+path is a list of one and keeps working unchanged.
+
+```
+SKILLS_INDEX="/home/valentin/projects/company-skills/INDEX.md,/home/valentin/projects/hypertask-agent-skills/INDEX.md"
+```
+
+`create-agent.sh --skills-index` is repeatable, or takes the comma-separated
+list directly. The domain-words warning checks the **bot** pack, the last one:
+a company pack is generic by definition and would match nothing.
+
+Board mechanics a skill needs but cannot hardcode (column names) come from a
+`board.yml` next to the bot's conf, not from a skill file. See the company
+pack's `supervise-board/scripts/board_config.py`.
 
 `BOARD_ID` takes more than one board, comma separated. `WATCH_SECTIONS` takes
 `*` for every column, which is what an agent answering @mentions needs.

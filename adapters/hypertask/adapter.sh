@@ -603,8 +603,12 @@ adapter_workdir_remove() {
 adapter_run_prompt() {
   local skills_index="$1" agent_name="$2" board_cli="$3" ref="$4" url="$5"
   local title="$6" description="$7" latest="$8" why="${9:-}"
-  local route_sh="$(dirname "$skills_index")/ticket-lifecycle/scripts/route.sh"
-  local claim_sh="$(dirname "$skills_index")/ticket-lifecycle/scripts/claim-ticket.sh"
+  # $skills_index is now a readable phrase naming every pack, so the lifecycle
+  # scripts are looked up under the FIRST pack (the company one), which is
+  # where ticket-lifecycle lives. The runner exports it.
+  local primary="${SKILLS_INDEX_PRIMARY:-$skills_index}"
+  local route_sh="$(dirname "$primary")/ticket-lifecycle/scripts/route.sh"
+  local claim_sh="$(dirname "$primary")/ticket-lifecycle/scripts/claim-ticket.sh"
   cat <<EOF
 You are $agent_name. You have one ticket, $ref, and this process ends when you do.
 
@@ -622,7 +626,9 @@ to it and fix what is wrong. Opening a second pull request for one ticket is
 the one mistake that wastes everybody.
 
 Run \`$route_sh $ref\` first and follow the named skills, in the order it
-names them. $skills_index is the fallback only if that prints NO_ROUTE.
+names them. It resolves a skill against both packs, so the paths it prints are
+real. The indexes are the fallback only if it prints NO_ROUTE: read
+$skills_index, in that order, company pack before your own.
 
 Claim the ticket with \`$claim_sh $ref\` before you write any code. Never
 assign userId 6: only Valentin assigns Valentin.

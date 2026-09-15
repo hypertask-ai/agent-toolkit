@@ -18,9 +18,10 @@ until you do it.
   the template has since made redundant. This is what keeps a bot host in
   sync without someone explaining the fix to it by hand.
 - **Supervisor timer** — watches the fleet, not one bot: restarts a dead
-  timer, flags a stuck run, escalates what a bot cannot fix itself. Generic
-  version lands 2026-09-16; until then the Hypertask one at
-  `~/.local/bin/ht-supervisor` is the reference.
+  timer, flags a stuck run, escalates what a bot cannot fix itself. It lives in
+  the company pack as the `supervise-board` skill; `~/.local/bin/ht-supervisor`
+  is a thin entry point into it. Its columns are roles mapped in `board.yml`,
+  so the same checks run on any board.
 - **Feedback command** — `agent-template feedback`, filed the moment a human
   corrects the bot's work.
 - **Weekly report** — `agent-template-weekly`, turns a week of corrections
@@ -34,8 +35,20 @@ with a chat lane wired.
 
 ## Where things live
 
-- Rules: the skill files under the skills index (`SKILLS_INDEX` in its conf).
-- Skills index: `SKILLS_INDEX` in the conf, read first on every run.
+Two packs, always in this order:
+
+- **Company pack** — `~/projects/company-skills`, cloned and fast-forwarded by
+  `install.sh` on every host. How a bot operates here: board lifecycle, comment
+  shape, escalation, where facts live, how a correction becomes a rule, the
+  supervisor. Every bot reads it first. A rule that would still be true for a
+  different board or customer belongs here.
+- **Bot pack** — what this bot alone does. A fact that names one product (a
+  repo path, a deploy command, a board id) belongs here, or in a doc, never in
+  the company pack.
+
+- Skills index: `SKILLS_INDEX` in the conf. A comma-separated list, company
+  pack first, bot pack last. Read in that order on every run.
+- Column names: `board.yml` next to the conf, not a skill file.
 - Its own conf: `<config dir>/<slug>.conf`, 0600.
 
 ## Five daily checks
@@ -69,3 +82,6 @@ with a chat lane wired.
   it, not on inspection alone.
 - A fact (a number, a name, a date, a path) goes into a doc or the ticket.
   A rule (always or never do X) goes into a skill file.
+- A rule that would still be true for a different board or customer goes into
+  the company pack, not this bot's. Copying it into both is how two packs
+  drift.

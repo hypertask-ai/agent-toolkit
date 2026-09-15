@@ -84,10 +84,15 @@ esac
 # a retry.
 RETRY_LIMIT="${RETRY_LIMIT:-2}"
 RETRY_WINDOW_SECONDS="${RETRY_WINDOW_SECONDS:-21600}"
-core_require_abs "$SKILLS_INDEX" "SKILLS_INDEX"
+# SKILLS_INDEX is a comma-separated LIST: company pack first, bot pack second.
+# One path is a list of one, so every conf written before the split still works.
+core_check_skill_indexes "$SKILLS_INDEX" "SKILLS_INDEX"
+# The prompt gets them concatenated, in order, as one phrase.
+SKILLS_INDEX_SENTENCE="$(core_skill_index_sentence "$SKILLS_INDEX")"
+# The first index is the primary pack: the one whose directory holds the
+# lifecycle scripts an adapter reaches for.
+SKILLS_INDEX_PRIMARY="$(core_skill_index_at "$SKILLS_INDEX" first)"
 core_require_abs "$TOKEN_FILE" "TOKEN_FILE"
-[ -f "$SKILLS_INDEX" ] || die "the skills index $SKILLS_INDEX does not exist" \
-  "point SKILLS_INDEX at a real index file; an agent with no skills has nothing to follow"
 [ -x "$BOARD_CLI" ] || die "the board CLI $BOARD_CLI is missing or not executable" \
   "re-run create-agent.sh --resume for this agent to reinstall its board wrapper"
 if [ -n "${PROMPT_FILE:-}" ]; then
@@ -157,7 +162,20 @@ log() {
 # --dry-run: that path exits before the loop that runs a model at all.
 push_skill_commits() {
   local ref="$1" skills_repo current_branch default_branch commits changed evals_sh eval_out failing
-  skills_repo="$(git -C "$(dirname "$SKILLS_INDEX")" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  # One call per pack: a correction can land in the company pack or the bot
+  # pack, and pushing only the first would strand the other one uncommitted.
+  if [ -z "${SKILL_PACK_ONE:-}" ]; then
+    local index
+    while IFS= read -r index; do
+      [ -n "$index" ] || continue
+      SKILL_PACK_ONE="$index" push_skill_commits "$ref"
+    done <<EOF
+$(core_skill_indexes "$SKILLS_INDEX")
+EOF
+    return 0
+  fi
+
+  skills_repo="$(git -C "$(dirname "$SKILL_PACK_ONE")" rev-parse --show-toplevel 2>/dev/null)" || return 0
   [ -n "$skills_repo" ] || return 0
 
   current_branch="$(git -C "$skills_repo" symbolic-ref --short -q HEAD 2>/dev/null || true)"
@@ -471,7 +489,7 @@ print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:120
     PROMPT="$(PF="$PROMPT_FILE" REF="$ref" URL="$url" TITLE="$title" \
               DESCRIPTION="$description" COMMENT="${comment_text:-none}" \
               AGENT_NAME="$AGENT_NAME" BOARD_CLI="$BOARD_CLI" \
-              SKILLS_INDEX="$SKILLS_INDEX" BOARD="$board" WHY="$why" python3 -c '
+              SKILLS_INDEX="$SKILLS_INDEX_SENTENCE" BOARD="$board" WHY="$why" python3 -c '
 import os, sys
 template = open(os.environ["PF"]).read()
 for name in ("REF", "URL", "TITLE", "DESCRIPTION", "COMMENT", "AGENT_NAME",
@@ -479,10 +497,11 @@ for name in ("REF", "URL", "TITLE", "DESCRIPTION", "COMMENT", "AGENT_NAME",
     template = template.replace("{{%s}}" % name, os.environ.get(name, ""))
 sys.stdout.write(template)')"
   elif declare -F adapter_run_prompt >/dev/null 2>&1; then
-    PROMPT="$(adapter_run_prompt "$SKILLS_INDEX" "$AGENT_NAME" "$BOARD_CLI" \
+    PROMPT="$(SKILLS_INDEX_PRIMARY="$SKILLS_INDEX_PRIMARY" \
+              adapter_run_prompt "$SKILLS_INDEX_SENTENCE" "$AGENT_NAME" "$BOARD_CLI" \
                 "$ref" "$url" "$title" "$description" "$comment_text" "$why")"
   else
-    PROMPT="Read $SKILLS_INDEX first and follow the skill whose trigger matches this ticket.
+    PROMPT="Read $SKILLS_INDEX_SENTENCE first, in that order, and follow the skill whose trigger matches this ticket.
 
 Ticket $url: $title.
 

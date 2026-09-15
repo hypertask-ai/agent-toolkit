@@ -38,6 +38,9 @@ BOARD_ID=""
 REPO=""
 SKILLS_REPO=""
 SKILLS_INDEX=""
+# The shared pack, cloned by install.sh. Override for a company that keeps
+# its own somewhere else, or point it at nothing to provision a single-pack bot.
+COMPANY_SKILLS_INDEX="${COMPANY_SKILLS_INDEX:-$HOME/projects/company-skills/INDEX.md}"
 MISSION_FILE=""
 WIRING="poll"
 SECTIONS=""
@@ -84,7 +87,9 @@ while [ $# -gt 0 ]; do
     --project|--board-id) BOARD_ID="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
     --skills-repo) SKILLS_REPO="$2"; shift 2 ;;
-    --skills-index) SKILLS_INDEX="$2"; shift 2 ;;
+    # Repeatable, or one comma-separated list. Order matters: the shared
+    # company pack first, this bot's own pack last.
+    --skills-index) if [ -n "$SKILLS_INDEX" ]; then SKILLS_INDEX="$SKILLS_INDEX,$2"; else SKILLS_INDEX="$2"; fi; shift 2 ;;
     --mission-file) MISSION_FILE="$2"; shift 2 ;;
     --wiring) WIRING="$2"; shift 2 ;;
     --sections) SECTIONS="$2"; shift 2 ;;
@@ -126,15 +131,27 @@ if [ -z "$SKILLS_INDEX" ]; then
   [ -n "$SKILLS_REPO" ] || die "neither --skills-index nor --skills-repo was given" \
     "point the agent at a skills index: an agent with no skills has nothing to follow"
   SKILLS_INDEX="$SKILLS_REPO/INDEX.md"
+  # Two packs: the company pack every bot reads first, then this bot's own.
+  # Prepended only when it is actually on this host and is not already the
+  # pack we just picked, so a machine without it still provisions.
+  if [ -f "$COMPANY_SKILLS_INDEX" ] && [ "$COMPANY_SKILLS_INDEX" != "$SKILLS_INDEX" ]; then
+    SKILLS_INDEX="$COMPANY_SKILLS_INDEX,$SKILLS_INDEX"
+  fi
 fi
-core_require_abs "$SKILLS_INDEX" "--skills-index"
-[ -f "$SKILLS_INDEX" ] || warn "$SKILLS_INDEX does not exist yet: create it before the first run"
-if [ -f "$SKILLS_INDEX" ]; then
+SKILLS_INDEX_PRIMARY="$(core_skill_index_at "$SKILLS_INDEX" first)"
+SKILLS_INDEX_LAST="$(core_skill_index_at "$SKILLS_INDEX" last)"
+for one in $(core_skill_indexes "$SKILLS_INDEX"); do
+  core_require_abs "$one" "--skills-index"
+  [ -f "$one" ] || warn "$one does not exist yet: create it before the first run"
+done
+# The domain check looks at the BOT pack, the last one in the list: the
+# company pack is generic by definition and would match nothing.
+if [ -f "$SKILLS_INDEX_LAST" ]; then
   DOMAIN_WORDS="$(printf '%s' "$SLUG" | tr '-' '\n' | awk 'length($0) > 2 && $0 !~ /^(agent|assistant|bot|claude|cli|codex|cursor|dev|qa|worker)$/')"
   if [ -n "$DOMAIN_WORDS" ]; then
     DOMAIN_PATTERN="$(printf '%s\n' "$DOMAIN_WORDS" | paste -sd '|' -)"
-    if ! grep -Eiq "$DOMAIN_PATTERN" "$SKILLS_INDEX"; then
-      warn "$SKILLS_INDEX has no match for domain words: $(printf '%s' "$DOMAIN_WORDS" | paste -sd ',' -): create the domain skill before running the chat test"
+    if ! grep -Eiq "$DOMAIN_PATTERN" "$SKILLS_INDEX_LAST"; then
+      warn "$SKILLS_INDEX_LAST has no match for domain words: $(printf '%s' "$DOMAIN_WORDS" | paste -sd ',' -): create the domain skill before running the chat test"
     fi
   fi
 fi
@@ -193,6 +210,7 @@ echo "  board     $BOARD${BOARD_ID:+ (id $BOARD_ID)}"
 echo "  wiring    $WIRING"
 echo "  repo      ${REPO:-none}"
 echo "  skills    $SKILLS_INDEX"
+echo "            (read in order: company pack first, bot pack last)"
 echo "  model CLI $MODEL_CLI"
 echo "  conf      $CONF_FILE"
 echo "  token     $TOKEN_FILE (0600, never printed)"
@@ -315,7 +333,7 @@ echo
 echo "=== check before you say done ==="
 cat <<EOF
   [ ] $CONF_FILE is 0600 and names the right board, sections and skills index
-  [ ] $SKILLS_INDEX exists and has a skill whose trigger matches this agent's work
+  [ ] every index in $SKILLS_INDEX exists, and the bot pack ($SKILLS_INDEX_LAST) has a skill whose trigger matches this agent's work
 EOF
 if [ "$BOARD" != "none" ]; then
   cat <<EOF
