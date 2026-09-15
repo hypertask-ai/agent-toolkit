@@ -53,7 +53,7 @@ COMPANY_SKILLS_INDEX="${COMPANY_SKILLS_INDEX:-$HOME/projects/company-skills/INDE
 MISSION_FILE=""
 WIRING="poll"
 SECTIONS=""
-MODEL_CLI="claude -p --model sonnet"
+MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
 MAX_CONCURRENT_RUNS="1"
 CHAT_PAGE="yes"
 ROLE="write"
@@ -83,7 +83,7 @@ Options:
   --mission-file PATH      plain-text mission, used verbatim
   --wiring poll|fleet|none how work reaches the agent               (default poll)
   --sections "A,B"         board columns the poll watches
-  --model-cli "CMD"        model command template  (default: claude -p --model sonnet)
+  --model-cli "CMD"        model command template  (default: cursor-agent with Grok 4.6 only)
   --max-concurrent N       runs started per tick                    (default 1)
   --chat-page yes|no       enable the host chat lane               (default yes)
   --role ROLE              identity role on the board               (default write)
@@ -121,6 +121,12 @@ while [ $# -gt 0 ]; do
     *) die "unknown argument $1" "run create-agent.sh --help for the accepted flags" ;;
   esac
 done
+
+core_model_resolve "$MODEL_CLI" "" "--model-cli"
+MODEL_CLI="$CORE_MODEL_CLI"
+if [ -n "$CORE_MODEL_NOTICE" ]; then
+  printf 'ERROR: %s\n' "$CORE_MODEL_NOTICE" >&2
+fi
 
 [ -n "$NAME" ] || die "--name is missing" "pass --name \"<Display Name>\""
 case "$KIND" in dev|qa|worker|cli) ;; *) die "--kind must be dev, qa, worker or cli, got '$KIND'" "pick one of those four" ;; esac

@@ -32,6 +32,24 @@ until you do it.
 - **Weekly report** — `agent-template-weekly`, turns a week of corrections
   into checks; `agent-template report` prints this week's scorecard.
 
+## Model policy
+
+Cursor spends only on Grok. `cursor-agent` may run only
+`cursor-grok-4.6-high-fast`, never Claude ids, Auto, or Composer. Codex on the
+ChatGPT subscription is the first escalation. Claude is reserved for meta work
+and is the last machine rung.
+
+The shared ladder lives in `core/model-policy.conf`: the agent conf is the
+default; hard triage or three failed attempts uses
+`codex:gpt-5.6-sol:high`; research and `agent-advisor` use
+`codex:gpt-5.6-sol:xhigh`; two failed Codex attempts unlock
+`claude:opus:high`; after that the ticket returns to Valentin. The runner uses
+`hax` for Codex in the ticket worktree with the normal prompt and tools.
+
+Every provider has an allow-list. Invalid conf or override values print one
+error and fall back to the conf default. Research may write only `Retry with:
+codex:gpt-5.6-sol:high`, `Retry with: claude:opus:high`, or `Retry with: same`.
+
 ## Its own repo
 
 `PR_REPO` in the conf, required: every bot has one, no repo-less mode. The
@@ -101,9 +119,11 @@ Two packs, always in this order:
   the board refused the label, the score sits in
   `~/.local/state/agent-board-poll/triage/<REF>` and the log says so.
 - Per-ticket model overrides: `~/.local/state/agent-board-poll/model-override/<REF>`,
-  one line, `<cli> model <id>`. Written by triage for a hard ticket and by the
-  supervisor for a ticket that has failed three times. Delete the file to put
-  the ticket back on the agent's usual model.
+  one line, `provider:model` such as `claude:opus`. Written by triage for a hard
+  ticket and by the supervisor for a ticket that has failed three times. A
+  legacy bare model id stays on the agent's provider and is checked against
+  that provider's allow-list. Delete the file to put the ticket back on the
+  agent's usual model.
 
 ## Five daily checks
 

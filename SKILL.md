@@ -255,6 +255,24 @@ request with auto-merge off. It may only touch `evals/cases.jsonl` and
 `evals/PENDING-FIXES.md`: never `install.sh`, never an adapter's auth code, and
 it never deletes or rewrites an existing case.
 
+## Model policy
+
+Cursor spends only on Grok. `cursor-agent` may run only
+`cursor-grok-4.6-high-fast`, never Claude ids, Auto, or Composer. Codex on the
+ChatGPT subscription is the first escalation. Claude is reserved for meta work
+and is the last machine rung.
+
+The shared ladder lives in `core/model-policy.conf`: the agent conf is the
+default; hard triage or three failed attempts uses
+`codex:gpt-5.6-sol:high`; research and `agent-advisor` use
+`codex:gpt-5.6-sol:xhigh`; two failed Codex attempts unlock
+`claude:opus:high`; after that the ticket returns to Valentin. The runner uses
+`hax` for Codex in the ticket worktree with the normal prompt and tools.
+
+Every provider has an allow-list. Invalid conf or override values print one
+error and fall back to the conf default. Research may write only `Retry with:
+codex:gpt-5.6-sol:high`, `Retry with: claude:opus:high`, or `Retry with: same`.
+
 ## The conf
 
 `<config dir>/<slug>.conf`, 0600. Core keys, no tracker prefixes:
@@ -281,10 +299,10 @@ it never deletes or rewrites an existing case.
 | `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
 | `PR_REPO` | **required.** the repository whose pull requests say whether a ticket is finished; `agent-board-poll` refuses to tick without it. Set it with `create-agent.sh --resume --pr-repo <org/name>` |
 | `TRIAGE` | `yes` to score a ticket before pickup; defaults to `yes` for `AGENT_KIND=dev` and `no` for everything else |
-| `TRIAGE_HARD_MODEL` | the model a `hard` ticket moves to; defaults to `claude-opus-5-thinking-high` for a `cursor-agent` CLI and `opus` for anything else |
+| `TRIAGE_HARD_OVERRIDE` | hard-ticket route, default `codex:gpt-5.6-sol:high` from `core/model-policy.conf` |
 | `TRIAGE_MODEL_CLI` | the cheap model that breaks a tie the rules could not, default `claude -p --model haiku` |
 | `ADVISOR_MAX` | `agent-advisor` calls allowed per run, default 2 |
-| `ADVISOR_CLI` | the model `agent-advisor` asks, default `claude -p --model opus` |
+| `ADVISOR_OVERRIDE` | research route for `agent-advisor`, default `codex:gpt-5.6-sol:xhigh` from `core/model-policy.conf` |
 
 ## How hard is this ticket
 
@@ -343,9 +361,9 @@ pack's `supervise-board/scripts/board_config.py`.
 `BOARD_ID` takes more than one board, comma separated. `WATCH_SECTIONS` takes
 `*` for every column, which is what an agent answering @mentions needs.
 
-Override `MODEL_CLI` to change model or vendor, for example `cursor-agent -p`.
-A headless model CLI usually needs its own permission flags; put them in this
-value, because the runner passes the template through untouched.
+Set `MODEL_CLI` to a complete allowed command, including the model and any
+headless permission flags. The runner preserves a valid conf command, but every
+provider/model selection still has to pass the model policy above.
 
 ## Tokens
 

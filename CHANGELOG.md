@@ -5,6 +5,23 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.14.0 - 2026-09-16
+
+- `core/model-policy.conf` now owns the provider ladder used by the runner and
+  supervisor. Cursor is Grok-only. Hard work and the fourth attempt use OpenAI
+  Codex through `hax` at high effort; research uses xhigh; Claude Opus is
+  unlocked only after two failed Codex attempts, then the ticket returns to
+  Valentin.
+- Attempt state records failed providers, provider overrides accept
+  `provider:model:effort`, and invalid provider/model pairs fall back to the
+  agent conf default with one error line.
+- Local evals prove the hard-ticket Codex route, the real `hax` argument shape
+  with a stub, rejection of Cursor Claude ids, and the two-Codex-failure gate
+  before `claude:opus:high`.
+- ACTION: outside model override writers must source `core/model-policy.conf`
+  and emit `codex:gpt-5.6-sol:high`, then `claude:opus:high` only after two
+  recorded Codex failures.
+
 ## 3.13.0 - 2026-09-16
 
 Agent Chat now works for poll-wired agents on hosts with no public inbound port.
@@ -33,6 +50,7 @@ Agent Chat now works for poll-wired agents on hosts with no public inbound port.
   error reply, and two agents on one host answer independently.
 
 ACTION: after the app polling endpoint is live, run `agent-template update` on each bot host, send a human chat message, and quote the timestamped reply from `~/.local/state/agent-chat/<slug>.log`.
+
 ## 3.12.1 - 2026-09-16
 
 - The AGENTS.md the sync lays into a project repo, and the README the

@@ -215,3 +215,8 @@ if [ -z "$ONLY" ] && [ -x "$HERE/sync-project.test.sh" ]; then
   echo "-- sync-project behavioural checks --"
   bash "$HERE/sync-project.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/model-policy.test.sh" ]; then
+  echo ""
+  echo "-- model policy behavioural checks --"
+  bash "$HERE/model-policy.test.sh"
+fi

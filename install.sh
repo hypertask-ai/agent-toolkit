@@ -174,7 +174,7 @@ cp -a "$SRC/CHANGELOG.md" "$DEST/CHANGELOG.md"
 # far, not a real error. Stage the new tree next to DEST, then swap each
 # directory in with a rename: a path lookup during the swap either finds the
 # whole old directory or the whole new one, never a partially written file.
-for dir in scripts adapters evals repo-skeleton project-template; do
+for dir in scripts adapters core evals repo-skeleton project-template; do
   stage="$(mktemp -d "$DEST/.$dir.XXXXXX")"
   cp -a "$SRC/$dir/." "$stage/"
   if [ -d "$DEST/$dir" ]; then

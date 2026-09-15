@@ -72,6 +72,16 @@ done
 [ -n "${PR_REPO:-}" ] || die \
   "PR_REPO is not set: every agent needs a repo, run create-agent --repo" \
   "run create-agent.sh --resume --pr-repo <org/name> for this agent, or add PR_REPO= to $CONF by hand"
+# Validate the conf before any process can inherit it. A bad provider/model pair
+# is loud, but safe: this tick uses that provider's policy default instead.
+core_model_resolve "$MODEL_CLI" "" "conf $CONF"
+MODEL_CLI="$CORE_MODEL_CLI"
+CONF_MODEL_PROVIDER="$CORE_MODEL_PROVIDER"
+CONF_MODEL_MODEL="$CORE_MODEL_MODEL"
+MODEL_POLICY_CONF_NOTICE="$CORE_MODEL_NOTICE"
+if [ -n "$MODEL_POLICY_CONF_NOTICE" ]; then
+  printf 'ERROR: %s\n' "$MODEL_POLICY_CONF_NOTICE" >&2
+fi
 MAX_CONCURRENT_RUNS="${MAX_CONCURRENT_RUNS:-1}"
 # An agent may also take tickets nobody has claimed, which is how a board column
 # becomes a queue without anyone assigning by hand. Off unless the conf says so,
@@ -87,10 +97,9 @@ case "$WORKDIR_MODE" in
   *) die "WORKDIR_MODE must be repo or per-run, got '$WORKDIR_MODE'" \
        "fix that key in $CONF" ;;
 esac
-# A ticket the model CLI cannot finish fails the same way every time. Two goes
-# is enough to rule out a flake; a third in the same window is a bug report, not
-# a retry.
-RETRY_LIMIT="${RETRY_LIMIT:-2}"
+# The machine ladder has six attempts: three on the conf default, two on Codex,
+# then one final Claude attempt before the ticket returns to Valentin.
+RETRY_LIMIT="${RETRY_LIMIT:-6}"
 RETRY_WINDOW_SECONDS="${RETRY_WINDOW_SECONDS:-21600}"
 # How hard is this ticket, decided before the run starts, so a hard one gets a
 # stronger model and is made to plan first instead of being discovered halfway
@@ -103,20 +112,27 @@ case "$AGENT_KIND" in
   *)   TRIAGE_DEFAULT="no" ;;
 esac
 TRIAGE="${TRIAGE:-$TRIAGE_DEFAULT}"
-# The model a hard ticket is moved to. cursor-agent and claude name the same
-# model differently, so the default follows whichever CLI this agent runs.
-if [ -z "${TRIAGE_HARD_MODEL:-}" ]; then
-  case "$MODEL_CLI" in
-    cursor-agent*) TRIAGE_HARD_MODEL="claude-opus-5-thinking-high" ;;
-    *)             TRIAGE_HARD_MODEL="opus" ;;
-  esac
-fi
+# Hard work is the first escalation rung from the shared policy file.
+TRIAGE_HARD_OVERRIDE="${TRIAGE_HARD_OVERRIDE:-$MODEL_POLICY_HARD_OVERRIDE}"
 # The cheap model that breaks a tie the rules could not. Never the good one:
 # this call decides a label, not a fix.
 TRIAGE_MODEL_CLI="${TRIAGE_MODEL_CLI:-claude -p --model haiku}"
-# Two second opinions per run, through agent-advisor.
+core_model_resolve "$TRIAGE_MODEL_CLI" "" "TRIAGE_MODEL_CLI in conf $CONF"
+TRIAGE_MODEL_CLI="$CORE_MODEL_CLI"
+MODEL_POLICY_SCORER_NOTICE="$CORE_MODEL_NOTICE"
+if [ -n "$MODEL_POLICY_SCORER_NOTICE" ]; then
+  printf 'ERROR: %s\n' "$MODEL_POLICY_SCORER_NOTICE" >&2
+fi
+# Research and agent-advisor use Codex sol at xhigh effort. --raw is safe here:
+# the advisor only reads the context assembled for it.
 ADVISOR_MAX="${ADVISOR_MAX:-2}"
-ADVISOR_CLI="${ADVISOR_CLI:-claude -p --model opus}"
+ADVISOR_OVERRIDE="${ADVISOR_OVERRIDE:-$MODEL_POLICY_RESEARCH_OVERRIDE}"
+core_model_resolve "$MODEL_CLI" "$ADVISOR_OVERRIDE" "agent-advisor route"
+ADVISOR_CLI="$CORE_MODEL_CLI"
+MODEL_POLICY_ADVISOR_NOTICE="$CORE_MODEL_NOTICE"
+if [ -n "$MODEL_POLICY_ADVISOR_NOTICE" ]; then
+  printf 'ERROR: %s\n' "$MODEL_POLICY_ADVISOR_NOTICE" >&2
+fi
 # ---------- which skills this run reads (3.11.0) ----------
 # Two of the three sources are found, not configured: the company pack (plugin,
 # or the clone) and the .claude/skills of the repo this agent works in.
@@ -182,19 +198,16 @@ SEEN="$STATE_DIR/$SLUG.seen"
 # which becomes this agent's own reply's id the moment the run finishes.
 POSTED="$STATE_DIR/$SLUG.posted-comments"
 LOCK="$STATE_DIR/$SLUG.lock"
-# The one piece of state a failure needs: when this runner last tried a ticket,
-# keyed by ticket id. Without it a ticket whose run dies on start is retried
-# every tick forever. It is append-only and self-expiring: nothing reads a line
-# older than RETRY_WINDOW_SECONDS.
+# Failed attempts are append-only: "task timestamp provider failed". Provider is
+# recorded so the final Claude rung cannot run until two Codex attempts on this
+# ticket have failed. Legacy two-column rows still count as failures.
 ATTEMPTS="$STATE_DIR/$SLUG.attempts"
 # The same failure posted on the same ticket twice is noise. One line per
 # ticket, holding a fingerprint of the last failure written on it.
 LASTFAIL="$STATE_DIR/$SLUG.lastfail"
-# Per-ticket model overrides: one file per ticket, named for it, holding
-# "<cli> model <name>". Two things write one. The supervisor does, when a
-# ticket has failed three times. Triage does, when it scores a ticket hard
-# before anyone has started it. Triage never overwrites a file that is already
-# there: the supervisor has seen three real failures and this has seen a title.
+# Per-ticket model overrides hold "provider:model[:effort]". A legacy bare
+# model means the conf provider. Claude escalation is accepted only after this
+# ticket's attempts state contains two failed Codex runs.
 MODEL_OVERRIDE_DIR="${MODEL_OVERRIDE_DIR:-$HOME/.local/state/agent-board-poll/model-override}"
 # Every score this runner has given, with the reason, one JSON object per line.
 # A triage rule nobody can audit is a rule nobody will trust the first time it
@@ -210,21 +223,51 @@ ADVISOR_DIR="${ADVISOR_DIR:-$STATE_DIR/advisor}"
 TRIAGE_SH="$CORE_ROOT/scripts/triage.sh"
 touch "$SEEN" "$ATTEMPTS" "$LASTFAIL" "$POSTED"
 
-# attempts_recent <task-id> : how many goes this ticket has had in the window
+# attempts_recent <task-id> [provider] : failures in the current window.
 attempts_recent() {
-  TASK="$1" WINDOW="$RETRY_WINDOW_SECONDS" python3 -c '
+  TASK="$1" PROVIDER="${2:-}" WINDOW="$RETRY_WINDOW_SECONDS" python3 -c '
 import os, sys, time
-task, window = os.environ["TASK"], int(os.environ["WINDOW"])
+task, provider, window = os.environ["TASK"], os.environ["PROVIDER"], int(os.environ["WINDOW"])
 cutoff, count = time.time() - window, 0
 for line in sys.stdin:
     parts = line.split()
-    if len(parts) == 2 and parts[0] == task:
-        try:
-            if float(parts[1]) >= cutoff:
-                count += 1
-        except ValueError:
-            pass
+    if len(parts) < 2 or parts[0] != task:
+        continue
+    try:
+        recent = float(parts[1]) >= cutoff
+    except ValueError:
+        continue
+    # Old two-column rows predate provider tracking. They count toward the
+    # first escalation, but can never unlock Claude.
+    row_provider = parts[2] if len(parts) >= 4 and parts[3] == "failed" else ""
+    if recent and (not provider or row_provider == provider):
+        count += 1
 print(count)' < "$ATTEMPTS"
+}
+
+# resolve_ticket_model <ref> <triage> <failures> <codex-failures>
+resolve_ticket_model() {
+  local ref="$1" triage="$2" failures="$3" codex_failures="$4"
+  local override_file="$MODEL_OVERRIDE_DIR/$ref" selection="" source="policy ladder"
+  if [ -f "$override_file" ]; then
+    IFS= read -r selection < "$override_file" || selection=""
+    source="override $override_file"
+    core_model_resolve "$MODEL_CLI" "$selection" "$source"
+    if [ -z "$CORE_MODEL_NOTICE" ] && [ "$CORE_MODEL_PROVIDER" = "claude" ] \
+       && [ "$codex_failures" -lt 2 ]; then
+      core_model_resolve "$MODEL_CLI" "" "$source"
+      CORE_MODEL_NOTICE="model policy rejected '$selection' from $source; Claude requires two failed Codex attempts on this ticket. Falling back to '$CONF_MODEL_PROVIDER:$CONF_MODEL_MODEL'."
+    fi
+    return 0
+  fi
+  if [ "$codex_failures" -ge 2 ]; then
+    selection="$MODEL_POLICY_FINAL_OVERRIDE"
+  elif [ "$triage" = "hard" ]; then
+    selection="$TRIAGE_HARD_OVERRIDE"
+  elif [ "$failures" -ge 3 ]; then
+    selection="$MODEL_POLICY_FAILURE_OVERRIDE"
+  fi
+  core_model_resolve "$MODEL_CLI" "$selection" "$source"
 }
 
 # failure_is_new <task-id> <detail> : true the first time this failure is seen
@@ -242,6 +285,12 @@ log() {
   printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"
   if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
 }
+for notice in "$MODEL_POLICY_CONF_NOTICE" "$MODEL_POLICY_SCORER_NOTICE" \
+              "$MODEL_POLICY_ADVISOR_NOTICE"; do
+  if [ -n "$notice" ]; then
+    printf '%s ERROR: %s\n' "$(date -Is)" "$notice" >> "$LOG"
+  fi
+done
 
 # push_skill_commits <ref>
 # The mission text tells an agent to fix a skill in the same run that got
@@ -669,8 +718,15 @@ if [ "$DRY_RUN" = "yes" ]; then
         "$(row_labels "$row")")"
       IFS='|' read -r triage_this triage_origin triage_reason <<< "$triage_verdict"
       echo "    triage: $triage_this ($triage_origin) - $triage_reason"
+      dry_task_id="$(row_field "$row" id)"
+      dry_failures="${E_TRIES[$i]}"
+      dry_codex_failures="$(attempts_recent "$dry_task_id" codex)"
+      resolve_ticket_model "$(row_field "$row" ref)" "$triage_this" "$dry_failures" "$dry_codex_failures"
+      if [ -n "$CORE_MODEL_NOTICE" ]; then printf 'ERROR: %s\n' "$CORE_MODEL_NOTICE" >&2; fi
       if [ "$triage_this" = "hard" ]; then
-        echo "    would run on $TRIAGE_HARD_MODEL and be told to post a numbered plan first"
+        echo "    would run on provider $CORE_MODEL_PROVIDER, model $CORE_MODEL_MODEL (effort ${CORE_MODEL_EFFORT:-default}) and be told to post a numbered plan first"
+      elif [ "$dry_failures" -ge 3 ] || [ "$dry_codex_failures" -ge 2 ] || [ -f "$MODEL_OVERRIDE_DIR/$(row_field "$row" ref)" ]; then
+        echo "    would run on provider $CORE_MODEL_PROVIDER, model $CORE_MODEL_MODEL (effort ${CORE_MODEL_EFFORT:-default}), no plan block"
       else
         echo "    would run on the default model, no plan block"
       fi
@@ -788,14 +844,7 @@ be true for a different customer? Yes is a rule, no is a fact."
   # plan is the cheapest place to catch a wrong root cause, and it is a comment
   # a human can disagree with before the code exists.
   if [ "$TRIAGE_THIS" = "hard" ]; then
-    mkdir -p "$MODEL_OVERRIDE_DIR"
-    read -r -a TRIAGE_ARGV <<< "$MODEL_CLI"
-    if [ -f "$MODEL_OVERRIDE_DIR/$ref" ]; then
-      log "triage $ref: hard, but an override file is already there, leaving it alone"
-    else
-      printf '%s model %s\n' "${TRIAGE_ARGV[0]}" "$TRIAGE_HARD_MODEL" > "$MODEL_OVERRIDE_DIR/$ref"
-      log "triage $ref: hard, running on $TRIAGE_HARD_MODEL"
-    fi
+    log "triage $ref: hard, escalating to $MODEL_POLICY_HARD_OVERRIDE"
     PROMPT="This ticket is scored HARD. Before you change any code, post your
 plan as your first comment on $ref: a numbered list, exactly three points.
 
@@ -814,7 +863,7 @@ $PROMPT"
   if [ "$WORKDIR_MODE" = "per-run" ]; then
     RUN_DIR="$(core_workdir_create "${AGENT_REPO:-}" "$WORKDIR_ROOT" "$SLUG-$ref" 2>>"$LOG")" || {
       log "run FAILED $ref: could not make a working directory under $WORKDIR_ROOT"
-      printf '%s %s\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
+      printf '%s %s %s failed\n' "$task_id" "$(date +%s)" "$CONF_MODEL_PROVIDER" >> "$ATTEMPTS"
       if declare -F adapter_failure_comment >/dev/null 2>&1 \
          && failure_is_new "$task_id" "workdir:$WORKDIR_ROOT"; then
         adapter_failure_comment "$BOARD_CLI" "$ref" \
@@ -833,27 +882,25 @@ $PROMPT"
   # Which skills this run is about to read, by version. A bot behaving oddly is
   # usually a bot reading an old pack, and this is the line that shows it.
   log "$SKILLS_LINE"
-  printf '%s %s\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
   started=$((started + 1))
   set +e
   # One short-lived process per ticket. Nothing survives it except the board,
   # the repo, and this log. The agent's token is never in the prompt or the
   # command line: the board CLI wrapper reads it from its own 0600 file.
-  read -r -a MODEL_ARGV <<< "$MODEL_CLI"
-  # A ticket that failed three times can ask for a stronger model than the
-  # agent's usual one. The supervisor writes "<cli> model <name>" to
-  # $MODEL_OVERRIDE_DIR/<ticket>; retrying the same ticket on the same model
-  # is how a ticket never gets finished.
-  override_file="$MODEL_OVERRIDE_DIR/$ref"
-  if [ -f "$override_file" ]; then
-    read -r ov_cli _ ov_model < "$override_file" || true
-    if [ -n "${ov_model:-}" ] && [ "${MODEL_ARGV[0]}" = "${ov_cli:-}" ]; then
-      for i in "${!MODEL_ARGV[@]}"; do
-        [ "${MODEL_ARGV[$i]}" = "--model" ] && MODEL_ARGV[$((i + 1))]="$ov_model"
-      done
-      log "model override for $ref: $ov_model"
-    fi
+  # Resolve once, immediately before launch. Explicit overrides pass through the
+  # same allow-list and Claude failure gate as automatic ladder choices.
+  codex_failures="$(attempts_recent "$task_id" codex)"
+  resolve_ticket_model "$ref" "$TRIAGE_THIS" "$tries" "$codex_failures"
+  RUN_MODEL_CLI="$CORE_MODEL_CLI"
+  RUN_MODEL_PROVIDER="$CORE_MODEL_PROVIDER"
+  RUN_MODEL_MODEL="$CORE_MODEL_MODEL"
+  RUN_MODEL_EFFORT="$CORE_MODEL_EFFORT"
+  if [ -n "$CORE_MODEL_NOTICE" ]; then
+    printf 'ERROR: %s\n' "$CORE_MODEL_NOTICE" >&2
+    log "ERROR: $CORE_MODEL_NOTICE"
   fi
+  log "model route for $ref: provider $RUN_MODEL_PROVIDER, model $RUN_MODEL_MODEL, effort ${RUN_MODEL_EFFORT:-default}"
+  read -r -a MODEL_ARGV <<< "$RUN_MODEL_CLI"
   # What agent-advisor needs to answer a question about this ticket, and the
   # counter that caps it at two. Written per run: the cap is a run's budget,
   # not a ticket's, so a ticket picked up again tomorrow starts fresh.
@@ -892,6 +939,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
   # newest-comment key as untouched and reprocessed a ticket this agent had
   # already answered, over and over until the attempt budget stopped it.
   if [ "$rc" -ne 0 ]; then
+    printf '%s %s %s failed\n' "$task_id" "$(date +%s)" "$RUN_MODEL_PROVIDER" >> "$ATTEMPTS"
     # A failure is written where a human already looks. The ticket does not
     # move: where it sits is the record of how far this got. The state key is
     # not recorded either, so the next tick may try once more, up to the

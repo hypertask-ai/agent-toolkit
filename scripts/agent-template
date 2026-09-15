@@ -41,8 +41,8 @@
 #      the slug's old worker unit (hypertask-agent-worker@<slug>) is
 #      masked (retired); the file already has BOARD_ADAPTER= (already has
 #      a template twin); or HT_PROVIDER has no known MODEL_CLI mapping
-#      (cursor needs a concrete HT_MODEL, not "auto"; codex; claude) --
-#      never guesses one.
+#      (cursor, codex and claude are known). A disallowed old cursor/claude
+#      model is replaced by that provider's safe default with one clear error.
 #   4. removes now-redundant agent-board-poll@<slug>.service.d/path.conf
 #      drop-ins (backed up first) now that the shared unit sets PATH
 #      itself, then systemctl --user daemon-reload, and restarts (never
@@ -323,14 +323,20 @@ def esc(v):
 provider = fields.get("HT_PROVIDER", "")
 model = fields.get("HT_MODEL", "")
 if provider == "cursor":
-    if not model or model == "auto":
-        print("SKIP HT_PROVIDER=cursor but HT_MODEL is '%s': no concrete model to pin, so no MODEL_CLI can be written -- convert this one by hand" % (model or "<empty>"))
-        sys.exit(0)
+    if model != "cursor-grok-4.6-high-fast":
+        print("ERROR: model policy rejected 'cursor-agent:%s' from %s; Cursor spends only on Grok; Codex is the first escalation; Claude is the last machine rung. Falling back to 'cursor-agent:cursor-grok-4.6-high-fast'." % (model or "<empty>", path), file=sys.stderr)
+        model = "cursor-grok-4.6-high-fast"
     model_cli = "cursor-agent -p --output-format text --model %s -f --trust" % model
 elif provider == "codex":
-    model_cli = "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"
+    if model not in ("gpt-5.6-sol", "gpt-5.6-luna"):
+        print("ERROR: model policy rejected 'codex:%s' from %s; falling back to 'codex:gpt-5.6-sol'." % (model or "<empty>", path), file=sys.stderr)
+        model = "gpt-5.6-sol"
+    model_cli = "/home/valentin/.local/bin/hax --provider=codex --model=%s --effort=high --no-session -p" % model
 elif provider == "claude":
-    model_cli = "claude -p --model %s" % (model or "sonnet")
+    if model not in ("opus", "sonnet", "haiku"):
+        print("ERROR: model policy rejected 'claude:%s' from %s; Cursor spends only on Grok; Codex is the first escalation; Claude is the last machine rung. Falling back to 'claude:sonnet'." % (model or "<empty>", path), file=sys.stderr)
+        model = "sonnet"
+    model_cli = "claude -p --model %s" % model
 else:
     print("SKIP HT_PROVIDER='%s' has no known MODEL_CLI mapping -- add one to agent-template before converting this slug" % provider)
     sys.exit(0)

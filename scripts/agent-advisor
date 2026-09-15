@@ -16,7 +16,7 @@
 #   AGENT_ADVISOR_CONTEXT   json file: ref, title, description, board, task id
 #   AGENT_ADVISOR_COUNTER   file holding the number of calls made this run
 #   AGENT_ADVISOR_MAX       call cap, default 2
-#   AGENT_ADVISOR_CLI       the model command, default "claude -p --model opus"
+#   AGENT_ADVISOR_CLI       Codex research command supplied by the runner
 #
 # Failure contract: every error prints "ERROR: <what>. Do this next: <step>"
 # on stderr and exits non-zero. Nothing is swallowed.
@@ -41,7 +41,7 @@ QUESTION="${*:-}"
 CONTEXT_FILE="${AGENT_ADVISOR_CONTEXT:-}"
 COUNTER="${AGENT_ADVISOR_COUNTER:-}"
 MAX="${AGENT_ADVISOR_MAX:-2}"
-ADVISOR_CLI="${AGENT_ADVISOR_CLI:-claude -p --model opus}"
+ADVISOR_CLI="${AGENT_ADVISOR_CLI:-/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session --raw -p}"
 
 # ---------- the cap ----------
 # Checked before the call and written after it, so a model that never answers
@@ -161,6 +161,6 @@ command -v "${ADVISOR_ARGV[0]}" >/dev/null 2>&1 || die \
   "the advisor model CLI ${ADVISOR_ARGV[0]} is not on PATH" \
   "install it, or set AGENT_ADVISOR_CLI to a command that is"
 
-printf '%s' "$PROMPT" | "${ADVISOR_ARGV[@]}" || die \
+"${ADVISOR_ARGV[@]}" "$PROMPT" || die \
   "the advisor model call failed" \
   "read the error above; the run keeps its remaining advisor calls"
