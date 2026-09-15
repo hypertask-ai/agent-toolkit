@@ -118,6 +118,11 @@ ATTEMPTS="$STATE_DIR/$SLUG.attempts"
 # The same failure posted on the same ticket twice is noise. One line per
 # ticket, holding a fingerprint of the last failure written on it.
 LASTFAIL="$STATE_DIR/$SLUG.lastfail"
+# Per-ticket model overrides, written by the supervisor when a ticket has
+# failed three times: one file per ticket, named for it, holding "<cli> model
+# <name>". Nothing here creates the directory; if it does not exist, no ticket
+# has one.
+MODEL_OVERRIDE_DIR="${MODEL_OVERRIDE_DIR:-$HOME/.local/state/agent-board-poll/model-override}"
 touch "$SEEN" "$ATTEMPTS" "$LASTFAIL"
 
 # attempts_recent <task-id> : how many goes this ticket has had in the window
@@ -552,6 +557,20 @@ be true for a different customer? Yes is a rule, no is a fact."
   # the repo, and this log. The agent's token is never in the prompt or the
   # command line: the board CLI wrapper reads it from its own 0600 file.
   read -r -a MODEL_ARGV <<< "$MODEL_CLI"
+  # A ticket that failed three times can ask for a stronger model than the
+  # agent's usual one. The supervisor writes "<cli> model <name>" to
+  # $MODEL_OVERRIDE_DIR/<ticket>; retrying the same ticket on the same model
+  # is how a ticket never gets finished.
+  override_file="$MODEL_OVERRIDE_DIR/$ref"
+  if [ -f "$override_file" ]; then
+    read -r ov_cli _ ov_model < "$override_file" || true
+    if [ -n "${ov_model:-}" ] && [ "${MODEL_ARGV[0]}" = "${ov_cli:-}" ]; then
+      for i in "${!MODEL_ARGV[@]}"; do
+        [ "${MODEL_ARGV[$i]}" = "--model" ] && MODEL_ARGV[$((i + 1))]="$ov_model"
+      done
+      log "model override for $ref: $ov_model"
+    fi
+  fi
   (
     # The run happens where the agent's work lives, so the model CLI sees the
     # repo it is meant to change and nothing else.
