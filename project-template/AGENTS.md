@@ -67,3 +67,24 @@ read code:
 Plain words. Explain any unavoidable technical term in parentheses the first
 time. No em dashes. The technical detail goes after that section, not inside
 it.
+
+## Feedback to the template
+
+Change requests, bugs and ideas about the agent setup go to the Agent Template
+board, project 5500 (https://app.hypertask.ai/detail/project-5500, prefix
+AGTE), with:
+
+```
+agent-template feedback --kind bug|change|idea --title "<short title>" --body "<html>"
+```
+
+Posted as the bot's own identity, never in the owner's name. Run the command
+with no arguments for the board link and what each kind means.
+
+This is for the setup itself: the runner, the skills layout, this file, the
+checks. A fact about the product goes in a doc or on the ticket, and a rule
+about how to work a ticket goes in the skill it belongs to. Neither belongs
+here.
+
+A correction that lives only in one run's log is gone the moment that process
+exits, so it goes on the board the same run it happens.

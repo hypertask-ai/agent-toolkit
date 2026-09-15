@@ -20,13 +20,21 @@ nobody else can read.
 - `CHANGELOG.md` - one entry per change this agent's own scripts or reports go
   through.
 
-## Feedback
+## Feedback to the template
 
-Change requests and improvement ideas for the shared template go to the
-Agent Template board, project 5500
-(https://app.hypertask.ai/detail/project-5500, prefix AGTE), via
-`agent-template feedback --kind change|idea --title "<short title>" --body
-"<html>"`. Run it with no arguments for the board link and the three kinds.
+Change requests, bugs and ideas about the agent setup go to the Agent Template
+board, project 5500 (https://app.hypertask.ai/detail/project-5500, prefix
+AGTE), with:
+
+```
+agent-template feedback --kind bug|change|idea --title "<short title>" --body "<html>"
+```
+
+Posted as the bot's own identity, never in the owner's name. Run the command
+with no arguments for the board link and what each kind means.
+
+This is the only route. A correction that lives in one run's log is gone the
+moment that process exits.
 
 ## Maintainer
 

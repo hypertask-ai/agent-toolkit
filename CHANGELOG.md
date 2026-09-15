@@ -5,6 +5,22 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.12.1 - 2026-09-16
+
+- The AGENTS.md the sync lays into a project repo, and the README the
+  skeleton gives a new agent's own repo, both name where feedback about the
+  agent setup goes: the Agent Template board, project 5500, via
+  `agent-template feedback --kind bug|change|idea`, posted as the bot's own
+  identity. The README already said something close; it now names `bug` as a
+  kind and says whose name the post carries. AGENTS.md said nothing at all,
+  which is the file most agents actually read.
+- AGENTS.md also draws the line the board keeps blurring: the setup itself
+  goes to project 5500, a fact about the product goes in a doc or on the
+  ticket, and a rule about working a ticket goes in the skill it belongs to.
+- Docs only, no behaviour. A repo whose AGENTS.md carries the template marker
+  unmodified picks this up on the next sync. A repo that wrote or edited its
+  own AGENTS.md keeps it, and has to add the section by hand.
+
 ## 3.12.0 - 2026-09-16
 
 - The board CLI wrapper (`adapter_install_board_cli`) now enforces the
