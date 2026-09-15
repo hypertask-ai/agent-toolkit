@@ -201,7 +201,7 @@ core_workdir_create() {
   dir="$root/$name"
   mkdir -p "$root"
   # A directory left behind by a killed run is stale, never a resume point.
-  [ -e "$dir" ] && core_workdir_remove "$source" "$dir"
+  if [ -e "$dir" ]; then core_workdir_remove "$source" "$dir"; fi
   if declare -F adapter_workdir_checkout >/dev/null 2>&1; then
     adapter_workdir_checkout "$source" "$dir" "$name" >&2 || return 1
   else

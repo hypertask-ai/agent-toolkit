@@ -177,14 +177,22 @@ EOF
 # comment_count, url. agent_ids holds the AGENT ids on the ticket: an
 # agent-assigned ticket still carries the owning user's numeric id at the top
 # of each assignee record, with the agent's uuid nested under "agent".
+# An agent may watch more than one board: BOARD_ID takes a comma-separated
+# list, and every row says which board it came from, because the later reads
+# for that ticket have to go back to the same one.
 adapter_list_candidates() {
-  local token_file="$1" board_id="$2" sections="$3" json
-  json="$(_ht_get "$token_file" "/mcp/tasks?project_id=${board_id}&limit=100")"
+  local token_file="$1" board_id="$2" sections="$3" json one
+  for one in $(printf '%s' "$board_id" | tr ',' ' '); do
+    [ -n "$one" ] || continue
+    json="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&limit=100")"
   # The board reply is far too large for an environment variable, so it goes in
   # on stdin and the program goes in as one argv.
-  printf '%s' "$json" | SECTIONS="$sections" BOARD_ID="$board_id" python3 -c '
+  printf '%s' "$json" | SECTIONS="$sections" BOARD_ID="$one" python3 -c '
 import json, os, sys
-wanted = [s.strip().casefold() for s in os.environ["SECTIONS"].split(",") if s.strip()]
+# "*" means every column: an agent answering @mentions cannot know in advance
+# which column the person asking was looking at.
+raw = os.environ["SECTIONS"].strip()
+wanted = [] if raw == "*" else [s.strip().casefold() for s in raw.split(",") if s.strip()]
 board = os.environ["BOARD_ID"]
 doc = json.load(sys.stdin)
 for task in doc.get("tasks") or []:
@@ -222,9 +230,11 @@ for task in doc.get("tasks") or []:
         "assignee_count": len(assignees),
         "labels": labels,
         "comment_count": task.get("commentCount") or 0,
+        "board": board,
         "url": "https://app.hypertask.ai/detail/project-%s/%s" % (board, index),
     }))
 '
+  done
 }
 
 # adapter_latest_comment <token-file> <task-id> <board-id>
@@ -272,6 +282,107 @@ adapter_post_comment() {
 adapter_move_task() {
   local board_cli="$1" ref="$2" section="$3"
   "$board_cli" task move "$ref" --section "$section"
+}
+
+# ---------- which ticket comes next ----------
+# An agent that starts a second ticket while its first one is still open leaves
+# the first one half done and nobody watching it. The board already knows which
+# ticket that is, so this is a query, not a lock file: a ticket this agent
+# claimed, not Done, with no merged pull request, is still its job.
+#
+# Rank, lowest first:
+#   1  a ticket this agent claimed and has not finished. Nothing else runs
+#      while one of these exists.
+#   2  a ticket this agent worked that QA sent back. Fixing a rejection beats
+#      starting something new.
+#   3  a new ticket.
+#   0  skip, with a reason.
+#
+# adapter_pick_rank <token-file> <board-id> <agent-id> <agent-name> <ref> \
+#                   <task-id> <section> <reason>
+# prints "<rank> <one line saying why>"
+adapter_pick_rank() {
+  local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4" ref="$5"
+  local task_id="$6" section="$7" reason="$8"
+  local comments pr_json="" repo="${PR_REPO:-}"
+
+  comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")"
+
+  # The pull request is the other half of "finished", and GitHub is the only
+  # place that knows whether it merged. No gh, no claim that it merged.
+  if [ -n "$repo" ] && command -v gh >/dev/null 2>&1; then
+    pr_json="$(gh pr list --repo "$repo" --state all --search "$ref" \
+                 --json number,state,url,headRefName --limit 10 2>/dev/null || printf '[]')"
+  fi
+
+  printf '%s' "$comments" | \
+  AGENT_ID="$agent_id" AGENT_NAME="$agent_name" REF="$ref" SECTION="$section" \
+  REASON="$reason" PR_JSON="${pr_json:-[]}" HAVE_PR_VIEW="$([ -n "$pr_json" ] && echo yes || echo no)" \
+  python3 -c '
+import json, os, re, sys
+
+def text_of(comment):
+    raw = comment.get("text") or comment.get("comment") or comment.get("html") or ""
+    return re.sub(r"<[^>]+>", " ", raw)
+
+def author_of(comment):
+    who = comment.get("user") or comment.get("author") or {}
+    if isinstance(who, dict):
+        return str(who.get("displayName") or who.get("display_name") or who.get("name") or "")
+    return str(who)
+
+agent_name = os.environ["AGENT_NAME"].strip().casefold()
+ref = os.environ["REF"]
+section = os.environ["SECTION"].strip().casefold()
+reason = os.environ["REASON"]
+comments = (json.load(sys.stdin).get("comments") or [])
+comments.sort(key=lambda c: (c.get("createdAt") or "", c.get("id") or 0))
+
+mine = [c for c in comments if author_of(c).strip().casefold() == agent_name]
+# "Claimed." is what claim-ticket.sh writes; assignment is the other half and
+# the runner has already told us whether this agent is on the ticket.
+claimed = reason.startswith("assigned") or any(
+    "claim" in text_of(c).casefold() for c in mine)
+worked = bool(mine) or claimed
+
+# A QA verdict is the newest comment from somebody else that fails this ticket.
+qa_fail = False
+for comment in reversed(comments):
+    body = text_of(comment).casefold()
+    if author_of(comment).strip().casefold() == agent_name:
+        continue
+    if "qa" in body and re.search(r"\bfail(ed|s|ing)?\b", body):
+        qa_fail = True
+        break
+    if re.search(r"\bqa\s*(verdict|result)?\s*[:\-]?\s*pass\b", body):
+        break
+
+done = section in {"done", "archive", "shipped"}
+
+prs = json.loads(os.environ["PR_JSON"]) or []
+# gh --search is a full-text search, so keep only the pull requests that
+# actually name this ticket in the branch or the title.
+prs = [p for p in prs if ref.casefold() in
+       (str(p.get("headRefName") or "") + " " + str(p.get("url") or "")).casefold()]
+merged = any(str(p.get("state") or "").upper() == "MERGED" for p in prs)
+open_pr = [p for p in prs if str(p.get("state") or "").upper() == "OPEN"]
+pr_known = os.environ["HAVE_PR_VIEW"] == "yes"
+
+if done:
+    print("0 %s is %s, nothing left to do" % (ref, section))
+elif qa_fail and worked:
+    print("2 %s was sent back by QA on work this agent did, so it comes before any new ticket" % ref)
+elif claimed and merged:
+    print("3 %s was claimed by this agent but its pull request is merged, so it no longer holds the agent" % ref)
+elif claimed and open_pr:
+    print("1 %s is claimed by this agent and its pull request %s is still open, so this agent owes it a fix"
+          % (ref, open_pr[0].get("url")))
+elif claimed and not merged:
+    detail = "no pull request yet" if pr_known else "pull request state unknown, gh is unavailable"
+    print("1 %s is claimed by this agent and is not finished (%s)" % (ref, detail))
+else:
+    print("3 %s is new work (%s)" % (ref, reason))
+'
 }
 
 # ---------- a working directory per run ----------
@@ -328,10 +439,24 @@ names them. $skills_index is the fallback only if that prints NO_ROUTE.
 Claim the ticket with \`$claim_sh $ref\` before you write any code. Never
 assign userId 6: only Valentin assigns Valentin.
 
-Post every result as a comment on the ticket as $agent_name, with
-\`$board_cli comment add $ref --text '<p>...</p>'\` in HTML block tags. That
-includes a failure to start and a blocked step: a run that ends with nothing on
-the ticket is a run nobody can see. Never write in Valentin's name.
+THREE COMMENTS, MAXIMUM, for this whole run. A ticket a human has to scroll is
+a ticket nobody reads.
+
+1. One claim comment, which is also the only place you list the skills you are
+   about to follow. Do not post the route and the claim separately: take the
+   ROUTE: line from $route_sh and pass it to $claim_sh with --skills, or post
+   the single merged comment yourself and skip the script's own.
+2. One result comment at the end: the pull request link, or what stopped you
+   and why. The cost line goes in this comment, not a comment of its own. A
+   gates ledger goes in this comment too, or is kept up to date in place with
+   \`$board_cli comment update <id>\`, never appended as a new comment each pass.
+3. A reply, only if somebody asks you something.
+
+Anything else you want to say belongs in the pull request body or the run log.
+Write as $agent_name, in HTML block tags, with
+\`$board_cli comment add $ref --text '<p>...</p>'\`. Never write in Valentin's
+name. A run that ends with nothing on the ticket is a run nobody can see, so
+the result comment is not optional, including when you are blocked.
 
 Do not ask for permission and do not stop halfway.
 

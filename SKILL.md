@@ -196,6 +196,11 @@ it never deletes or rewrites an existing case.
 | `WORKDIR_ROOT` | where `per-run` checkouts go, required when `WORKDIR_MODE=per-run` |
 | `RETRY_LIMIT` | goes a failing ticket gets per window, default 2 |
 | `RETRY_WINDOW_SECONDS` | length of that window, default 21600 (six hours) |
+| `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
+| `PR_REPO` | the repository whose pull requests say whether a ticket is finished |
+
+`BOARD_ID` takes more than one board, comma separated. `WATCH_SECTIONS` takes
+`*` for every column, which is what an agent answering @mentions needs.
 
 Override `MODEL_CLI` to change model or vendor, for example `cursor-agent -p`.
 A headless model CLI usually needs its own permission flags; put them in this

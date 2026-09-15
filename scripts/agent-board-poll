@@ -8,7 +8,10 @@
 # the agent's conf.
 #
 # Usage:
-#   agent-board-poll [--once] [--dry-run] [-h|--help] <slug>
+#   agent-board-poll [--once] [--dry-run] [--explain] [-h|--help] <slug>
+#
+# --explain prints one line per candidate saying why it was chosen or skipped,
+# in the order they were ranked. Implied by --dry-run.
 #
 # One invocation is always one tick, with or without --once. There is no loop
 # mode: repetition is the timer's job. --once is accepted only so a hand-run
@@ -29,15 +32,17 @@ CORE_ROOT="$(dirname "$(dirname "$SELF")")"
 . "$CORE_ROOT/scripts/lib/core.sh"
 
 usage() {
-  sed -n '2,25p' "$SELF" | sed 's/^# \{0,1\}//'
+  sed -n '2,28p' "$SELF" | sed 's/^# \{0,1\}//'
 }
 
 DRY_RUN="no"
+EXPLAIN="no"
 SLUG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --once) shift ;;   # accepted for readability; every run is one tick
     --dry-run) DRY_RUN="yes"; shift ;;
+    --explain) EXPLAIN="yes"; shift ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown option $1" "run agent-board-poll --help for the accepted flags" ;;
     *) [ -z "$SLUG" ] || die "more than one slug given ($SLUG and $1)" \
@@ -85,6 +90,11 @@ core_require_abs "$TOKEN_FILE" "TOKEN_FILE"
   "point SKILLS_INDEX at a real index file; an agent with no skills has nothing to follow"
 [ -x "$BOARD_CLI" ] || die "the board CLI $BOARD_CLI is missing or not executable" \
   "re-run create-agent.sh --resume for this agent to reinstall its board wrapper"
+if [ -n "${PROMPT_FILE:-}" ]; then
+  core_require_abs "$PROMPT_FILE" "PROMPT_FILE"
+  [ -f "$PROMPT_FILE" ] || die "PROMPT_FILE $PROMPT_FILE does not exist" \
+    "write that file, or drop the key to fall back to the board's own prompt"
+fi
 
 core_load_adapter "$BOARD_ADAPTER"
 adapter_require_tools
@@ -100,7 +110,10 @@ LOCK="$STATE_DIR/$SLUG.lock"
 # every tick forever. It is append-only and self-expiring: nothing reads a line
 # older than RETRY_WINDOW_SECONDS.
 ATTEMPTS="$STATE_DIR/$SLUG.attempts"
-touch "$SEEN" "$ATTEMPTS"
+# The same failure posted on the same ticket twice is noise. One line per
+# ticket, holding a fingerprint of the last failure written on it.
+LASTFAIL="$STATE_DIR/$SLUG.lastfail"
+touch "$SEEN" "$ATTEMPTS" "$LASTFAIL"
 
 # attempts_recent <task-id> : how many goes this ticket has had in the window
 attempts_recent() {
@@ -119,10 +132,44 @@ for line in sys.stdin:
 print(count)' < "$ATTEMPTS"
 }
 
+# failure_is_new <task-id> <detail> : true the first time this failure is seen
+# on this ticket. Repeats are kept out of the ticket and stay in the log.
+failure_is_new() {
+  local task_id="$1" fingerprint prior
+  fingerprint="$(printf '%s' "$2" | sha256sum | cut -c1-16)"
+  prior="$(awk -v t="$task_id" '$1 == t { print $2 }' "$LASTFAIL" | tail -1)"
+  [ "$prior" = "$fingerprint" ] && return 1
+  printf '%s %s\n' "$task_id" "$fingerprint" >> "$LASTFAIL"
+  return 0
+}
+
 log() {
   printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"
   if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
 }
+
+# Why a ticket was chosen or passed over. Always in the log; on stdout when
+# somebody asked. A selection nobody can read is a selection nobody trusts.
+explain() {
+  printf '%s %s\n' "$(date -Is)" "explain: $*" >> "$LOG"
+  if [ "$EXPLAIN" = "yes" ] || [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
+}
+
+# row_field <row-json> <name>
+row_field() {
+  ROW="$1" F="$2" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get(os.environ["F"]) or "")'
+}
+
+# rank_order : indices of the eligible tickets, best rank first, board order
+# breaking ties.
+rank_order() {
+  local i
+  for i in "${!ELIGIBLE[@]}"; do printf '%s %s\n' "${ELIGIBLE[$i]}" "$i"; done \
+    | sort -k1,1n -k2,2n | awk '{print $2}'
+}
+
+# Candidates that passed every gate, waiting to be ranked against each other.
+ELIGIBLE=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=()
 
 # ---------- one tick at a time ----------
 # The systemd unit is Type=oneshot, so systemd already refuses a second run
@@ -152,19 +199,33 @@ while IFS= read -r row; do
   section="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["section"])')"
   description="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["description"])')"
   assigned="$(ROW="$row" AID="$AGENT_ID" python3 -c 'import json,os;print("yes" if os.environ["AID"] in json.loads(os.environ["ROW"])["agent_ids"] else "no")')"
-  # A ticket is free only if nobody at all is on it and it carries none of the
-  # labels this agent is told to stay away from.
-  unclaimed="$(ROW="$row" EXCL="$EXCLUDE_LABELS" python3 -c '
+  # An excluded label is a hard stop, whatever else is true of the ticket. A
+  # label like "valentin" means a person is working it; an agent that takes it
+  # anyway because it was also assigned or mentioned does the damage the label
+  # exists to prevent.
+  hit="$(ROW="$row" EXCL="$EXCLUDE_LABELS" python3 -c '
 import json, os
 row = json.loads(os.environ["ROW"])
 excluded = {s.strip().casefold() for s in os.environ["EXCL"].split(",") if s.strip()}
-labels = set(row.get("labels") or [])
-free = row.get("assignee_count", 1) == 0 and not (labels & excluded)
-print("yes" if free else "no")')"
+print(",".join(sorted(set(row.get("labels") or []) & excluded)))')"
+  if [ -n "$hit" ]; then
+    explain "skip  $(row_field "$row" ref): carries the label $hit, which this agent stays away from"
+    continue
+  fi
+  # A ticket is free only if nobody at all is on it: a name on a ticket, human
+  # or agent, means it already belongs to somebody.
+  unclaimed="$(ROW="$row" python3 -c '
+import json, os
+print("yes" if json.loads(os.environ["ROW"]).get("assignee_count", 1) == 0 else "no")')"
+
+  # An agent may watch several boards, so a ticket's own board decides where
+  # the follow-up reads go, not the first entry in the conf.
+  board="$(row_field "$row" board)"
+  [ -n "$board" ] || board="${BOARD_ID%%,*}"
 
   # The newest comment decides two things: whether an @mention addressed this
   # agent, and the state key, so a reply on an old ticket counts as new work.
-  comment_json="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$BOARD_ID")"
+  comment_json="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$board")"
   comment_id=0
   comment_text=""
   mentioned="no"
@@ -189,47 +250,116 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
   fi
   [ -n "$reason" ] || continue
 
+  # How this ticket ranks against the others this tick, and why. The board
+  # answers it, not a lock file: the adapter looks at who claimed the ticket,
+  # whether QA sent it back, and whether its pull request merged.
+  rank=3
+  why="$ref is new work ($reason)"
+  if declare -F adapter_pick_rank >/dev/null 2>&1; then
+    verdict="$(adapter_pick_rank "$TOKEN_FILE" "$board" "$AGENT_ID" "$AGENT_NAME" \
+                 "$ref" "$task_id" "$section" "$reason")" || verdict=""
+    if [ -n "$verdict" ]; then
+      rank="${verdict%% *}"
+      why="${verdict#* }"
+    fi
+  fi
+  if [ "$rank" = "0" ]; then
+    explain "skip  $ref: $why"
+    continue
+  fi
+
   # This agent's own comment is not new work. Without this an agent that
   # finishes and leaves the ticket in a watched column picks it straight back
-  # up on the next tick, because its own reply changed the state key. An
-  # @mention still wins: that is a human asking for another pass.
-  if [ "$reason" = "assigned" ] && [ -n "$comment_json" ]; then
+  # up on the next tick, because its own reply changed the state key. A ticket
+  # it still owes (rank 1) or that QA sent back (rank 2) is the exception, and
+  # so is an @mention: both are somebody asking for another pass.
+  if [ "$reason" = "assigned" ] && [ "$rank" = "3" ] && [ -n "$comment_json" ]; then
     if CJ="$comment_json" NAME="$AGENT_NAME" python3 -c '
 import json, os, sys
 author = (json.loads(os.environ["CJ"]).get("author") or "").strip().casefold()
 sys.exit(0 if author and author == os.environ["NAME"].strip().casefold() else 1)'; then
+      explain "skip  $ref: the newest comment is this agent's own, so there is nothing new to answer"
       continue
     fi
   fi
 
   key="$task_id:$comment_id"
   if grep -qxF "$key" "$SEEN"; then
+    explain "skip  $ref: already handled at this point in its history ($key)"
     continue
   fi
 
   tries="$(attempts_recent "$task_id")"
   if [ "$tries" -ge "$RETRY_LIMIT" ]; then
+    explain "skip  $ref: $tries attempts already in the last $RETRY_WINDOW_SECONDS seconds"
     log "skipping $ref: $tries attempts already in the last $RETRY_WINDOW_SECONDS seconds"
     continue
   fi
   picked=$((picked + 1))
+  explain "rank $rank $ref: $why"
 
-  if [ "$DRY_RUN" = "yes" ]; then
-    echo "would pick up $ref ($reason, section=$section, state key $key, $tries prior attempt(s))"
-    echo "    $title"
-    echo "    $url"
-    continue
-  fi
+  # Ranked, not taken. The pick happens after every candidate has been judged,
+  # so a ticket this agent still owes beats one that merely appears first.
+  ELIGIBLE+=("$rank")
+  E_ROW+=("$row")
+  E_COMMENT+=("$comment_json")
+  E_WHY+=("$why")
+  E_TRIES+=("$tries")
+done <<< "$CANDIDATES"
 
+if [ "$DRY_RUN" = "yes" ]; then
+  order="$(rank_order)"
+  for i in $order; do
+    row="${E_ROW[$i]}"
+    echo "would pick up $(row_field "$row" ref) (rank ${ELIGIBLE[$i]}): ${E_WHY[$i]}"
+    echo "    $(row_field "$row" title)"
+    echo "    $(row_field "$row" url)"
+  done
+  echo "$picked ticket(s) would be picked up; nothing was started."
+  exit 0
+fi
+
+for i in $(rank_order); do
   if [ "$started" -ge "$MAX_CONCURRENT_RUNS" ]; then
-    log "hit MAX_CONCURRENT_RUNS=$MAX_CONCURRENT_RUNS, leaving $ref for the next tick"
+    log "hit MAX_CONCURRENT_RUNS=$MAX_CONCURRENT_RUNS, leaving the rest for the next tick"
     break
   fi
+  row="${E_ROW[$i]}"
+  comment_json="${E_COMMENT[$i]}"
+  tries="${E_TRIES[$i]}"
+  why="${E_WHY[$i]}"
+  task_id="$(row_field "$row" id)"
+  ref="$(row_field "$row" ref)"
+  title="$(row_field "$row" title)"
+  url="$(row_field "$row" url)"
+  description="$(row_field "$row" description)"
+  comment_id=0
+  comment_text=""
+  if [ -n "$comment_json" ]; then
+    comment_id="$(CJ="$comment_json" python3 -c 'import json,os;print(json.loads(os.environ["CJ"]).get("id") or 0)')"
+    comment_text="$(CJ="$comment_json" python3 -c '
+import html, json, os, re
+doc = json.loads(os.environ["CJ"])
+print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:1200])')"
+  fi
+  key="$task_id:$comment_id"
 
-  # The board this agent works decides what a ticket's prompt has to say, so
-  # its adapter writes it when it has an opinion. Core's version is the one an
-  # adapter that does not care still gets.
-  if declare -F adapter_run_prompt >/dev/null 2>&1; then
+  # Three places a prompt can come from, most specific first. An agent with its
+  # own job (answer questions, groom a board) says so in PROMPT_FILE and that
+  # wins; otherwise the board's adapter writes the prompt if it has an opinion;
+  # otherwise core's generic one.
+  if [ -n "${PROMPT_FILE:-}" ]; then
+    PROMPT="$(PF="$PROMPT_FILE" REF="$ref" URL="$url" TITLE="$title" \
+              DESCRIPTION="$description" COMMENT="${comment_text:-none}" \
+              AGENT_NAME="$AGENT_NAME" BOARD_CLI="$BOARD_CLI" \
+              SKILLS_INDEX="$SKILLS_INDEX" BOARD="$board" python3 -c '
+import os, sys
+template = open(os.environ["PF"]).read()
+for name in ("REF", "URL", "TITLE", "DESCRIPTION", "COMMENT", "AGENT_NAME",
+             "BOARD_CLI", "SKILLS_INDEX", "BOARD"):
+    template = template.replace("{{%s}}" % name, os.environ.get(name, ""))
+sys.stdout.write(template)')"
+  elif declare -F adapter_run_prompt >/dev/null 2>&1; then
     PROMPT="$(adapter_run_prompt "$SKILLS_INDEX" "$AGENT_NAME" "$BOARD_CLI" \
                 "$ref" "$url" "$title" "$description" "$comment_text")"
   else
@@ -258,7 +388,8 @@ that lives only in this run is gone the moment this process exits."
     RUN_DIR="$(core_workdir_create "${AGENT_REPO:-}" "$WORKDIR_ROOT" "$SLUG-$ref" 2>>"$LOG")" || {
       log "run FAILED $ref: could not make a working directory under $WORKDIR_ROOT"
       printf '%s %s\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
-      if declare -F adapter_failure_comment >/dev/null 2>&1; then
+      if declare -F adapter_failure_comment >/dev/null 2>&1 \
+         && failure_is_new "$task_id" "workdir:$WORKDIR_ROOT"; then
         adapter_failure_comment "$BOARD_CLI" "$ref" \
           "could not create a working directory under $WORKDIR_ROOT" || true
       fi
@@ -267,7 +398,7 @@ that lives only in this run is gone the moment this process exits."
   fi
 
   ERRFILE="$STATE_DIR/$SLUG.stderr"
-  log "run start $ref ($reason) key=$key dir=${RUN_DIR:-.} attempt=$((tries + 1))"
+  log "run start $ref key=$key dir=${RUN_DIR:-.} attempt=$((tries + 1)): $why"
   printf '%s %s\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
   started=$((started + 1))
   set +e
@@ -295,9 +426,16 @@ that lives only in this run is gone the moment this process exits."
     # not recorded either, so the next tick may try once more, up to the
     # attempt budget this ticket has left.
     log "run FAILED $ref exit=$rc: see the lines above in $LOG"
+    detail="$(tail -c 2000 "$ERRFILE" 2>/dev/null)"
+    # The same failure said twice on one ticket is noise, and the retry count
+    # is this runner's business, not the ticket's.
     if declare -F adapter_failure_comment >/dev/null 2>&1; then
-      adapter_failure_comment "$BOARD_CLI" "$ref" "$(tail -c 2000 "$ERRFILE" 2>/dev/null)" \
-        || log "could not post the failure comment on $ref"
+      if failure_is_new "$task_id" "$detail"; then
+        adapter_failure_comment "$BOARD_CLI" "$ref" "$detail" \
+          || log "could not post the failure comment on $ref"
+      else
+        log "failure on $ref is the same one already written there, not repeating it"
+      fi
     fi
     printf 'ERROR: the run for %s exited %s. Do this next: read %s, fix the cause; it has %s of %s attempts left in this window\n' \
       "$ref" "$rc" "$LOG" "$((RETRY_LIMIT - tries - 1))" "$RETRY_LIMIT" >&2
@@ -305,10 +443,6 @@ that lives only in this run is gone the moment this process exits."
     printf '%s\n' "$key" >> "$SEEN"
     log "run done $ref exit=0"
   fi
-done <<< "$CANDIDATES"
+done
 
-if [ "$DRY_RUN" = "yes" ]; then
-  echo "$picked ticket(s) would be picked up; nothing was started."
-else
-  log "tick finished: $picked new, $started started"
-fi
+log "tick finished: $picked eligible, $started started"
