@@ -208,6 +208,30 @@ print("yes")')"
   fi
 fi
 
+# ---------- Valentin's own decisions, repeated ----------
+# ht-supervisor writes one line per answer he gives on a ticket. A decision he
+# has now given more than once is a rule nobody wrote down, so surface it here
+# beside the feedback tickets instead of asking him a third time.
+DECISIONS="$HOME/.local/state/ht-supervisor/decisions.jsonl"
+[ -f "$DECISIONS" ] && python3 - "$DECISIONS" <<'PYDEC' | while IFS= read -r line; do log "$line"; done
+import collections, json, re, sys
+seen = collections.defaultdict(list)
+for raw in open(sys.argv[1], encoding="utf-8"):
+    try:
+        row = json.loads(raw)
+    except ValueError:
+        continue
+    key = " ".join(re.findall(r"[a-z]{4,}", (row.get("text") or "").lower())[:8])
+    if key:
+        seen[key].append(row)
+for key, rows in sorted(seen.items(), key=lambda kv: -len(kv[1])):
+    if len(rows) < 2:
+        continue
+    refs = ", ".join(r.get("ticket") or "?" for r in rows[:4])
+    print(f"rule proposal: Valentin has decided this {len(rows)} times ({refs}): "
+          f"{(rows[-1].get('text') or '')[:160]}")
+PYDEC
+
 # ---------- read the inbox ----------
 LIST_JSON="$("$BOARD_CLI" task list --project "$BOARD_ID" --section "$INBOX" --limit 50 --json 2>/dev/null)" \
   || die "could not read the feedback board" \
