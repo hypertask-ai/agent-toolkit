@@ -148,6 +148,79 @@ log() {
   if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
 }
 
+# push_skill_commits <ref>
+# The mission text tells an agent to fix a skill in the same run that got
+# corrected and commit it there, never open a pull request for it. This is
+# the other half: after the run, push those commits straight to the skills
+# repo's own default branch, but only when every one of them stays inside the
+# skills folder and this template's own evals still pass. Never called during
+# --dry-run: that path exits before the loop that runs a model at all.
+push_skill_commits() {
+  local ref="$1" skills_repo current_branch default_branch commits changed evals_sh eval_out failing
+  skills_repo="$(git -C "$(dirname "$SKILLS_INDEX")" rev-parse --show-toplevel 2>/dev/null)" || return 0
+  [ -n "$skills_repo" ] || return 0
+
+  current_branch="$(git -C "$skills_repo" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+  if [ -z "$current_branch" ]; then
+    log "skill push skipped for $ref: $skills_repo is on a detached HEAD"
+    return 0
+  fi
+  default_branch="$(git -C "$skills_repo" symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null)"
+  default_branch="${default_branch#origin/}"
+  [ -n "$default_branch" ] || default_branch="main"
+  if [ "$current_branch" != "$default_branch" ]; then
+    log "skill push skipped for $ref: $skills_repo is on $current_branch, not its default branch $default_branch"
+    return 0
+  fi
+
+  commits="$(git -C "$skills_repo" log --oneline '@{u}..HEAD' 2>/dev/null)" || commits=""
+  [ -n "$commits" ] || return 0
+
+  # An allowlist, not a denylist: on this host the skills index sits at the
+  # repo's own root, so "outside the skills folder" has to name what belongs
+  # to a skill (INDEX.md, a SKILL.md, its scripts, its own docs) rather than
+  # try to name every folder a skill is not.
+  changed="$(git -C "$skills_repo" diff --name-only '@{u}...HEAD' 2>/dev/null)"
+  if ! printf '%s\n' "$changed" | python3 -c '
+import sys
+def allowed(rel):
+    if not rel or rel == "INDEX.md" or rel == "SKILL.md":
+        return True
+    if rel.startswith(".github/"):
+        return False
+    if rel.endswith("/SKILL.md") or rel.endswith(".md"):
+        return True
+    if "/scripts/" in ("/" + rel):
+        return True
+    return False
+bad = [line for line in sys.stdin.read().splitlines() if line and not allowed(line)]
+sys.exit(1 if bad else 0)
+'; then
+    log "skill push skipped for $ref: $skills_repo has a commit touching something outside the skills folder ($changed)"
+    return 0
+  fi
+
+  evals_sh="$skills_repo/evals/run-evals.sh"
+  if [ -f "$evals_sh" ]; then
+    if ! eval_out="$(bash "$evals_sh" 2>&1)"; then
+      failing="$(printf '%s\n' "$eval_out" | sed -n 's/^failing case ids: //p')"
+      log "skill push rejected for $ref: evals failed ($eval_out)"
+      if declare -F adapter_post_comment >/dev/null 2>&1; then
+        adapter_post_comment "$BOARD_CLI" "$ref" \
+          "<p><strong>Skill edit rejected by checks: ${failing:-see the run log}</strong></p>" \
+          || log "could not post the skill-rejection comment on $ref"
+      fi
+      return 0
+    fi
+  fi
+
+  if git -C "$skills_repo" push --quiet origin "HEAD:$default_branch"; then
+    log "skill push for $ref: $(printf '%s\n' "$commits" | wc -l) commit(s) pushed to $skills_repo ($default_branch)"
+  else
+    log "skill push FAILED for $ref: git push did not succeed, see $LOG"
+  fi
+}
+
 # Why a ticket was chosen or passed over. Always in the log; on stdout when
 # somebody asked. A selection nobody can read is a selection nobody trusts.
 explain() {
@@ -426,7 +499,15 @@ If a human corrects your output at any point, whether they edit your comment,
 fail your QA, reject your pull request or simply say that is wrong, stop and
 run \`agent-template feedback --what '<one sentence>' --got <the bad output>
 --expected '<what should have happened>'\` before you carry on. A correction
-that lives only in this run is gone the moment this process exits."
+that lives only in this run is gone the moment this process exits.
+
+When a correction lands on your work, also edit the skill file in this
+repo's skills folder in the same run and commit it, message
+\`skill: <what changed> (from $ref)\`. Do not open a pull request for a skill
+edit; the evals check on push is the gate. A fact (a number, a name, a date,
+a path) goes into a doc or the ticket, never into a skill; a rule (always or
+never do X) goes into the skill file. If you are unsure which: would it still
+be true for a different customer? Yes is a rule, no is a fact."
   fi
 
   RUN_DIR="${AGENT_REPO:-}"
@@ -463,6 +544,11 @@ that lives only in this run is gone the moment this process exits."
   rc=$?
   set -e
   cat "$ERRFILE" >> "$LOG" 2>/dev/null || true
+  # Whether or not this ticket's own run succeeded, a skill edit the agent
+  # made along the way is checked and pushed on its own: it lives in the
+  # skills repo, not this ticket's worktree, and its fate is not this
+  # ticket's fate.
+  push_skill_commits "$ref"
   if [ "$WORKDIR_MODE" = "per-run" ]; then
     core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
   fi

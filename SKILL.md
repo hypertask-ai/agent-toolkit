@@ -160,6 +160,22 @@ becomes a stored check that replays on every change to this template, so the
 next agent cannot make the same mistake. Set `FEEDBACK_OPT_OUT=yes` in the conf
 if an agent must never send one.
 
+**The correction also has to land, in the same run, not wait for a human to
+merge it.** When the correction is about how the agent should behave, edit the
+skill file in this repo's skills folder right there and commit it, message
+`skill: <what changed> (from <ticket>)`. Do not open a pull request for a
+skill edit: `evals/run-evals.sh` running on push is the gate, the same check
+that runs on every pull request. `agent-board-poll` pushes those commits
+itself after the run, straight to the skills repo's default branch, and only
+when they touch nothing outside the skills folder and the evals still pass;
+otherwise it leaves a comment naming which check failed and nothing is pushed.
+
+**Fact or rule decides where a correction goes.** A fact — a number, a name, a
+date, a path — goes into the repo's docs or the ticket, never into a skill. A
+rule — always or never do X — goes into the skill file. If it is unclear
+which: would it still be true for a different customer? Yes means rule, no
+means fact.
+
 ## Evals
 
 `evals/cases.jsonl` holds one line per correction: the output that would have

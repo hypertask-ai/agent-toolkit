@@ -661,6 +661,14 @@ fail your QA, reject your pull request or simply say that is wrong, stop and
 run \`agent-template feedback --what '<one sentence>' --got <the bad output>
 --expected '<what should have happened>'\` before you carry on. A correction
 that lives only in this run is gone the moment this process exits.
+
+When a correction lands on your work, also edit the skill file in this
+repo's skills folder in the same run and commit it, message
+\`skill: <what changed> (from $ref)\`. Do not open a pull request for a skill
+edit; the evals check on push is the gate. A fact (a number, a name, a date,
+a path) goes into a doc or the ticket, never into a skill; a rule (always or
+never do X) goes into the skill file. If you are unsure which: would it still
+be true for a different customer? Yes is a rule, no is a fact.
 EOF
 }
 
