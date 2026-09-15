@@ -5,6 +5,16 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.15.0 - 2026-09-16
+
+- Agent Chat phase A is verified against the current template release. The host
+  daemon handles each message once, returns a one-line reply on provider
+  failure, and keeps agents independent.
+- The shared chat service is installed and enabled with the template, refreshed
+  by `agent-template update`, and each created agent prints its direct chat URL.
+- ACTION: after the app polling endpoint marks polling agents as chat-enabled,
+  run `agent-template update` on each bot host and verify a timestamped reply.
+
 ## 3.14.0 - 2026-09-16
 
 - `core/model-policy.conf` now owns the provider ladder used by the runner and
