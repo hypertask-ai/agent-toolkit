@@ -190,6 +190,12 @@ it never deletes or rewrites an existing case.
 | `SKILLS_INDEX` | absolute path to the index the agent reads first |
 | `MODEL_CLI` | command template, default `claude -p --model sonnet` |
 | `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
+| `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
+| `EXCLUDE_LABELS` | labels that make a ticket off limits, comma separated |
+| `WORKDIR_MODE` | `repo` (default) runs in `AGENT_REPO`; `per-run` gives each ticket its own checkout |
+| `WORKDIR_ROOT` | where `per-run` checkouts go, required when `WORKDIR_MODE=per-run` |
+| `RETRY_LIMIT` | goes a failing ticket gets per window, default 2 |
+| `RETRY_WINDOW_SECONDS` | length of that window, default 21600 (six hours) |
 
 Override `MODEL_CLI` to change model or vendor, for example `cursor-agent -p`.
 A headless model CLI usually needs its own permission flags; put them in this

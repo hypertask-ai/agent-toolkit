@@ -192,10 +192,22 @@ for task in doc.get("tasks") or []:
     if wanted and section.casefold() not in wanted:
         continue
     agent_ids = []
-    for who in task.get("assignees") or []:
+    assignees = task.get("assignees") or []
+    for who in assignees:
         agent = who.get("agent") if isinstance(who, dict) else None
         if isinstance(agent, dict) and agent.get("id"):
             agent_ids.append(str(agent["id"]))
+    # Labels decide whether a ticket is open season. A board carries them under
+    # several shapes depending on how the task was created, so take the name
+    # off whichever one is present and lowercase it once, here.
+    labels = []
+    for label in task.get("labels") or []:
+        if isinstance(label, dict):
+            name = label.get("name") or label.get("title") or label.get("label") or ""
+        else:
+            name = str(label)
+        if name:
+            labels.append(str(name).strip().casefold())
     ref = str(task.get("ticketNumber") or "")
     index = ref.rsplit("-", 1)[-1] if "-" in ref else str(task.get("id"))
     print(json.dumps({
@@ -205,6 +217,10 @@ for task in doc.get("tasks") or []:
         "title": task.get("title") or "",
         "description": task.get("description") or "",
         "agent_ids": agent_ids,
+        # Anyone at all on the ticket, human or agent: a ticket with a name on
+        # it belongs to whoever put it there, and is not free to pick up.
+        "assignee_count": len(assignees),
+        "labels": labels,
         "comment_count": task.get("commentCount") or 0,
         "url": "https://app.hypertask.ai/detail/project-%s/%s" % (board, index),
     }))
@@ -256,6 +272,88 @@ adapter_post_comment() {
 adapter_move_task() {
   local board_cli="$1" ref="$2" section="$3"
   "$board_cli" task move "$ref" --section "$section"
+}
+
+# ---------- a working directory per run ----------
+# Core decides there should be one and where it goes; the checkout itself is
+# here, because "a checkout" on this board's projects means a git worktree cut
+# from the branch that deploys. Detached, so the run names its own branch when
+# it has something to push, and so two runs never contend for one branch name.
+adapter_workdir_checkout() {
+  local source="$1" dir="$2" name="$3"
+  local remote="${WORKDIR_REMOTE:-origin}" branch="${WORKDIR_BASE_BRANCH:-main}"
+  [ -d "$source/.git" ] || [ -f "$source/.git" ] || die \
+    "$source is not a git checkout, so there is nothing to cut a worktree from" \
+    "point AGENT_REPO at a git clone of the repo this agent changes"
+  git -C "$source" fetch --quiet "$remote" "$branch" || die \
+    "could not fetch $remote/$branch in $source" \
+    "check the remote name in WORKDIR_REMOTE and that this machine can reach it"
+  git -C "$source" worktree add --detach "$dir" "$remote/$branch" >/dev/null || die \
+    "could not create a worktree for $name at $dir" \
+    "run git -C $source worktree prune, then try again"
+}
+
+adapter_workdir_remove() {
+  local source="$1" dir="$2"
+  git -C "$source" worktree remove --force "$dir" >/dev/null 2>&1 || true
+  git -C "$source" worktree prune >/dev/null 2>&1 || true
+}
+
+# ---------- the prompt one ticket gets ----------
+# The generic prompt in core says "read the index and follow what matches".
+# This board's agents have a router that answers that question deterministically
+# before any model judgment, a claim step that has to happen before code is
+# written, and a rule about whose name goes on a comment. All three are
+# specific to this tracker, so they live here.
+#
+# adapter_run_prompt <skills-index> <agent-name> <board-cli> <ref> <url> <title>
+#                    <description> <latest-comment>
+adapter_run_prompt() {
+  local skills_index="$1" agent_name="$2" board_cli="$3" ref="$4" url="$5"
+  local title="$6" description="$7" latest="$8"
+  local route_sh="$(dirname "$skills_index")/ticket-lifecycle/scripts/route.sh"
+  local claim_sh="$(dirname "$skills_index")/ticket-lifecycle/scripts/claim-ticket.sh"
+  cat <<EOF
+You are $agent_name. You have one ticket, $ref, and this process ends when you do.
+
+Ticket $url: $title
+
+$description
+
+Latest comment: ${latest:-none}
+
+Run \`$route_sh $ref\` first and follow the named skills, in the order it
+names them. $skills_index is the fallback only if that prints NO_ROUTE.
+
+Claim the ticket with \`$claim_sh $ref\` before you write any code. Never
+assign userId 6: only Valentin assigns Valentin.
+
+Post every result as a comment on the ticket as $agent_name, with
+\`$board_cli comment add $ref --text '<p>...</p>'\` in HTML block tags. That
+includes a failure to start and a blocked step: a run that ends with nothing on
+the ticket is a run nobody can see. Never write in Valentin's name.
+
+Do not ask for permission and do not stop halfway.
+
+If a human corrects your output at any point, whether they edit your comment,
+fail your QA, reject your pull request or simply say that is wrong, stop and
+run \`agent-template feedback --what '<one sentence>' --got <the bad output>
+--expected '<what should have happened>'\` before you carry on. A correction
+that lives only in this run is gone the moment this process exits.
+EOF
+}
+
+# adapter_failure_comment <board-cli> <ref> <stderr-text>
+# A run that died is written on the ticket, where a human already looks, not
+# only in a log on one machine. The ticket is not moved: where it sits is the
+# board's record of how far it got.
+adapter_failure_comment() {
+  local board_cli="$1" ref="$2" detail="$3" html
+  html="$(DETAIL="$detail" python3 -c '
+import html, os
+detail = os.environ["DETAIL"].strip()[:300] or "no output on stderr"
+print("<p><strong>Run failed: %s</strong></p>" % html.escape(detail))')"
+  "$board_cli" comment add "$ref" --text "$html" >/dev/null 2>&1 || return 1
 }
 
 # ---------- fleet wiring (this tracker only, and only where it exists) ----------

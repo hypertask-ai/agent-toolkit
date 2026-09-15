@@ -179,3 +179,46 @@ core_require_abs() {
           "pass the full path starting with /" ;;
   esac
 }
+
+# ---------- a working directory per run ----------
+# Some agents change code, and two runs sharing one checkout overwrite each
+# other's edits. WORKDIR_MODE=per-run gives each run its own directory under
+# WORKDIR_ROOT, thrown away when the run ends.
+#
+# Core owns the option, the location, and the removal. It does not know how to
+# make a checkout, because that depends on the version control the board's
+# projects use, so the adapter supplies it: define adapter_workdir_checkout
+# <source> <dir> <name> to fill the directory, and optionally
+# adapter_workdir_remove <source> <dir> to release it before core deletes it.
+# An adapter that defines neither still works: the directory is made empty.
+
+# core_workdir_create <source> <root> <name> : prints the directory it made
+core_workdir_create() {
+  local source="$1" root="$2" name="$3" dir
+  [ -n "$root" ] || die "WORKDIR_ROOT is empty but WORKDIR_MODE is per-run" \
+    "set WORKDIR_ROOT= in the conf to a directory this user can write"
+  core_require_abs "$root" "WORKDIR_ROOT"
+  dir="$root/$name"
+  mkdir -p "$root"
+  # A directory left behind by a killed run is stale, never a resume point.
+  [ -e "$dir" ] && core_workdir_remove "$source" "$dir"
+  if declare -F adapter_workdir_checkout >/dev/null 2>&1; then
+    adapter_workdir_checkout "$source" "$dir" "$name" >&2 || return 1
+  else
+    mkdir -p "$dir"
+  fi
+  [ -d "$dir" ] || die "the checkout for $name did not create $dir" \
+    "check adapter_workdir_checkout in the adapter for this board"
+  printf '%s' "$dir"
+}
+
+# core_workdir_remove <source> <dir>
+core_workdir_remove() {
+  local source="$1" dir="$2"
+  [ -n "$dir" ] || return 0
+  case "$dir" in /*) : ;; *) return 0 ;; esac
+  if declare -F adapter_workdir_remove >/dev/null 2>&1; then
+    adapter_workdir_remove "$source" "$dir" >&2 || true
+  fi
+  rm -rf "$dir"
+}

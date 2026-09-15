@@ -60,6 +60,25 @@ for key in AGENT_ID AGENT_NAME BOARD_ADAPTER BOARD_ID TOKEN_FILE WATCH_SECTIONS 
     "add $key= to that file; see the key list in the create-agent skill"
 done
 MAX_CONCURRENT_RUNS="${MAX_CONCURRENT_RUNS:-1}"
+# An agent may also take tickets nobody has claimed, which is how a board column
+# becomes a queue without anyone assigning by hand. Off unless the conf says so,
+# because on a shared board it is the difference between helping and barging in.
+CLAIM_UNASSIGNED="${CLAIM_UNASSIGNED:-no}"
+EXCLUDE_LABELS="${EXCLUDE_LABELS:-}"
+# Where the run happens. "repo" runs in AGENT_REPO, the way it always has;
+# "per-run" gives each ticket its own checkout and throws it away after.
+WORKDIR_MODE="${WORKDIR_MODE:-repo}"
+WORKDIR_ROOT="${WORKDIR_ROOT:-}"
+case "$WORKDIR_MODE" in
+  repo|per-run) : ;;
+  *) die "WORKDIR_MODE must be repo or per-run, got '$WORKDIR_MODE'" \
+       "fix that key in $CONF" ;;
+esac
+# A ticket the model CLI cannot finish fails the same way every time. Two goes
+# is enough to rule out a flake; a third in the same window is a bug report, not
+# a retry.
+RETRY_LIMIT="${RETRY_LIMIT:-2}"
+RETRY_WINDOW_SECONDS="${RETRY_WINDOW_SECONDS:-21600}"
 core_require_abs "$SKILLS_INDEX" "SKILLS_INDEX"
 core_require_abs "$TOKEN_FILE" "TOKEN_FILE"
 [ -f "$SKILLS_INDEX" ] || die "the skills index $SKILLS_INDEX does not exist" \
@@ -76,7 +95,29 @@ mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/$SLUG.log"
 SEEN="$STATE_DIR/$SLUG.seen"
 LOCK="$STATE_DIR/$SLUG.lock"
-touch "$SEEN"
+# The one piece of state a failure needs: when this runner last tried a ticket,
+# keyed by ticket id. Without it a ticket whose run dies on start is retried
+# every tick forever. It is append-only and self-expiring: nothing reads a line
+# older than RETRY_WINDOW_SECONDS.
+ATTEMPTS="$STATE_DIR/$SLUG.attempts"
+touch "$SEEN" "$ATTEMPTS"
+
+# attempts_recent <task-id> : how many goes this ticket has had in the window
+attempts_recent() {
+  TASK="$1" WINDOW="$RETRY_WINDOW_SECONDS" python3 -c '
+import os, sys, time
+task, window = os.environ["TASK"], int(os.environ["WINDOW"])
+cutoff, count = time.time() - window, 0
+for line in sys.stdin:
+    parts = line.split()
+    if len(parts) == 2 and parts[0] == task:
+        try:
+            if float(parts[1]) >= cutoff:
+                count += 1
+        except ValueError:
+            pass
+print(count)' < "$ATTEMPTS"
+}
 
 log() {
   printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"
@@ -111,6 +152,15 @@ while IFS= read -r row; do
   section="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["section"])')"
   description="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["description"])')"
   assigned="$(ROW="$row" AID="$AGENT_ID" python3 -c 'import json,os;print("yes" if os.environ["AID"] in json.loads(os.environ["ROW"])["agent_ids"] else "no")')"
+  # A ticket is free only if nobody at all is on it and it carries none of the
+  # labels this agent is told to stay away from.
+  unclaimed="$(ROW="$row" EXCL="$EXCLUDE_LABELS" python3 -c '
+import json, os
+row = json.loads(os.environ["ROW"])
+excluded = {s.strip().casefold() for s in os.environ["EXCL"].split(",") if s.strip()}
+labels = set(row.get("labels") or [])
+free = row.get("assignee_count", 1) == 0 and not (labels & excluded)
+print("yes" if free else "no")')"
 
   # The newest comment decides two things: whether an @mention addressed this
   # agent, and the state key, so a reply on an old ticket counts as new work.
@@ -134,16 +184,38 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
   reason=""
   if [ "$assigned" = "yes" ]; then reason="assigned"; fi
   if [ "$mentioned" = "yes" ]; then reason="${reason:+$reason+}mentioned"; fi
+  if [ -z "$reason" ] && [ "$CLAIM_UNASSIGNED" = "yes" ] && [ "$unclaimed" = "yes" ]; then
+    reason="unclaimed"
+  fi
   [ -n "$reason" ] || continue
+
+  # This agent's own comment is not new work. Without this an agent that
+  # finishes and leaves the ticket in a watched column picks it straight back
+  # up on the next tick, because its own reply changed the state key. An
+  # @mention still wins: that is a human asking for another pass.
+  if [ "$reason" = "assigned" ] && [ -n "$comment_json" ]; then
+    if CJ="$comment_json" NAME="$AGENT_NAME" python3 -c '
+import json, os, sys
+author = (json.loads(os.environ["CJ"]).get("author") or "").strip().casefold()
+sys.exit(0 if author and author == os.environ["NAME"].strip().casefold() else 1)'; then
+      continue
+    fi
+  fi
 
   key="$task_id:$comment_id"
   if grep -qxF "$key" "$SEEN"; then
     continue
   fi
+
+  tries="$(attempts_recent "$task_id")"
+  if [ "$tries" -ge "$RETRY_LIMIT" ]; then
+    log "skipping $ref: $tries attempts already in the last $RETRY_WINDOW_SECONDS seconds"
+    continue
+  fi
   picked=$((picked + 1))
 
   if [ "$DRY_RUN" = "yes" ]; then
-    echo "would pick up $ref ($reason, section=$section, state key $key)"
+    echo "would pick up $ref ($reason, section=$section, state key $key, $tries prior attempt(s))"
     echo "    $title"
     echo "    $url"
     continue
@@ -154,7 +226,14 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
     break
   fi
 
-  PROMPT="Read $SKILLS_INDEX first and follow the skill whose trigger matches this ticket.
+  # The board this agent works decides what a ticket's prompt has to say, so
+  # its adapter writes it when it has an opinion. Core's version is the one an
+  # adapter that does not care still gets.
+  if declare -F adapter_run_prompt >/dev/null 2>&1; then
+    PROMPT="$(adapter_run_prompt "$SKILLS_INDEX" "$AGENT_NAME" "$BOARD_CLI" \
+                "$ref" "$url" "$title" "$description" "$comment_text")"
+  else
+    PROMPT="Read $SKILLS_INDEX first and follow the skill whose trigger matches this ticket.
 
 Ticket $url: $title.
 
@@ -172,8 +251,24 @@ fail your QA, reject your pull request or simply say that is wrong, stop and
 run \`agent-template feedback --what '<one sentence>' --got <the bad output>
 --expected '<what should have happened>'\` before you carry on. A correction
 that lives only in this run is gone the moment this process exits."
+  fi
 
-  log "run start $ref ($reason) key=$key"
+  RUN_DIR="${AGENT_REPO:-}"
+  if [ "$WORKDIR_MODE" = "per-run" ]; then
+    RUN_DIR="$(core_workdir_create "${AGENT_REPO:-}" "$WORKDIR_ROOT" "$SLUG-$ref" 2>>"$LOG")" || {
+      log "run FAILED $ref: could not make a working directory under $WORKDIR_ROOT"
+      printf '%s %s\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
+      if declare -F adapter_failure_comment >/dev/null 2>&1; then
+        adapter_failure_comment "$BOARD_CLI" "$ref" \
+          "could not create a working directory under $WORKDIR_ROOT" || true
+      fi
+      continue
+    }
+  fi
+
+  ERRFILE="$STATE_DIR/$SLUG.stderr"
+  log "run start $ref ($reason) key=$key dir=${RUN_DIR:-.} attempt=$((tries + 1))"
+  printf '%s %s\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
   started=$((started + 1))
   set +e
   # One short-lived process per ticket. Nothing survives it except the board,
@@ -183,21 +278,31 @@ that lives only in this run is gone the moment this process exits."
   (
     # The run happens where the agent's work lives, so the model CLI sees the
     # repo it is meant to change and nothing else.
-    if [ -n "${AGENT_REPO:-}" ] && [ -d "$AGENT_REPO" ]; then cd "$AGENT_REPO"; fi
+    if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
     AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
     PATH="$(dirname "$BOARD_CLI"):$PATH" \
       "${MODEL_ARGV[@]}" "$PROMPT"
-  ) >> "$LOG" 2>&1
+  ) >> "$LOG" 2>"$ERRFILE"
   rc=$?
   set -e
-  # The key is recorded whatever happened, so a failing ticket is logged loudly
-  # once instead of being retried every sixty seconds.
-  printf '%s\n' "$key" >> "$SEEN"
+  cat "$ERRFILE" >> "$LOG" 2>/dev/null || true
+  if [ "$WORKDIR_MODE" = "per-run" ]; then
+    core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+  fi
   if [ "$rc" -ne 0 ]; then
+    # A failure is written where a human already looks. The ticket does not
+    # move: where it sits is the record of how far this got. The state key is
+    # not recorded either, so the next tick may try once more, up to the
+    # attempt budget this ticket has left.
     log "run FAILED $ref exit=$rc: see the lines above in $LOG"
-    printf 'ERROR: the run for %s exited %s. Do this next: read %s, fix the cause, then delete the line "%s" from %s to retry it\n' \
-      "$ref" "$rc" "$LOG" "$key" "$SEEN" >&2
+    if declare -F adapter_failure_comment >/dev/null 2>&1; then
+      adapter_failure_comment "$BOARD_CLI" "$ref" "$(tail -c 2000 "$ERRFILE" 2>/dev/null)" \
+        || log "could not post the failure comment on $ref"
+    fi
+    printf 'ERROR: the run for %s exited %s. Do this next: read %s, fix the cause; it has %s of %s attempts left in this window\n' \
+      "$ref" "$rc" "$LOG" "$((RETRY_LIMIT - tries - 1))" "$RETRY_LIMIT" >&2
   else
+    printf '%s\n' "$key" >> "$SEEN"
     log "run done $ref exit=0"
   fi
 done <<< "$CANDIDATES"
