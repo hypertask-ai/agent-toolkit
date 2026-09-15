@@ -621,7 +621,7 @@ Latest comment: ${latest:-none}
 Why you have this ticket: ${why:-it came up next on the board}. If that says
 this ticket already has a pull request, the working directory you are in is
 already on that branch, at a detached head: check the branch out by name first
-(\`git checkout -B <branch> --track $remote/<branch>\`), then push more commits
+(\`git checkout -B <branch> --track ${WORKDIR_REMOTE:-origin}/<branch>\`), then push more commits
 to it and fix what is wrong. Opening a second pull request for one ticket is
 the one mistake that wastes everybody.
 
