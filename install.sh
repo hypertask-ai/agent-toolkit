@@ -6,11 +6,13 @@
 # run this again. Re-running is safe and overwrites the installed copy.
 #
 # Usage:
-#   ./install.sh [--dest DIR] [--bin DIR] [--dry-run] [-h|--help]
+#   ./install.sh [--dest DIR] [--bin DIR] [--unit-dir DIR] [--dry-run] [-h|--help]
 #
 # Examples:
 #   ./install.sh --dry-run          # show what would be copied where
 #   ./install.sh                    # install for the current user
+#   ./install.sh --dest /tmp/t-dest --bin /tmp/t-bin   # test install: never
+#                                    # touches the real systemd units (see below)
 #
 # It also clones or fast-forwards the shared company skills pack to
 # ~/projects/company-skills, because every bot reads that pack before its own.
@@ -23,9 +25,20 @@ set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(dirname "$SELF")"
-DEST="$HOME/.claude/skills/create-agent"
-BIN="${AGENT_BIN_DIR:-$HOME/.local/bin}"
-SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
+DEST_DEFAULT="$HOME/.claude/skills/create-agent"
+BIN_DEFAULT="${AGENT_BIN_DIR:-$HOME/.local/bin}"
+DEST="$DEST_DEFAULT"
+BIN="$BIN_DEFAULT"
+# Empty here on purpose: whether we touch the live systemd unit dir at all is
+# decided after argument parsing (see below), not defaulted up front. A test
+# install once overwrote the live agent-board-poll@.service with
+# ExecStart=/tmp/... for six minutes because this used to default to
+# $HOME/.config/systemd/user regardless of --dest/--bin. Never again: the
+# live unit dir is only touched when this is a real install (default --dest
+# and --bin) or the caller names it explicitly with --unit-dir.
+SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-}"
+UNIT_DIR_EXPLICIT="no"
+[ -n "$SYSTEMD_USER_DIR" ] && UNIT_DIR_EXPLICIT="yes"
 DRY_RUN="no"
 
 fail() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
@@ -64,6 +77,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --dest) DEST="$2"; shift 2 ;;
     --bin) BIN="$2"; shift 2 ;;
+    --unit-dir) SYSTEMD_USER_DIR="$2"; UNIT_DIR_EXPLICIT="yes"; shift 2 ;;
     --dry-run) DRY_RUN="yes"; shift ;;
     -h|--help) sed -n '2,16p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown argument $1" "run ./install.sh --help" ;;
@@ -74,6 +88,19 @@ for item in SKILL.md MAINTAINER.md VERSION CHANGELOG.md scripts adapters evals; 
   [ -e "$SRC/$item" ] || fail "$SRC/$item is missing" \
     "run install.sh from inside the template folder in the repo"
 done
+
+# Decide, once, whether this run is allowed to touch the live systemd unit
+# dir. Real install (default --dest and --bin) or an explicit --unit-dir:
+# yes. A --dest/--bin override with no --unit-dir looks like a test install,
+# so default to $HOME/.config/systemd/user only when it is safe; otherwise
+# leave SYSTEMD_USER_DIR empty and skip the unit refresh below.
+if [ "$UNIT_DIR_EXPLICIT" = "no" ]; then
+  if [ "$DEST" = "$DEST_DEFAULT" ] && [ "$BIN" = "$BIN_DEFAULT" ]; then
+    SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+  else
+    SYSTEMD_USER_DIR=""
+  fi
+fi
 
 echo "source: $SRC"
 echo "skill:  $DEST"
@@ -91,14 +118,34 @@ if [ "$DRY_RUN" = "yes" ]; then
 fi
 
 mkdir -p "$DEST" "$BIN"
-rm -rf "$DEST/scripts" "$DEST/adapters" "$DEST/evals"
 cp -a "$SRC/SKILL.md" "$DEST/SKILL.md"
 cp -a "$SRC/MAINTAINER.md" "$DEST/MAINTAINER.md"
 # The version travels with the installed copy, because that is what
 # `agent-template feedback` reports and what a bug report has to name.
 cp -a "$SRC/VERSION" "$DEST/VERSION"
 cp -a "$SRC/CHANGELOG.md" "$DEST/CHANGELOG.md"
-cp -a "$SRC/scripts" "$SRC/adapters" "$SRC/evals" "$DEST/"
+
+# A timer fires every 60s for several agents, any of which may have
+# scripts/agent-board-poll or an adapter open mid-read while this runs. The
+# old `rm -rf` + `cp -a` rewrote those files in place: a reader that opens
+# the path during that window got a half-written script and failed with a
+# nonsense "unbound variable" a few lines past whatever `cp` had copied so
+# far, not a real error. Stage the new tree next to DEST, then swap each
+# directory in with a rename: a path lookup during the swap either finds the
+# whole old directory or the whole new one, never a partially written file.
+for dir in scripts adapters evals; do
+  stage="$(mktemp -d "$DEST/.$dir.XXXXXX")"
+  cp -a "$SRC/$dir/." "$stage/"
+  if [ -d "$DEST/$dir" ]; then
+    old="$(mktemp -d "$DEST/.$dir.old.XXXXXX")"
+    rmdir "$old"
+    mv -T "$DEST/$dir" "$old"
+    mv -T "$stage" "$DEST/$dir"
+    rm -rf "$old"
+  else
+    mv -T "$stage" "$DEST/$dir"
+  fi
+done
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/triage.sh" \
@@ -139,7 +186,15 @@ bash "$DEST/evals/run-evals.sh" >/dev/null \
 # PATH") reaches every host on the next install.sh, not only new agents.
 # systemd --user may not have a session bus on every host (a bare CI runner,
 # a container): warn and move on instead of failing the whole install.
-if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+#
+# SYSTEMD_USER_DIR is empty when --dest/--bin were overridden without an
+# explicit --unit-dir (a test install): skip touching the live units rather
+# than guess. A test install once rewrote the real agent-board-poll@.service
+# with ExecStart pointing at a /tmp bin dir this way, and every agent ran
+# from /tmp until someone noticed.
+if [ -z "$SYSTEMD_USER_DIR" ]; then
+  echo "units: skipped (--dest/--bin overridden without --unit-dir, this looks like a test install; pass --unit-dir to refresh units for real)"
+elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
   # shellcheck disable=SC1091
   . "$DEST/scripts/lib/core.sh"
   core_write_poll_units "$SYSTEMD_USER_DIR" "$BIN"

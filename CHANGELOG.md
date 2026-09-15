@@ -5,6 +5,47 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.9.1 - 2026-09-15
+
+- Fixed the misleading "gh is unavailable" message: a claimed, unfinished
+  ticket with no `PR_REPO` set was reported as "pull request state unknown,
+  gh is unavailable" even when `gh` was fine. `adapter_pick_rank` now tells
+  apart "no `PR_REPO` configured for this agent", "gh answered" and "gh is
+  missing or failed", and a real `gh` failure prints a loud `ERROR:` line to
+  the per-agent tick log (`2>>"$LOG"` on the `adapter_pick_rank` call in
+  `agent-board-poll`) instead of being swallowed into the same silent `[]` as
+  "no PRs found".
+- Fixed `rank: unbound variable` at `agent-board-poll:436`. Root cause was
+  not the ranking code: `install.sh` rewrote `scripts/`, `adapters/` and
+  `evals/` in place with `rm -rf` + `cp -a` while a timer tick had one of
+  those files open, so a concurrent reader could see a half-written script.
+  `install.sh` now stages each directory next to the destination and swaps it
+  in with `mv -T`, so a reader always sees the whole old tree or the whole
+  new one, never a partial write.
+- Fixed `OWNED_COMMENT_READ_CAP` starving one board while another has budget
+  to spare: the cap was one counter shared across every board in `BOARD_ID`,
+  so once board 15 used up 20 reads, board 5156 got 0 for the rest of the
+  tick, every tick. Each board now gets its own budget, the cap default rose
+  20 -> 40, and within a board the newest-updated tickets are read first so a
+  fresh comment is not stuck behind stale ones when the cap is hit.
+- Fixed `install.sh` overwriting the REAL `agent-board-poll@.service` when
+  run with `--dest`/`--bin` pointed at a test prefix: `SYSTEMD_USER_DIR`
+  used to default to `$HOME/.config/systemd/user` no matter what `--dest`/
+  `--bin` said, so a test install's `ExecStart` landed on the live unit
+  (this happened for real on 2026-09-15, every agent ticked from `/tmp` for
+  six minutes). The live unit dir is now only touched on a real install
+  (default `--dest` and `--bin`) or an explicit new `--unit-dir`; otherwise
+  install.sh prints `units: skipped` and leaves the live units alone.
+- No eval cases added for the three fixes above: `evals/run-evals.sh`'s
+  predicates are a deliberate allowlist (`starts_with_block_tag`,
+  `has_section`, `is_full_https_url`) over static text, not shell execution,
+  by design (cases are auto-appended by an unattended weekly job). None of
+  these fixes reduce to one of those predicates, so this release adds no
+  eval case rather than forcing a fit. The `install.sh` unit-dir fix was
+  instead verified by hand: an install to a temp `--dest`/`--bin` prefix,
+  hashing the live `agent-board-poll@.service` before and after and
+  confirming it is unchanged.
+
 ## 3.9.0 - 2026-09-15
 
 - Tickets are scored before pickup. A ticket carrying neither `easy` nor `hard`

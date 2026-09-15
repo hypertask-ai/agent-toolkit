@@ -512,7 +512,7 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
   why="$ref is new work ($reason)"
   if declare -F adapter_pick_rank >/dev/null 2>&1; then
     verdict="$(adapter_pick_rank "$TOKEN_FILE" "$board" "$AGENT_ID" "$AGENT_NAME" \
-                 "$ref" "$task_id" "$section" "$reason")" || verdict=""
+                 "$ref" "$task_id" "$section" "$reason" 2>>"$LOG")" || verdict=""
     if [ -n "$verdict" ]; then
       rank="${verdict%% *}"
       why="${verdict#* }"

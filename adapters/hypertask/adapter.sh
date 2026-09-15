@@ -322,14 +322,22 @@ print(json.dumps(row))
 # agent owns whose newest comment is a human's -- in any section, not only
 # WATCH_SECTIONS, because a ticket this agent claimed can move to a review
 # column the poll never watches, and a reply there would otherwise be
-# invisible. Bounded by OWNED_COMMENT_READ_CAP (default 20) comments reads per
-# tick, assigned tickets checked first: a busy board must not turn one poll
-# tick into dozens of extra calls.
+# invisible. Bounded by OWNED_COMMENT_READ_CAP (default 40) comments reads
+# PER BOARD per tick, assigned tickets checked first, and within the
+# comment-only ones, most recently updated first: an agent with more owned
+# tickets than the cap allows still surfaces a fresh human reply the same
+# tick it lands, instead of a reply on whichever ticket happens to sort
+# first getting starved forever behind an always-checked-first stale one.
 adapter_new_comments_on_owned() {
   local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4"
-  local one json rows cand cand_id reads=0 cap="${OWNED_COMMENT_READ_CAP:-20}"
+  local one json rows cand cand_id reads cap="${OWNED_COMMENT_READ_CAP:-40}"
   for one in $(printf '%s' "$board_id" | tr ',' ' '); do
     [ -n "$one" ] || continue
+    # Each board gets its own budget of $cap reads: a board with more owned
+    # tickets than the cap must not spend the next board's allowance too,
+    # which is how a warning could once fire "on board 5156" without this
+    # function ever having looked at board 5156 at all.
+    reads=0
     json="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&limit=100")"
     rows="$(printf '%s' "$json" | BOARD="$one" AID="$agent_id" python3 -c '
 import json, os, sys
@@ -367,8 +375,12 @@ for task in doc.get("tasks") or []:
     if aid in agent_ids:
         assigned_rows.append(row)
     elif row["comment_count"] > 0:
-        commented_rows.append(row)
-for row in assigned_rows + commented_rows:
+        commented_rows.append((task.get("updatedAt") or "", row))
+# Assigned tickets first (this agent owns the outcome outright), then the
+# merely-commented-on ones newest-activity-first, so a cap that has to skip
+# some skips the stalest, not whichever loaded first from the API.
+commented_rows.sort(key=lambda pair: pair[0], reverse=True)
+for row in assigned_rows + [row for _, row in commented_rows]:
     print(json.dumps(row))
 ')"
     while IFS= read -r cand; do
@@ -536,20 +548,37 @@ print(",".join(ids))')" || {
 adapter_pick_rank() {
   local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4" ref="$5"
   local task_id="$6" section="$7" reason="$8"
-  local comments pr_json="" repo="${PR_REPO:-}"
+  local comments pr_json="" repo="${PR_REPO:-}" pr_known="no"
 
   comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")"
 
   # The pull request is the other half of "finished", and GitHub is the only
-  # place that knows whether it merged. No gh, no claim that it merged.
-  if [ -n "$repo" ] && command -v gh >/dev/null 2>&1; then
-    pr_json="$(gh pr list --repo "$repo" --state all --search "$ref" \
-                 --json number,state,url,headRefName --limit 10 2>/dev/null || printf '[]')"
+  # place that knows whether it merged. Three states, not two: this agent has
+  # no PR_REPO configured (ordinary, most agents hand code work to a dev and
+  # never set it), gh is missing or the call failed (a real fault, loud on
+  # purpose so the supervisor's log check catches it), or gh answered. Only
+  # the last one may claim a pull request state; the other two fall through
+  # to "not finished" below exactly the same, because a ticket this agent
+  # still owes runs either way and lets the run itself discover the truth.
+  if [ -n "$repo" ]; then
+    if command -v gh >/dev/null 2>&1; then
+      if pr_json="$(gh pr list --repo "$repo" --state all --search "$ref" \
+                   --json number,state,url,headRefName --limit 10 2>&1)"; then
+        pr_known="yes"
+      else
+        printf 'ERROR: gh pr list failed for %s in %s: %s\n' "$ref" "$repo" "$pr_json" >&2
+        pr_json=""
+      fi
+    else
+      printf 'ERROR: PR_REPO=%s is set but gh is not on PATH, so %s cannot learn its pull request state\n' \
+        "$repo" "$ref" >&2
+    fi
   fi
 
   printf '%s' "$comments" | \
   AGENT_ID="$agent_id" AGENT_NAME="$agent_name" REF="$ref" SECTION="$section" \
-  REASON="$reason" PR_JSON="${pr_json:-[]}" HAVE_PR_VIEW="$([ -n "$pr_json" ] && echo yes || echo no)" \
+  REASON="$reason" PR_JSON="${pr_json:-[]}" HAVE_PR_VIEW="$pr_known" \
+  REPO_CONFIGURED="$([ -n "$repo" ] && echo yes || echo no)" \
   python3 -c '
 import json, os, re, sys
 
@@ -599,6 +628,7 @@ prs = [p for p in prs if ref.casefold() in
 merged = any(str(p.get("state") or "").upper() == "MERGED" for p in prs)
 open_pr = [p for p in prs if str(p.get("state") or "").upper() == "OPEN"]
 pr_known = os.environ["HAVE_PR_VIEW"] == "yes"
+repo_configured = os.environ["REPO_CONFIGURED"] == "yes"
 
 if done:
     print("0 %s is %s, nothing left to do" % (ref, section))
@@ -610,7 +640,12 @@ elif claimed and open_pr:
     print("1 %s is claimed by this agent and its pull request %s is still open, so this agent owes it a fix"
           % (ref, open_pr[0].get("url")))
 elif claimed and not merged:
-    detail = "no pull request yet" if pr_known else "pull request state unknown, gh is unavailable"
+    if not repo_configured:
+        detail = "no PR_REPO configured for this agent"
+    elif pr_known:
+        detail = "no pull request yet"
+    else:
+        detail = "pull request state unknown, gh failed, see the tick log"
     print("1 %s is claimed by this agent and is not finished (%s)" % (ref, detail))
 else:
     print("3 %s is new work (%s)" % (ref, reason))
