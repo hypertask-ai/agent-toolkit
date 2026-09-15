@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # agent-template: the template talking about itself.
 #
-# Two subcommands today:
+# Three subcommands today:
 #
 #   agent-template feedback --what "<one sentence>" --got <file or text> \
 #       --expected "<what should have happened>" \
@@ -10,6 +10,42 @@
 #       [--case --check '<predicate> ["<arg>"]']
 #
 #   agent-template report [--days N]
+#
+#   agent-template update [--dry-run]
+#
+# update is how a bot host stays current without a human explaining the fix
+# to it: pull the template repo, reinstall, and bring every conf that is
+# still on the old HT_* fleet schema forward onto the current one, so a bot
+# host nobody is watching does not silently drift. Steps:
+#   1. git pull --ff-only in AGENT_TEMPLATE_REPO (default ~/projects/vstack)
+#   2. run install.sh, which also refreshes the shared systemd units and
+#      runs the eval suite; either failing stops here, non-zero, and
+#      nothing below runs
+#   2b. print every CHANGELOG.md line marked ACTION: (something this
+#       template cannot do for itself) and log each one once per version to
+#       ~/.local/state/agent-template/actions.log, so a maintainer session
+#       has one place to read pending actions from
+#   3. for every *.conf in AGENT_CONFIG_DIR (default
+#      ~/.config/hypertask-agents) written in the old HT_* schema
+#      (HT_AGENT_ID / HT_MODEL / HT_MISSION / HT_START_SECTIONS), with no
+#      template conf for that slug already: append the template-schema keys
+#      (AGENT_ID, TOKEN_FILE, BOARD_ADAPTER=hypertask, BOARD_ID,
+#      WATCH_SECTIONS, SKILLS_INDEX, MODEL_CLI, MAX_CONCURRENT_RUNS) to the
+#      SAME file, backed up first as <slug>.conf.bak-<epoch>. A converted
+#      conf is a draft: TOKEN_FILE and BOARD_CLI do not exist yet, so no
+#      timer is created or started for it. Skipped, not converted, when:
+#      the slug's old worker unit (hypertask-agent-worker@<slug>) is
+#      masked (retired); the file already has BOARD_ADAPTER= (already has
+#      a template twin); or HT_PROVIDER has no known MODEL_CLI mapping
+#      (cursor needs a concrete HT_MODEL, not "auto"; codex; claude) --
+#      never guesses one.
+#   4. removes now-redundant agent-board-poll@<slug>.service.d/path.conf
+#      drop-ins (backed up first) now that the shared unit sets PATH
+#      itself, then systemctl --user daemon-reload, and restarts (never
+#      more than that -- never enables, never starts a fresh timer) only
+#      the timers that were already enabled and whose unit config actually
+#      changed this run.
+# --dry-run prints what step 3 and 4 would do and changes nothing.
 #
 # Run feedback the moment a human corrects your output. It files the
 # correction on the feedback board so it can become a replayable check,
@@ -42,7 +78,11 @@
 set -euo pipefail
 
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
-CORE_ROOT="$(dirname "$(dirname "$SELF")")"
+# The update re-exec below runs this script from a throwaway copy in
+# /tmp so it survives install.sh overwriting the original mid-run. That
+# copy's own dirname is not CORE_ROOT, so the parent passes the real one
+# through instead of letting the child recompute a wrong one.
+CORE_ROOT="${AGENT_TEMPLATE_CORE_ROOT:-$(dirname "$(dirname "$SELF")")}"
 # shellcheck disable=SC1091
 . "$CORE_ROOT/scripts/lib/core.sh"
 
@@ -52,12 +92,26 @@ FEEDBACK_BOARD_ID="${FEEDBACK_BOARD_ID:-5500}"
 FEEDBACK_BOARD_SECTION="${FEEDBACK_BOARD_SECTION:-Inbox}"
 FEEDBACK_BOARD_URL="${FEEDBACK_BOARD_URL:-https://app.hypertask.ai/project?id=5500}"
 
-usage() { sed -n '2,40p' "$SELF" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,76p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 # Every feedback call, sent or not, leaves one line here: the local record
 # `report` reads. State, not a board write, so it needs no credentials.
 FEEDBACK_LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-template"
 FEEDBACK_LOG="$FEEDBACK_LOG_DIR/feedback.jsonl"
+
+# update replaces this very file via install.sh partway through its own run
+# (install.sh cp -a's over $SELF). A shell mid-read of a file that gets
+# truncated under it fails with a bogus syntax error, not our error message.
+# So the first thing an update run does is re-exec itself from a private
+# copy that install.sh cannot touch, before anything else happens.
+if [ "${1:-}" = "update" ] && [ -z "${AGENT_TEMPLATE_UPDATE_REEXEC:-}" ]; then
+  REEXEC_COPY="$(mktemp "${TMPDIR:-/tmp}/agent-template-update.XXXXXX")"
+  cp "$SELF" "$REEXEC_COPY"
+  chmod +x "$REEXEC_COPY"
+  export AGENT_TEMPLATE_UPDATE_REEXEC="$REEXEC_COPY"
+  export AGENT_TEMPLATE_CORE_ROOT="$CORE_ROOT"
+  exec "$REEXEC_COPY" "$@"
+fi
 
 # ---------- subcommand ----------
 [ $# -gt 0 ] || { usage; exit 0; }
@@ -66,6 +120,7 @@ case "$1" in
   version) cat "$CORE_ROOT/VERSION"; exit 0 ;;
   feedback) shift ;;
   report) shift; SUBCOMMAND="report" ;;
+  update) shift; SUBCOMMAND="update" ;;
   *) die "unknown subcommand $1" "run agent-template --help" ;;
 esac
 
@@ -102,6 +157,234 @@ for row in rows:
     flag = "REPEAT" if row.get("repeated") else "new   "
     print("  %s %-4s %s" % (flag, row.get("kind", ""), row.get("what", "")[:100]))
 ' "$FEEDBACK_LOG"
+  exit 0
+fi
+
+if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
+  # Cleanup for the re-exec copy from the guard above -- this only runs in
+  # that copy, so $AGENT_TEMPLATE_UPDATE_REEXEC is always $SELF here.
+  trap 'rm -f "$AGENT_TEMPLATE_UPDATE_REEXEC"' EXIT
+
+  DRY_RUN="no"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY_RUN="yes"; shift ;;
+      -h|--help) usage; exit 0 ;;
+      *) die "unknown option $1" "run agent-template update --help" ;;
+    esac
+  done
+
+  REPO="${AGENT_TEMPLATE_REPO:-$HOME/projects/vstack}"
+  CONFIG_DIR="${AGENT_TEMPLATE_CONFIG_DIR:-$HOME/.config/hypertask-agents}"
+  SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
+
+  [ -d "$REPO/.git" ] || die "no git checkout at $REPO" \
+    "set AGENT_TEMPLATE_REPO to the vstack clone, or clone it there"
+  TEMPLATE_DIR="$REPO/templates/agent-skills/create-agent"
+  [ -x "$TEMPLATE_DIR/install.sh" ] || die "no install.sh at $TEMPLATE_DIR" \
+    "check AGENT_TEMPLATE_REPO points at the vstack checkout"
+
+  echo "== 1. git pull --ff-only in $REPO =="
+  git -C "$REPO" pull --ff-only || die "git pull --ff-only failed in $REPO" \
+    "resolve it by hand (a local change or diverged history), then re-run"
+
+  echo "== 2. install.sh (also runs the eval suite) =="
+  # Always runs for real, dry-run or not: install.sh only ever copies the
+  # template and refreshes the shared systemd units, both idempotent and
+  # both worth doing whether or not this run also converts a conf. The
+  # conf conversion and the timer restarts below are the parts --dry-run
+  # actually gates. install.sh calls fail() and exits non-zero on its own
+  # if the copy or the eval suite breaks; die here never runs, and nothing
+  # past this point does either, so nothing is converted and nothing is
+  # restarted.
+  bash "$TEMPLATE_DIR/install.sh" \
+    || die "install.sh failed (see its output above)" \
+        "fix the failing step and re-run agent-template update; no conf was touched and no timer was restarted"
+
+  echo "== 2b. CHANGELOG.md ACTION lines =="
+  # A line marked ACTION: is a step this template cannot do for itself (a
+  # human decision, an --resume, a one-off migration). Printed every run so
+  # a maintainer session sees it, and appended once per version to a single
+  # log so nothing is missed between runs and nothing repeats forever on a
+  # daily timer.
+  ACTIONS_LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-template"
+  ACTIONS_LOG="$ACTIONS_LOG_DIR/actions.log"
+  CHANGELOG="$TEMPLATE_DIR/CHANGELOG.md"
+  TEMPLATE_VERSION="$(cat "$TEMPLATE_DIR/VERSION" 2>/dev/null || echo unknown)"
+  if [ -f "$CHANGELOG" ]; then
+    mkdir -p "$ACTIONS_LOG_DIR"
+    touch "$ACTIONS_LOG"
+    grep -E '^-?[[:space:]]*ACTION:' "$CHANGELOG" | sed -E 's/^-?[[:space:]]*ACTION:[[:space:]]*//' \
+      | while IFS= read -r action; do
+          [ -n "$action" ] || continue
+          echo "  ACTION: $action"
+          if [ "$DRY_RUN" != "yes" ] && ! grep -qF "	$TEMPLATE_VERSION	$action" "$ACTIONS_LOG"; then
+            printf '%s\t%s\t%s\n' "$(date -Is)" "$TEMPLATE_VERSION" "$action" >> "$ACTIONS_LOG"
+          fi
+        done
+  fi
+
+  echo "== 3. old-schema confs in $CONFIG_DIR =="
+  CONVERTED=0
+  SKIPPED=0
+  if [ -d "$CONFIG_DIR" ]; then
+    for f in "$CONFIG_DIR"/*.conf; do
+      [ -f "$f" ] || continue
+      base="$(basename "$f" .conf)"
+      grep -qE '^HT_(AGENT_ID|MODEL|MISSION|START_SECTIONS)=' "$f" || continue
+      if grep -q '^BOARD_ADAPTER=' "$f"; then
+        echo "  skip $base: this file already has a template conf block (BOARD_ADAPTER= present)"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+      fi
+      slug="$(grep -m1 '^HT_AGENT_SLUG=' "$f" | sed -E 's/^HT_AGENT_SLUG=//; s/^"//; s/"$//')"
+      [ -n "$slug" ] || slug="$base"
+      unit="hypertask-agent-worker@$slug.service"
+      unit_state="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
+      if [ "$unit_state" = "masked" ]; then
+        echo "  skip $base: old worker unit $unit is masked (retired) -- old-worker confs are historical, not converted"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+      fi
+      PY_OUT="$(HOME="$HOME" python3 - "$f" "$slug" <<'PYEOF'
+import os, re, sys
+
+path, slug = sys.argv[1], sys.argv[2]
+home = os.environ["HOME"]
+
+fields = {}
+with open(path, encoding="utf-8") as fh:
+    for line in fh:
+        m = re.match(r'^([A-Z][A-Z0-9_]*)=(.*)$', line.rstrip("\n"))
+        if not m:
+            continue
+        key, val = m.group(1), m.group(2)
+        if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+            val = val[1:-1]
+        fields[key] = val
+
+def esc(v):
+    return v.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+
+provider = fields.get("HT_PROVIDER", "")
+model = fields.get("HT_MODEL", "")
+if provider == "cursor":
+    if not model or model == "auto":
+        print("SKIP HT_PROVIDER=cursor but HT_MODEL is '%s': no concrete model to pin, so no MODEL_CLI can be written -- convert this one by hand" % (model or "<empty>"))
+        sys.exit(0)
+    model_cli = "cursor-agent -p --output-format text --model %s -f --trust" % model
+elif provider == "codex":
+    model_cli = "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"
+elif provider == "claude":
+    model_cli = "claude -p --model %s" % (model or "sonnet")
+else:
+    print("SKIP HT_PROVIDER='%s' has no known MODEL_CLI mapping -- add one to agent-template before converting this slug" % provider)
+    sys.exit(0)
+
+mission = fields.get("HT_MISSION", "")
+skills_index = ""
+found = re.search(r'(/\S*INDEX\.md)', mission)
+if found:
+    skills_index = found.group(1)
+if not skills_index:
+    skills_index = "%s/projects/hypertask-agent-skills/INDEX.md" % home
+
+block = "\n".join([
+    'AGENT_NAME="%s"' % esc(fields.get("HT_AGENT_NAME", slug)),
+    'AGENT_SLUG="%s"' % esc(slug),
+    'AGENT_KIND="%s"' % esc(fields.get("HT_AGENT_MODE", "worker")),
+    'AGENT_ID="%s"' % esc(fields.get("HT_AGENT_ID", "")),
+    'AGENT_REPO="%s"' % esc(fields.get("HT_REPO", "")),
+    'AGENT_MISSION="%s"' % esc(mission),
+    'BOARD_ADAPTER="hypertask"',
+    'BOARD_ID="%s"' % esc(fields.get("HT_PROJECT_ID") or fields.get("HT_BOARD", "")),
+    'TOKEN_FILE="%s/.config/hypertask-agents/credentials/%s-agent-token"' % (home, slug),
+    'BOARD_CLI="%s/.local/bin/%s-board"' % (home, slug),
+    'WATCH_SECTIONS="%s"' % esc(fields.get("HT_START_SECTIONS", "")),
+    'SKILLS_INDEX="%s"' % esc(skills_index),
+    'MODEL_CLI="%s"' % esc(model_cli),
+    'MAX_CONCURRENT_RUNS="1"',
+])
+print("CONVERT")
+print(block)
+PYEOF
+)"
+      case "$PY_OUT" in
+        SKIP\ *)
+          echo "  skip $base: ${PY_OUT#SKIP }"
+          SKIPPED=$((SKIPPED + 1))
+          ;;
+        CONVERT*)
+          BLOCK="$(printf '%s\n' "$PY_OUT" | tail -n +2)"
+          if [ "$DRY_RUN" = "yes" ]; then
+            echo "  convert $base: would append a draft template block (slug $slug; needs TOKEN_FILE + BOARD_CLI from create-agent.sh before this bot can go live)"
+          else
+            cp -a "$f" "$f.bak-$(date +%s)"
+            core_write_missing_keys "$f" "$BLOCK"
+            echo "  convert $base: draft template block appended to $f (slug $slug; needs TOKEN_FILE + BOARD_CLI from create-agent.sh before this bot can go live)"
+          fi
+          CONVERTED=$((CONVERTED + 1))
+          ;;
+        *)
+          echo "  skip $base: could not read it (unexpected output: ${PY_OUT:0:120})"
+          SKIPPED=$((SKIPPED + 1))
+          ;;
+      esac
+    done
+  else
+    echo "  no config dir at $CONFIG_DIR, nothing to scan"
+  fi
+
+  echo "== 4. redundant agent-board-poll@<slug>.service.d/path.conf drop-ins =="
+  # core_write_poll_units (run by install.sh, step 2) now puts PATH and HOME
+  # on the shared unit itself, so a per-slug drop-in that only repeats that
+  # is dead weight -- and a stale copy of it would mask a future PATH fix.
+  RESTART_SLUGS=""
+  DROPINS_REMOVED=0
+  shopt -s nullglob
+  for dc in "$SYSTEMD_USER_DIR"/agent-board-poll@*.service.d/path.conf; do
+    slug="$(basename "$(dirname "$dc")")"
+    slug="${slug#agent-board-poll@}"
+    slug="${slug%.service.d}"
+    redundant="yes"
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in
+        ""|"[Service]"|Environment=PATH=*|Environment=HOME=*) ;;
+        *) redundant="no" ;;
+      esac
+    done < "$dc"
+    if [ "$redundant" != "yes" ]; then
+      echo "  keep $slug: $dc has entries beyond PATH/HOME, left it alone"
+      continue
+    fi
+    if [ "$DRY_RUN" = "yes" ]; then
+      echo "  would remove $slug: $dc (now redundant; shared unit sets the same PATH)"
+      continue
+    fi
+    cp -a "$dc" "$dc.bak-$(date +%s)"
+    rm -f "$dc"
+    rmdir "$(dirname "$dc")" 2>/dev/null || true
+    echo "  removed $slug: $dc (backup kept next to it; shared unit sets the same PATH now)"
+    DROPINS_REMOVED=$((DROPINS_REMOVED + 1))
+    RESTART_SLUGS="$RESTART_SLUGS $slug"
+  done
+  shopt -u nullglob
+
+  if [ "$DRY_RUN" != "yes" ] && [ -n "$RESTART_SLUGS" ]; then
+    systemctl --user daemon-reload 2>/dev/null || true
+    for slug in $RESTART_SLUGS; do
+      timer="agent-board-poll@$slug.timer"
+      if systemctl --user is-enabled "$timer" >/dev/null 2>&1; then
+        systemctl --user restart "$timer" 2>/dev/null || true
+        systemctl --user reset-failed "agent-board-poll@$slug.service" 2>/dev/null || true
+        echo "  restarted $timer (its unit config changed: redundant path.conf removed)"
+      fi
+    done
+  fi
+
+  echo "== summary =="
+  echo "$CONVERTED conf(s) converted, $SKIPPED skipped, $DROPINS_REMOVED redundant path.conf drop-in(s) removed"
+  [ "$DRY_RUN" = "yes" ] && echo "(dry run: nothing was written, nothing was restarted)"
   exit 0
 fi
 

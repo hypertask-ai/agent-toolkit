@@ -20,6 +20,7 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 SRC="$(dirname "$SELF")"
 DEST="$HOME/.claude/skills/create-agent"
 BIN="${AGENT_BIN_DIR:-$HOME/.local/bin}"
+SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
 DRY_RUN="no"
 
 fail() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
@@ -34,7 +35,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for item in SKILL.md MAINTAINER.md VERSION scripts adapters evals; do
+for item in SKILL.md MAINTAINER.md VERSION CHANGELOG.md scripts adapters evals; do
   [ -e "$SRC/$item" ] || fail "$SRC/$item is missing" \
     "run install.sh from inside the template folder in the repo"
 done
@@ -59,6 +60,7 @@ cp -a "$SRC/MAINTAINER.md" "$DEST/MAINTAINER.md"
 # The version travels with the installed copy, because that is what
 # `agent-template feedback` reports and what a bug report has to name.
 cp -a "$SRC/VERSION" "$DEST/VERSION"
+cp -a "$SRC/CHANGELOG.md" "$DEST/CHANGELOG.md"
 cp -a "$SRC/scripts" "$SRC/adapters" "$SRC/evals" "$DEST/"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-weekly" \
@@ -82,6 +84,57 @@ bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
 bash "$DEST/evals/run-evals.sh" >/dev/null \
   || fail "the installed eval cases do not pass" \
           "run $DEST/evals/run-evals.sh and read the failing case ids"
+
+# The shared agent-board-poll@ unit pair is refreshed on every install, not
+# only when a new agent is provisioned, so a fix to the unit (like the
+# missing PATH that made every tick fail with "the hypertask CLI is not on
+# PATH") reaches every host on the next install.sh, not only new agents.
+# systemd --user may not have a session bus on every host (a bare CI runner,
+# a container): warn and move on instead of failing the whole install.
+if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+  # shellcheck disable=SC1091
+  . "$DEST/scripts/lib/core.sh"
+  core_write_poll_units "$SYSTEMD_USER_DIR" "$BIN"
+
+  # agent-template-update.timer is how a bot host stays in sync with this
+  # template on its own, without anyone explaining the fix to it by hand:
+  # once a day it pulls AGENT_TEMPLATE_REPO, reinstalls, and brings any
+  # old-schema conf forward. Refreshed on every install.sh run so a fix to
+  # the schedule or the unit reaches every host, and re-enabling here is
+  # what makes that refresh idempotent whether or not the timer already
+  # exists on this machine.
+  cat > "$SYSTEMD_USER_DIR/agent-template-update.service" <<EOF
+[Unit]
+Description=Bring this host's agent confs and units up to date with the template
+
+[Service]
+# Type=oneshot: systemd refuses to start a second run while one is active,
+# and agent-template update's own re-exec guard covers the rest.
+Type=oneshot
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$BIN/agent-template update
+EOF
+  cat > "$SYSTEMD_USER_DIR/agent-template-update.timer" <<EOF
+[Unit]
+Description=Daily agent-template update
+
+[Timer]
+OnCalendar=*-*-* 06:30:00
+Persistent=true
+AccuracySec=1m
+Unit=agent-template-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl --user daemon-reload
+  systemctl --user enable --now agent-template-update.timer
+  echo "poll units: $SYSTEMD_USER_DIR/agent-board-poll@.service + .timer (refreshed, daemon-reload done)"
+  echo "update timer: agent-template-update.timer, daily 06:30 local ($(systemctl --user list-timers agent-template-update.timer --no-pager 2>/dev/null | sed -n '2p'))"
+else
+  echo "WARNING: no systemd --user session here: skipped refreshing agent-board-poll@.service/.timer and agent-template-update.timer" >&2
+fi
 
 echo "installed. Next: run create-agent.sh --help, or agent-board-poll --once --dry-run <slug>"
 echo "corrections: agent-template feedback --what ... --got ... --expected ..."

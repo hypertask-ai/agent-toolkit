@@ -101,12 +101,14 @@ status page. The agent itself stays on the host.
 
 ```
 VERSION                       bumped on every pull request; reported by feedback
+CHANGELOG.md                  one entry per version; ACTION: lines are read by update
 core
   scripts/create-agent.sh     provisioning: identity, conf, wrapper, wiring
   scripts/agent-board-poll    one work tick: read, decide, spawn, log
-  scripts/agent-template      feedback: file a correction where it can be replayed
+  scripts/agent-template      feedback: file a correction where it can be replayed;
+                               update: pull, reinstall, convert old-schema confs
   scripts/agent-template-weekly  turn a week of corrections into one pull request
-  scripts/lib/core.sh         slug, conf files, secrets, adapter loading
+  scripts/lib/core.sh         slug, conf files, secrets, adapter loading, poll units
 adapters/
   hypertask/adapter.sh        everything that talks to a Hypertask board
   linear/adapter.sh           stub: same function names, all refuse loudly

@@ -3,10 +3,20 @@
 For the Claude session that checks on a bot, not the bot itself. Read this
 before you touch its conf.
 
+Start by reading `~/.local/state/agent-template/actions.log`: it holds every
+CHANGELOG.md line marked `ACTION:` that `agent-template update` has found on
+this host, one thing this template could not do for itself, still pending
+until you do it.
+
 ## What the bot is made of
 
 - **Runner timer** — `agent-board-poll@<slug>.timer`, ticks every 60s, runs
   `agent-board-poll --once <slug>` once per tick.
+- **Update timer** — `agent-template-update.timer`, daily at 06:30 local,
+  runs `agent-template update`: pulls the template repo, reinstalls, brings
+  any old-schema conf on this host forward, and clears out systemd drop-ins
+  the template has since made redundant. This is what keeps a bot host in
+  sync without someone explaining the fix to it by hand.
 - **Supervisor timer** — watches the fleet, not one bot: restarts a dead
   timer, flags a stuck run, escalates what a bot cannot fix itself. Generic
   version lands 2026-09-16; until then the Hypertask one at
@@ -41,6 +51,10 @@ with a chat lane wired.
 
 - `agent-board-poll --once --dry-run <slug>` — see what it would pick up.
 - `agent-board-poll --once <slug>` — run one real tick.
+- `agent-template update --dry-run` — see what this host would pull in,
+  convert, and clean up without changing anything.
+- `agent-template update` — do it for real; safe to run any time, and
+  identical to what the daily timer runs.
 - `ht-supervisor --dry-run` — see what the supervisor would do.
 - `ht-supervisor --now` — run every supervisor check once, ignoring its
   normal schedule.

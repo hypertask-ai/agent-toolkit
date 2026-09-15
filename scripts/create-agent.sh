@@ -290,31 +290,7 @@ case "$WIRING" in
     echo "    $SERVICE (Type=oneshot) + $TIMER (every 60s)"
     echo "    systemctl --user enable --now agent-board-poll@$SLUG.timer"
     if [ "$DRY_RUN" != "yes" ]; then
-      mkdir -p "$SYSTEMD_USER_DIR"
-      cat > "$SERVICE" <<EOF
-[Unit]
-Description=One work tick for agent %i
-
-[Service]
-# Type=oneshot, so systemd itself refuses to start a second tick while one is
-# still running. That is the concurrency guard: no daemon, no queue, no lock
-# file to go stale. One process per ticket, and the board holds the state.
-Type=oneshot
-ExecStart=$BIN_DIR/agent-board-poll --once %i
-EOF
-      cat > "$TIMER" <<EOF
-[Unit]
-Description=Poll the board for agent %i
-
-[Timer]
-OnBootSec=60
-OnUnitActiveSec=60
-AccuracySec=5s
-Unit=agent-board-poll@%i.service
-
-[Install]
-WantedBy=timers.target
-EOF
+      core_write_poll_units "$SYSTEMD_USER_DIR" "$BIN_DIR"
       systemctl --user daemon-reload
       systemctl --user enable --now "agent-board-poll@$SLUG.timer"
       systemctl --user list-timers "agent-board-poll@$SLUG.timer" --no-pager || true

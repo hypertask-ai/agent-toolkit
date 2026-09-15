@@ -221,6 +221,51 @@ core_workdir_create() {
   printf '%s' "$dir"
 }
 
+# ---------- shared poll units ----------
+# core_write_poll_units <systemd-user-dir> <bin-dir> : the agent-board-poll@
+# service+timer pair, written once and shared by every slug (%i is the slug).
+# The single source of truth for both install.sh (refresh on every host) and
+# create-agent.sh (first agent on a host with no units yet). Two copies of
+# this heredoc drifting apart is exactly how the missing-PATH bug happened:
+# a ticket run as a systemd unit does not inherit the interactive shell's
+# PATH, so `hypertask` (installed under ~/.local/bin or ~/.npm-global/bin)
+# was invisible to every tick until an agent hand-patched a per-slug
+# drop-in. Fixed at the source so no slug ever needs one again.
+core_write_poll_units() {
+  local systemd_dir="$1" bin_dir="$2" service timer
+  service="$systemd_dir/agent-board-poll@.service"
+  timer="$systemd_dir/agent-board-poll@.timer"
+  mkdir -p "$systemd_dir"
+  cat > "$service" <<EOF
+[Unit]
+Description=One work tick for agent %i
+
+[Service]
+# Type=oneshot, so systemd itself refuses to start a second tick while one is
+# still running. That is the concurrency guard: no daemon, no queue, no lock
+# file to go stale. One process per ticket, and the board holds the state.
+Type=oneshot
+# A systemd user unit does not inherit the shell's PATH, so name every
+# directory a board CLI or model CLI can live in explicitly.
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=%h
+ExecStart=$bin_dir/agent-board-poll --once %i
+EOF
+  cat > "$timer" <<EOF
+[Unit]
+Description=Poll the board for agent %i
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5s
+Unit=agent-board-poll@%i.service
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 # core_workdir_remove <source> <dir>
 # The adapter gets the last word. If it refuses, the directory stays: it knows
 # what is in there, and losing an agent's only copy of its work to a tidy-up is
