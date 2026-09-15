@@ -356,3 +356,87 @@ core_workdir_remove() {
   fi
   rm -rf "$dir"
 }
+
+# ---------- where skills come from (3.11.0) ----------
+# Three sources, in the order a run reads them:
+#
+#   1. the company pack, shared by every agent in the company. A Claude Code
+#      plugin when one is installed, the clone otherwise.
+#   2. .claude/skills/ inside the repo the run works in. Project skills live in
+#      the repo they serve, so a run can never read rules for code it is not
+#      editing, and a skill change ships in the same PR as the code change.
+#   3. anything extra the conf names in SKILLS_INDEX. Optional since 3.11.0:
+#      1 and 2 are found without being told.
+#
+# Both 1 and 2 carry a VERSION file, and the runner logs both at the start of
+# every run. A bot behaving oddly is usually a bot reading an old pack, and
+# that line is how you tell.
+
+COMPANY_PACK_NAME="${COMPANY_PACK_NAME:-company-skills}"
+COMPANY_PACK_CLONE="${COMPANY_PACK_CLONE:-$HOME/projects/company-skills}"
+
+# core_company_pack : absolute path to the company pack root, or empty when
+# neither the plugin nor the clone is on this host.
+core_company_pack() {
+  local dir
+  # An explicit override wins: a test host, or a session pinning a worktree.
+  if [ -n "${COMPANY_SKILLS_DIR:-}" ] && [ -f "$COMPANY_SKILLS_DIR/INDEX.md" ]; then
+    printf '%s' "$COMPANY_SKILLS_DIR"
+    return 0
+  fi
+  # The installed plugin. The cache keeps one directory per version, so take
+  # the most recently written rather than trying to sort version strings in
+  # shell. `ls -t` on the glob, newest first.
+  for dir in $(ls -1dt "$HOME/.claude/plugins/cache/$COMPANY_PACK_NAME/$COMPANY_PACK_NAME"/*/ 2>/dev/null); do
+    dir="${dir%/}"
+    [ -f "$dir/INDEX.md" ] || continue
+    printf '%s' "$dir"
+    return 0
+  done
+  # The clone, still the fallback on any host where the plugin is not installed.
+  if [ -f "$COMPANY_PACK_CLONE/INDEX.md" ]; then
+    printf '%s' "$COMPANY_PACK_CLONE"
+    return 0
+  fi
+  printf ''
+}
+
+# core_pack_version <dir> : the pack's VERSION, or "unversioned".
+core_pack_version() {
+  local v=""
+  [ -n "${1:-}" ] && [ -f "$1/VERSION" ] && v="$(head -n1 "$1/VERSION" | tr -d '[:space:]')"
+  printf '%s' "${v:-unversioned}"
+}
+
+# core_repo_skills <checkout> : absolute path to the repo's skills dir, or
+# empty when that repo has not been synced yet.
+core_repo_skills() {
+  [ -n "${1:-}" ] || { printf ''; return 0; }
+  [ -f "$1/.claude/skills/INDEX.md" ] || { printf ''; return 0; }
+  printf '%s/.claude/skills' "$1"
+}
+
+# core_conf_dirs : every directory an agent conf can live in on this host, one
+# per line, deduplicated. The same set core_find_conf searches, exposed so a
+# caller can walk every conf rather than look one up by slug.
+core_conf_dirs() {
+  local dir adapter candidate seen=""
+  for dir in "${AGENT_CONFIG_DIR:-}" "$HOME/.config/agents"; do
+    [ -n "$dir" ] || continue
+    case " $seen " in *" $dir "*) continue ;; esac
+    seen="$seen $dir"
+    [ -d "$dir" ] && printf '%s\n' "$dir"
+  done
+  for adapter in "$CORE_ROOT"/adapters/*/adapter.sh; do
+    [ -f "$adapter" ] || continue
+    candidate="$(
+      # shellcheck disable=SC1090
+      . "$adapter" 2>/dev/null
+      declare -F adapter_config_dir_default >/dev/null 2>&1 && adapter_config_dir_default
+    )" || continue
+    [ -n "$candidate" ] || continue
+    case " $seen " in *" $candidate "*) continue ;; esac
+    seen="$seen $candidate"
+    [ -d "$candidate" ] && printf '%s\n' "$candidate"
+  done
+}

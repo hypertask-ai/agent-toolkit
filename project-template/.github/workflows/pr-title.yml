@@ -1,0 +1,26 @@
+name: pr-title
+on:
+  pull_request:
+    types: [opened, edited, synchronize]
+
+jobs:
+  pr-title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: check the PR title says something
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = (context.payload.pull_request?.title || "").trim();
+            // A title this short or this generic tells the next reader
+            // nothing about what changed in the agent's own memory repo.
+            const genericRe = /^(update|fix|wip|changes?|misc)\.?$/i;
+            if (title.length < 8) {
+              core.setFailed(`PR title "${title}" is too short to say what changed`);
+              return;
+            }
+            if (genericRe.test(title)) {
+              core.setFailed(`PR title "${title}" is too generic; say what changed`);
+              return;
+            }
+            core.info(`PR title ok: ${title}`);

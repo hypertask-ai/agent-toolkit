@@ -210,11 +210,49 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   # and what it is on, so a daily update run says out loud whether every bot
   # on this host is reading the current shared rules. A pack that cannot be
   # reached is a warning, never a failure: a stale pack still runs.
+  # The pack is a plugin now, and install.sh writes down which one this host
+  # resolved and at what version. Fall back to describing the clone for a host
+  # that never got the plugin.
+  COMPANY_PACK_STAMP="${COMPANY_PACK_STAMP:-$HOME/.config/hypertask-agents/company-pack.version}"
   COMPANY_SKILLS_DIR="${COMPANY_SKILLS_DIR:-$HOME/projects/company-skills}"
-  if [ -d "$COMPANY_SKILLS_DIR/.git" ]; then
+  if [ -f "$COMPANY_PACK_STAMP" ]; then
+    echo "  $(cat "$COMPANY_PACK_STAMP")"
+  elif [ -d "$COMPANY_SKILLS_DIR/.git" ]; then
     echo "  $COMPANY_SKILLS_DIR @ $(git -C "$COMPANY_SKILLS_DIR" log -1 --format='%h %s' 2>/dev/null || echo unknown)"
   else
-    echo "  WARNING: no company pack at $COMPANY_SKILLS_DIR. Every bot here is running on its own pack only." >&2
+    echo "  WARNING: no company pack on this host. Every bot here is running on its own pack only." >&2
+  fi
+
+  echo "== 2d. the standard agent layout in every repo this host knows =="
+  # Every conf names a checkout the agent works in. Lay the layout down in each
+  # one, so a repo that gained an agent, or a repo whose layout drifted, is
+  # brought back in line without anyone remembering to do it.
+  #
+  # Writes files, never commits or pushes. A daily timer that pushed to every
+  # repo it knows, unattended, would be worse than leaving a clean diff for the
+  # next session to carry. The diff summary below is what a maintainer reads.
+  SYNC_SH="$TEMPLATE_DIR/scripts/sync-project.sh"
+  [ -f "$SYNC_SH" ] || SYNC_SH="$CORE_ROOT/scripts/sync-project.sh"
+  if [ ! -x "$SYNC_SH" ]; then
+    echo "  WARNING: no sync-project.sh found; skipped" >&2
+  else
+    synced_any=no
+    synced_repos=""
+    for conf in $(core_conf_dirs | while IFS= read -r d; do ls -1 "$d"/*.conf 2>/dev/null; done); do
+      [ -f "$conf" ] || continue
+      repo="$(sed -n 's/^AGENT_REPO="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$conf" | tail -n1)"
+      [ -n "$repo" ] || continue
+      [ -d "$repo" ] || continue
+      case " $synced_repos " in *" $repo "*) continue ;; esac
+      synced_repos="$synced_repos $repo"
+      synced_any=yes
+      if [ "$DRY_RUN" = "yes" ]; then
+        bash "$SYNC_SH" "$repo" --dry-run 2>&1 | sed 's/^/  /' || true
+      else
+        bash "$SYNC_SH" "$repo" 2>&1 | sed 's/^/  /' || true
+      fi
+    done
+    [ "$synced_any" = "yes" ] || echo "  no conf names a checkout that exists on this host"
   fi
 
   echo "== 2b. CHANGELOG.md ACTION lines =="
@@ -669,12 +707,36 @@ if [ "$ADAPTER" != "hypertask" ] || [ -z "$BOARD_CLI" ] || [ ! -x "$BOARD_CLI" ]
   exit 0
 fi
 
+LABELS_USED="$LABELS"
 if OUT="$("$BOARD_CLI" task create \
       --project "$FEEDBACK_BOARD_ID" \
       --section "$FEEDBACK_BOARD_SECTION" \
       --title "$TITLE" \
       --description-file "$BODY_FILE" \
       --labels "$LABELS" 2>&1)"; then
+  STATUS=0
+else
+  STATUS=$?
+fi
+# A label this board's project does not carry (board 2462 had none of
+# $LABELS) used to fail the whole post, which fell through to the
+# print-and-paste fallback and looked like "feedback never posts". The
+# ticket itself matters more than the label: retry once with no label and
+# say so in one line, instead of losing the post over it.
+if [ "$STATUS" -ne 0 ] && printf '%s' "$OUT" | grep -qi "LabelNotFound"; then
+  echo "label(s) $LABELS_USED not on this board's project: filing without a label"
+  LABELS_USED=""
+  if OUT="$("$BOARD_CLI" task create \
+        --project "$FEEDBACK_BOARD_ID" \
+        --section "$FEEDBACK_BOARD_SECTION" \
+        --title "$TITLE" \
+        --description-file "$BODY_FILE" 2>&1)"; then
+    STATUS=0
+  else
+    STATUS=$?
+  fi
+fi
+if [ "$STATUS" -eq 0 ]; then
   FILED_LINE="$(printf '%s\n' "$OUT" | python3 -c '
 import json, re, sys
 raw = sys.stdin.read()

@@ -1,0 +1,15 @@
+name: skills-evals
+on:
+  pull_request:
+    paths:
+      - '.claude/skills/**'
+      - 'board.yml'
+      - '.github/workflows/skills-evals.yml'
+
+jobs:
+  skills-evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check the skill pack is internally consistent
+        run: bash .claude/skills/evals/run-evals.sh

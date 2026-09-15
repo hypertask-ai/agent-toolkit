@@ -59,11 +59,19 @@ core_read_conf "$CONF"
 
 # ---------- required conf keys ----------
 for key in AGENT_ID AGENT_NAME BOARD_ADAPTER BOARD_ID TOKEN_FILE WATCH_SECTIONS \
-           SKILLS_INDEX MODEL_CLI BOARD_CLI; do
+           MODEL_CLI BOARD_CLI; do
   eval "value=\${$key:-}"
   [ -n "$value" ] || die "conf $CONF has no $key" \
     "add $key= to that file; see the key list in the create-agent skill"
 done
+# Every agent has a repo now: no repo-less mode. It is the agent's memory
+# (every output, report or script is a PR to it) and it is what lets
+# adapter_pick_rank ever call a ticket finished. A distinct message, not the
+# generic loop above, because a conf missing this key is not a template typo,
+# it is an agent nobody ran create-agent --repo for yet.
+[ -n "${PR_REPO:-}" ] || die \
+  "PR_REPO is not set: every agent needs a repo, run create-agent --repo" \
+  "run create-agent.sh --resume --pr-repo <org/name> for this agent, or add PR_REPO= to $CONF by hand"
 MAX_CONCURRENT_RUNS="${MAX_CONCURRENT_RUNS:-1}"
 # An agent may also take tickets nobody has claimed, which is how a board column
 # becomes a queue without anyone assigning by hand. Off unless the conf says so,
@@ -109,14 +117,45 @@ TRIAGE_MODEL_CLI="${TRIAGE_MODEL_CLI:-claude -p --model haiku}"
 # Two second opinions per run, through agent-advisor.
 ADVISOR_MAX="${ADVISOR_MAX:-2}"
 ADVISOR_CLI="${ADVISOR_CLI:-claude -p --model opus}"
-# SKILLS_INDEX is a comma-separated LIST: company pack first, bot pack second.
-# One path is a list of one, so every conf written before the split still works.
-core_check_skill_indexes "$SKILLS_INDEX" "SKILLS_INDEX"
-# The prompt gets them concatenated, in order, as one phrase.
-SKILLS_INDEX_SENTENCE="$(core_skill_index_sentence "$SKILLS_INDEX")"
-# The first index is the primary pack: the one whose directory holds the
-# lifecycle scripts an adapter reaches for.
-SKILLS_INDEX_PRIMARY="$(core_skill_index_at "$SKILLS_INDEX" first)"
+# ---------- which skills this run reads (3.11.0) ----------
+# Two of the three sources are found, not configured: the company pack (plugin,
+# or the clone) and the .claude/skills of the repo this agent works in.
+# SKILLS_INDEX is now optional and means "extra packs on top of those two", so
+# a conf that still lists the two found packs keeps working and simply names
+# them twice.
+COMPANY_SKILLS_DIR="$(core_company_pack)"
+[ -n "$COMPANY_SKILLS_DIR" ] || die \
+  "no company skills pack on this host" \
+  "run 'claude plugin install $COMPANY_PACK_NAME@$COMPANY_PACK_NAME', or clone the pack to $COMPANY_PACK_CLONE"
+# Skills name the pack root as $COMPANY_SKILLS_DIR rather than hard-coding a
+# path, so a plugin host and a clone host read the same skill file.
+export COMPANY_SKILLS_DIR
+COMPANY_SKILLS_VERSION="$(core_pack_version "$COMPANY_SKILLS_DIR")"
+
+REPO_SKILLS_DIR="$(core_repo_skills "${AGENT_REPO:-}")"
+REPO_SKILLS_VERSION="$(core_pack_version "$REPO_SKILLS_DIR")"
+
+# Built in reading order, absolute, for the existence check below.
+SKILLS_INDEX_EFFECTIVE="$COMPANY_SKILLS_DIR/INDEX.md"
+[ -n "$REPO_SKILLS_DIR" ] && \
+  SKILLS_INDEX_EFFECTIVE="$SKILLS_INDEX_EFFECTIVE,$REPO_SKILLS_DIR/INDEX.md"
+[ -n "${SKILLS_INDEX:-}" ] && \
+  SKILLS_INDEX_EFFECTIVE="$SKILLS_INDEX_EFFECTIVE,$SKILLS_INDEX"
+core_check_skill_indexes "$SKILLS_INDEX_EFFECTIVE" "the resolved skills index list"
+
+# The prompt names the repo's own index by its repo-relative path, because the
+# model's cwd is that checkout and a per-run workdir is a different absolute
+# path every time.
+SKILLS_INDEX_SENTENCE="$COMPANY_SKILLS_DIR/INDEX.md"
+[ -n "$REPO_SKILLS_DIR" ] && \
+  SKILLS_INDEX_SENTENCE="$SKILLS_INDEX_SENTENCE, then .claude/skills/INDEX.md in the checkout you are working in"
+if [ -n "${SKILLS_INDEX:-}" ]; then
+  SKILLS_INDEX_SENTENCE="$SKILLS_INDEX_SENTENCE, then $(core_skill_index_sentence "$SKILLS_INDEX")"
+fi
+SKILLS_INDEX_SENTENCE="$SKILLS_INDEX_SENTENCE (in that order, the company pack first)"
+# The primary pack is the one whose directory holds the lifecycle scripts an
+# adapter reaches for. That has always been the company pack.
+SKILLS_INDEX_PRIMARY="$COMPANY_SKILLS_DIR/INDEX.md"
 core_require_abs "$TOKEN_FILE" "TOKEN_FILE"
 [ -x "$BOARD_CLI" ] || die "the board CLI $BOARD_CLI is missing or not executable" \
   "re-run create-agent.sh --resume for this agent to reinstall its board wrapper"
@@ -744,6 +783,9 @@ $PROMPT"
 
   ERRFILE="$STATE_DIR/$SLUG.stderr"
   log "run start $ref key=$key dir=${RUN_DIR:-.} attempt=$((tries + 1)): $why"
+  # Which skills this run is about to read, by version. A bot behaving oddly is
+  # usually a bot reading an old pack, and this is the line that shows it.
+  log "skills: company $COMPANY_PACK_NAME $COMPANY_SKILLS_VERSION at $COMPANY_SKILLS_DIR; repo ${REPO_SKILLS_VERSION} at ${REPO_SKILLS_DIR:-none}"
   printf '%s %s\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
   started=$((started + 1))
   set +e

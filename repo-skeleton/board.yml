@@ -1,0 +1,16 @@
+# This agent's board columns, named as roles rather than raw section names,
+# so supervise-board's checks (runner-health, pr-hygiene, and the rest) can
+# reason about "the review lane" or "the intake column" without knowing this
+# board's exact section labels. Fill in the right-hand side with the real
+# section name from the board this agent watches; leave a role blank if this
+# board has no matching column.
+agent: __AGENT_SLUG__
+board_adapter: __BOARD_ADAPTER__
+board_id: __BOARD_ID__
+roles:
+  intake: Triage
+  in_progress: In Progress
+  ai_review: AI Review
+  manager_review: HT Manager Review
+  human_review: Valentin Review
+  done: Done

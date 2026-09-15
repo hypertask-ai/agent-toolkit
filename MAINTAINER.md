@@ -32,6 +32,24 @@ until you do it.
 - **Weekly report** — `agent-template-weekly`, turns a week of corrections
   into checks; `agent-template report` prints this week's scorecard.
 
+## Its own repo
+
+`PR_REPO` in the conf, required: every bot has one, no repo-less mode. The
+repo is the bot's memory. Every output, report or script it produces is a
+pull request to it, never a hand edit and never a write to a chat log
+nobody else can read. Skills stay in the packs above; the repo is where this
+bot's own work accumulates. Created private with `create-agent.sh --pr-repo
+<org/name>` from `repo-skeleton/` in this template (README, `board.yml`,
+`scripts/`, `reports/`, `CHANGELOG.md`, a pr-title check). `agent-board-poll`
+refuses to tick without `PR_REPO`, one line: `PR_REPO is not set: every agent
+needs a repo, run create-agent --repo`.
+
+Auto-merge does not turn on for these repos: GitHub refuses
+`allow_auto_merge` on a private repo whose plan does not carry it. Expected,
+not broken. `create-agent.sh` logs it and moves on; a run leaves its PR open
+and moves the ticket to the review lane anyway, and the supervisor's
+pr-hygiene check merges a green PR that could not get auto-merge.
+
 ## What wakes it
 
 Assigned to it, @mentioned, or a human comment on a ticket it already owns
@@ -105,3 +123,41 @@ Two packs, always in this order:
 - A rule that would still be true for a different board or customer goes into
   the company pack, not this bot's. Copying it into both is how two packs
   drift.
+
+## Where skills live
+
+Three places, and which one a skill belongs in is decided by who it serves.
+
+| Kind | Where | Who owns it |
+|---|---|---|
+| Project skills | `.claude/skills/` in the repo they serve | whoever owns that repo |
+| Shared skills | the `company-skills` Claude Code plugin | the company pack |
+| Personal skills | `~/.claude/skills` | the person at the keyboard |
+
+A skill about building one product lives in that product's repo, so a run
+cannot read rules for code it is not editing, and a corrected rule ships in the
+same pull request as the code change it came from. A skill about how anyone
+here works a ticket is shared, and ships as a plugin:
+
+```
+claude plugin marketplace add hypertask-ai/company-skills
+claude plugin install company-skills@company-skills
+```
+
+`install.sh` runs those two commands for you and falls back to cloning the pack
+to `~/projects/company-skills` on a host where the plugin cannot be installed.
+It writes which one this host resolved, and at what version, to
+`~/.config/hypertask-agents/company-pack.version`.
+
+A run reads them in order: the company pack, then `.claude/skills/INDEX.md` in
+the checkout it is working in, then any extra pack the conf names in
+`SKILLS_INDEX`. The first two are found without being told, so `SKILLS_INDEX`
+is optional as of 3.11.0. The runner logs both versions at the start of every
+run, because a bot behaving oddly is usually a bot reading an old pack.
+
+The template keeps this layout in every project it knows about.
+`create-agent.sh --sync-project <path-or-repo>` lays it down (and `--repo` runs
+it for you), `agent-template update` re-runs it daily on every checkout a conf
+names. It is idempotent, and it never overwrites a file a project has edited:
+each file it writes carries a header naming the template version and a hash of
+its own body, so an edit is visible as a hash that no longer matches.

@@ -51,22 +51,62 @@ fail() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
 # runs, a missing install does not.
 COMPANY_SKILLS_REPO="${COMPANY_SKILLS_REPO:-git@github.com:hypertask-ai/company-skills.git}"
 COMPANY_SKILLS_DIR="${COMPANY_SKILLS_DIR:-$HOME/projects/company-skills}"
+# The pack is a Claude Code plugin since company-skills 1.0.0. The plugin is
+# preferred (versioned, one command to update, same layout on every host); the
+# clone stays as the fallback for a host that cannot install it.
+COMPANY_PACK_NAME="${COMPANY_PACK_NAME:-company-skills}"
+COMPANY_PACK_SOURCE="${COMPANY_PACK_SOURCE:-hypertask-ai/company-skills}"
+COMPANY_PACK_STAMP="${COMPANY_PACK_STAMP:-$HOME/.config/hypertask-agents/company-pack.version}"
+
+# record_company_pack <dir> <how> : write down which pack this host resolved,
+# so `agent-template update` and a bot run can say the same thing.
+record_company_pack() {
+  local dir="$1" how="$2" version="unversioned"
+  [ -f "$dir/VERSION" ] && version="$(head -n1 "$dir/VERSION" | tr -d '[:space:]')"
+  mkdir -p "$(dirname "$COMPANY_PACK_STAMP")"
+  printf '%s %s %s\n' "$version" "$how" "$dir" > "$COMPANY_PACK_STAMP"
+  echo "company pack: $COMPANY_PACK_NAME $version ($how) at $dir"
+}
+
+# install_company_plugin : true when the plugin is installed and readable.
+install_company_plugin() {
+  command -v claude >/dev/null 2>&1 || return 1
+  # Both commands are idempotent: adding a marketplace that is already there,
+  # or installing a plugin that is already installed, updates rather than
+  # errors. Failures are quiet on purpose, because the clone below covers it.
+  claude plugin marketplace add "$COMPANY_PACK_SOURCE" >/dev/null 2>&1 \
+    || claude plugin marketplace update "$COMPANY_PACK_NAME" >/dev/null 2>&1 \
+    || return 1
+  claude plugin install "$COMPANY_PACK_NAME@$COMPANY_PACK_NAME" >/dev/null 2>&1 || return 1
+  local dir
+  for dir in $(ls -1dt "$HOME/.claude/plugins/cache/$COMPANY_PACK_NAME/$COMPANY_PACK_NAME"/*/ 2>/dev/null); do
+    dir="${dir%/}"
+    [ -f "$dir/INDEX.md" ] || continue
+    record_company_pack "$dir" plugin
+    return 0
+  done
+  return 1
+}
 
 sync_company_skills() {
   if [ "${SKIP_COMPANY_SKILLS:-no}" = "yes" ]; then
     echo "company pack: skipped (SKIP_COMPANY_SKILLS=yes)"
     return 0
   fi
+  if install_company_plugin; then
+    return 0
+  fi
+  echo "company pack: no plugin on this host, falling back to the clone" >&2
   if [ -d "$COMPANY_SKILLS_DIR/.git" ]; then
     if git -C "$COMPANY_SKILLS_DIR" pull --ff-only -q 2>/dev/null; then
-      echo "company pack: up to date at $COMPANY_SKILLS_DIR"
+      record_company_pack "$COMPANY_SKILLS_DIR" clone
     else
       echo "WARNING: could not fast-forward $COMPANY_SKILLS_DIR (local changes, or no network). Using the copy that is there." >&2
     fi
   else
     mkdir -p "$(dirname "$COMPANY_SKILLS_DIR")"
     if git clone -q "$COMPANY_SKILLS_REPO" "$COMPANY_SKILLS_DIR" 2>/dev/null; then
-      echo "company pack: cloned to $COMPANY_SKILLS_DIR"
+      record_company_pack "$COMPANY_SKILLS_DIR" clone
     else
       echo "WARNING: could not clone $COMPANY_SKILLS_REPO to $COMPANY_SKILLS_DIR. Bots on this host will run on their own pack only." >&2
     fi
@@ -84,7 +124,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for item in SKILL.md MAINTAINER.md VERSION CHANGELOG.md scripts adapters evals; do
+for item in SKILL.md MAINTAINER.md VERSION CHANGELOG.md scripts adapters evals repo-skeleton project-template; do
   [ -e "$SRC/$item" ] || fail "$SRC/$item is missing" \
     "run install.sh from inside the template folder in the repo"
 done
@@ -133,7 +173,7 @@ cp -a "$SRC/CHANGELOG.md" "$DEST/CHANGELOG.md"
 # far, not a real error. Stage the new tree next to DEST, then swap each
 # directory in with a rename: a path lookup during the swap either finds the
 # whole old directory or the whole new one, never a partially written file.
-for dir in scripts adapters evals; do
+for dir in scripts adapters evals repo-skeleton project-template; do
   stage="$(mktemp -d "$DEST/.$dir.XXXXXX")"
   cp -a "$SRC/$dir/." "$stage/"
   if [ -d "$DEST/$dir" ]; then
@@ -149,7 +189,10 @@ done
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/triage.sh" \
-          "$DEST/evals/run-evals.sh"
+          "$DEST/scripts/sync-project.sh" \
+          "$DEST/evals/run-evals.sh" \
+          "$DEST/project-template/.claude/skills/evals/run-evals.sh" \
+          "$DEST/project-template/.claude/hooks/board-write-guard.sh"
 
 # A symlink, so the installed runner and the installed skill can never drift
 # apart, and so the runner still finds its adapters through readlink -f.

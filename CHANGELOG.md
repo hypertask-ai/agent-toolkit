@@ -5,6 +5,114 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.11.0 - 2026-09-15
+
+Skills live where they are used, and the template keeps every project's layout
+the same.
+
+- **The company pack installs as a Claude Code plugin.** `install.sh` runs
+  `claude plugin marketplace add hypertask-ai/company-skills` and
+  `claude plugin install company-skills@company-skills`, falling back to
+  cloning the pack to `~/projects/company-skills` on a host where the plugin
+  cannot be installed. Which one this host resolved, and at what version, is
+  written to `~/.config/hypertask-agents/company-pack.version`, and
+  `agent-template update` prints it.
+- **The runner finds its skills instead of being told them.** It reads, in
+  order: the company pack, `.claude/skills/INDEX.md` inside the checkout the
+  run works in, and then anything extra the conf names. `SKILLS_INDEX` is now
+  optional and means "extra packs on top of those two"; a conf that still
+  lists the two found packs keeps working and simply names them twice.
+  `COMPANY_SKILLS_DIR` is exported, so a skill can name the pack root without
+  hard-coding a path that differs between a plugin host and a clone host.
+- **Both versions are logged at the start of every run**, on one line:
+  `skills: company company-skills <v> at <dir>; repo <v> at <dir>`. A bot
+  behaving oddly is usually a bot reading an old pack, and this is the line
+  that shows it.
+- **`create-agent.sh --sync-project <path-or-repo>`** lays the standard layout
+  into any project repo that is missing it: `.claude/skills/` (`INDEX.md`
+  seeded from the skills already there, `RULE-MAP.md`, `VERSION`,
+  `evals/run-evals.sh`), `AGENTS.md` with the shared conventions, `board.yml`,
+  the `pr-title` check, the `skills-evals` workflow, and a copy of
+  `.claude/hooks/board-write-guard.sh`. `--repo` runs it automatically. Given
+  `org/name` rather than a path it clones, syncs, and opens a pull request.
+- **It is idempotent and it never overwrites a project's edit.** Every file it
+  writes carries a header naming the template version and the sha256 of its own
+  body. A matching hash means template-owned and untouched, so it is rewritten.
+  A hash that no longer matches means the project edited it, so it is left
+  alone and named in the diff summary. No header at all means the project wrote
+  the file, so it is left alone too. `.claude/skills/VERSION` carries no header
+  and is written once, because the runner reads it with `head -n1` and the
+  version of a repo's own pack is the repo's to bump.
+- **`agent-template update` runs the sync on every checkout a conf names**, so
+  a repo that gained an agent, or a repo whose layout drifted, comes back into
+  line without anyone remembering. It writes files and reports what changed; it
+  does not commit or push, because a daily timer pushing to every repo it knows
+  about, unattended, is worse than leaving a clean diff behind.
+- `evals/sync-project.test.sh` adds seven behavioural checks the case file
+  cannot express: the first sync writes the layout, the index is seeded from
+  the skills already present, a script keeps its shebang on line 1, the
+  laid-down eval suite passes on the laid-down pack, the second sync rewrites
+  nothing, an edited file survives, and an unmarked file survives.
+- `MAINTAINER.md` and the create-agent skill both gain a "Where skills live"
+  section: project skills in `.claude/skills/` of the repo they serve, shared
+  skills as the company plugin, personal skills in `~/.claude/skills`.
+
+ACTION: run `agent-template update` on every bot host. It installs the company
+pack as a plugin and syncs the layout into each repo a conf names.
+
+ACTION: `SKILLS_INDEX` is now optional for dev-1, dev-2 and qa-1. Product
+skills are read from the checkout instead. Leave the key in place if you like;
+it is harmless, and it only names the same packs twice.
+
+## 3.10.0 - 2026-09-15
+
+- Every agent needs a repo now: no repo-less mode. `PR_REPO` moves from
+  optional to required. `agent-board-poll` refuses to tick without it,
+  printing one line: `PR_REPO is not set: every agent needs a repo, run
+  create-agent --repo`. That line carries `ERROR:` (the `die` convention
+  every required-key check already uses), which is what the supervisor's
+  `runner-health` check greps for.
+- `adapter_pick_rank` dropped the "no PR_REPO configured for this agent"
+  branch added in 3.9.1: with `PR_REPO` required, that state can no longer
+  happen by the time this function runs, so it collapsed back to only
+  telling apart "gh answered" from "gh is missing or failed".
+- `create-agent.sh` gets `--pr-repo <org/name>`: creates that repo private
+  from the new `repo-skeleton/` (README, `board.yml`, `scripts/`, `reports/`,
+  `CHANGELOG.md`, a pr-title check) if it does not exist yet, and writes
+  `PR_REPO` into the conf either way. `--resume --pr-repo <org/name>` adds a
+  repo to an existing identity without touching anything else it has:
+  `core_write_missing_keys` only adds keys that are not already there, no
+  identity is recreated, and no token is rotated.
+- Enabling auto-merge on that new repo is best-effort, not fatal. GitHub
+  returns success on `gh repo edit --enable-auto-merge` even when it refuses
+  the setting (true for a private repo on a plan that does not carry
+  auto-merge), so `create-agent.sh` reads `allow_auto_merge` back from the
+  API instead of trusting that exit code, and logs "auto-merge unavailable
+  on private repo, supervisor merges green PRs" rather than failing the
+  provisioning run. The dev run prompt in the hypertask adapter carries the
+  same instruction: when `gh pr merge --auto` is refused, leave the PR open
+  and move the ticket to the review lane anyway; the supervisor's
+  pr-hygiene check merges a green PR that could not get auto-merge.
+- `agent-template feedback`: a label this board's project does not carry
+  (board 2462 had none of the ones this always sent) used to fail the whole
+  post and fall through to the print-and-paste fallback, which looked like
+  feedback never posts even though the board CLI and token were fine. It now
+  retries once with no label on a `LabelNotFound` error and says so in one
+  line, instead of losing the post over a label.
+- MAINTAINER.md and SKILL.md: "the repo is the bot's memory, every output,
+  report or script is a PR to it; skills stay in the packs", plus the
+  auto-merge caveat above.
+- No new eval cases: none of these changes reduce to the harness's text
+  predicates (`starts_with_block_tag`, `has_section`, `is_full_https_url`).
+  The `PR_REPO`-required and label-retry changes were verified by hand
+  (a throwaway private repo created end to end through `--pr-repo`, and a
+  fake board CLI that fails the first call with `LabelNotFound`).
+- ACTION: set `PR_REPO` for `product-bot`, `growth-bot`, `support-bot`,
+  `finance-bot` (`create-agent.sh --resume --pr-repo <org/name>`). Until then
+  those four will not tick after this version installs: `agent-board-poll`
+  now refuses outright instead of running with a misleading "gh is
+  unavailable" message.
+
 ## 3.9.1 - 2026-09-15
 
 - Fixed the misleading "gh is unavailable" message: a claimed, unfinished

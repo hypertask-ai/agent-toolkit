@@ -37,6 +37,15 @@ BOARD="none"
 BOARD_ID=""
 REPO=""
 SKILLS_REPO=""
+# PR_REPO: the agent's own memory repo, org/name on GitHub, distinct from
+# --repo above (a local working-directory path). Every agent needs one now
+# (agent-board-poll refuses to tick without PR_REPO), so this flag creates it
+# private from the skeleton in ../repo-skeleton when it does not exist yet,
+# and always writes PR_REPO into the conf.
+PR_REPO=""
+# Checkouts to lay the standard agent layout into. --repo's checkout is added
+# to this list below, so an agent's own repo is always synced.
+SYNC_PROJECTS=""
 SKILLS_INDEX=""
 # The shared pack, cloned by install.sh. Override for a company that keeps
 # its own somewhere else, or point it at nothing to provision a single-pack bot.
@@ -63,6 +72,12 @@ Options:
   --board NAME             adapter to use: see adapters/            (default none)
   --project ID             board id inside that adapter
   --repo PATH              absolute repo path the agent works in
+  --pr-repo ORG/NAME       the agent's own memory repo on GitHub; created
+                           private from the skeleton if it does not exist
+  --sync-project PATH      lay the standard agent layout into an existing
+                           checkout (.claude/skills/, AGENTS.md, board.yml,
+                           the evals and the pr-title check). Repeatable.
+                           Run automatically for --repo's checkout.
   --skills-repo PATH       folder holding INDEX.md
   --skills-index PATH      the index file itself, if it is not <skills-repo>/INDEX.md
   --mission-file PATH      plain-text mission, used verbatim
@@ -86,6 +101,8 @@ while [ $# -gt 0 ]; do
     --board) BOARD="$2"; shift 2 ;;
     --project|--board-id) BOARD_ID="$2"; shift 2 ;;
     --repo) REPO="$2"; shift 2 ;;
+    --pr-repo) PR_REPO="$2"; shift 2 ;;
+    --sync-project) SYNC_PROJECTS="$SYNC_PROJECTS${SYNC_PROJECTS:+ }$2"; shift 2 ;;
     --skills-repo) SKILLS_REPO="$2"; shift 2 ;;
     # Repeatable, or one comma-separated list. Order matters: the shared
     # company pack first, this bot's own pack last.
@@ -109,6 +126,12 @@ done
 case "$KIND" in dev|qa|worker|cli) ;; *) die "--kind must be dev, qa, worker or cli, got '$KIND'" "pick one of those four" ;; esac
 case "$WIRING" in poll|fleet|none) ;; *) die "--wiring must be poll, fleet or none, got '$WIRING'" "use poll unless you know this machine runs a worker runtime" ;; esac
 case "$CHAT_PAGE" in yes|no) ;; *) die "--chat-page must be yes or no" "pass --chat-page no unless a hosted chat lane is needed" ;; esac
+if [ -n "$PR_REPO" ]; then
+  case "$PR_REPO" in
+    */*) ;;
+    *) die "--pr-repo must be org/name, got '$PR_REPO'" "pass the GitHub org and repo name, e.g. hypertask-ai/product-bot" ;;
+  esac
+fi
 
 core_load_adapter "$BOARD"
 adapter_require_tools
@@ -209,6 +232,7 @@ echo "  kind      $KIND"
 echo "  board     $BOARD${BOARD_ID:+ (id $BOARD_ID)}"
 echo "  wiring    $WIRING"
 echo "  repo      ${REPO:-none}"
+echo "  pr-repo   ${PR_REPO:-none (agent-board-poll will refuse to tick without one)}"
 echo "  skills    $SKILLS_INDEX"
 echo "            (read in order: company pack first, bot pack last)"
 echo "  model CLI $MODEL_CLI"
@@ -271,6 +295,99 @@ if [ "$BOARD" != "none" ]; then
   fi
 fi
 
+# ---------- 2b. this agent's own memory repo ----------
+# Every agent needs PR_REPO now (agent-board-poll refuses to tick without
+# it). This step is idempotent: an existing repo is left exactly as it is,
+# and enabling auto-merge is best-effort, because GitHub refuses
+# allow_auto_merge on a private repo under a plan that does not carry it
+# (true for the private repos this creates). That refusal must never fail
+# the run: the supervisor's pr-hygiene check merges a green PR by hand when
+# auto-merge could not be turned on.
+if [ -n "$PR_REPO" ]; then
+  step 2b "this agent's own memory repo: $PR_REPO (its output, reports and scripts land here as PRs)"
+  if [ "$DRY_RUN" != "yes" ]; then
+    if gh repo view "$PR_REPO" >/dev/null 2>&1; then
+      echo "    $PR_REPO already exists, left as is"
+    else
+      SKELETON_DIR="$CORE_ROOT/repo-skeleton"
+      [ -d "$SKELETON_DIR" ] || die "no skeleton at $SKELETON_DIR" \
+        "the create-agent template is missing repo-skeleton/; reinstall the template"
+      STAGE="$(mktemp -d)"
+      cp -a "$SKELETON_DIR/." "$STAGE/"
+      BOARD_DESC="$BOARD${BOARD_ID:+ (project $BOARD_ID)}"
+      AGENT_NAME_SUB="$DISPLAY_NAME" AGENT_SLUG_SUB="$SLUG" BOARD_ADAPTER_SUB="$BOARD" \
+      BOARD_ID_SUB="$BOARD_ID" BOARD_DESC_SUB="$BOARD_DESC" STAGE="$STAGE" python3 - <<'PYEOF'
+import os
+stage = os.environ["STAGE"]
+subs = {
+    "__AGENT_NAME__": os.environ["AGENT_NAME_SUB"],
+    "__AGENT_SLUG__": os.environ["AGENT_SLUG_SUB"],
+    "__BOARD_ADAPTER__": os.environ["BOARD_ADAPTER_SUB"],
+    "__BOARD_ID__": os.environ["BOARD_ID_SUB"],
+    "__BOARD_DESC__": os.environ["BOARD_DESC_SUB"],
+}
+for name in ("README.md", "board.yml", "CHANGELOG.md"):
+    path = os.path.join(stage, name)
+    if not os.path.isfile(path):
+        continue
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    for token, value in subs.items():
+        text = text.replace(token, value)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+PYEOF
+      ( cd "$STAGE" && git init -q -b main \
+          && git add -A \
+          && git -c user.name="create-agent" -c user.email="create-agent@localhost" \
+               commit -q -m "$DISPLAY_NAME: repo created from the create-agent skeleton" ) \
+        || { rm -rf "$STAGE"; die "could not stage the skeleton repo" "check git is installed and working"; }
+      if ! gh repo create "$PR_REPO" --private --source="$STAGE" --remote=origin --push >/dev/null; then
+        rm -rf "$STAGE"
+        die "gh repo create $PR_REPO failed" \
+            "check \`gh auth status\` and that this token can create repos in that org"
+      fi
+      rm -rf "$STAGE"
+      echo "    created $PR_REPO (private) from the skeleton"
+    fi
+    # gh repo edit --enable-auto-merge exits 0 even when GitHub silently
+    # refuses the setting (a private repo on a plan that does not carry
+    # auto-merge, true for hypertask-ai's private repos). Read the setting
+    # back instead of trusting the edit call's exit code.
+    gh repo edit "$PR_REPO" --enable-auto-merge >/dev/null 2>&1 || true
+    if [ "$(gh api "repos/$PR_REPO" --jq '.allow_auto_merge' 2>/dev/null)" = "true" ]; then
+      echo "    auto-merge enabled on $PR_REPO"
+    else
+      echo "    auto-merge unavailable on private repo, supervisor merges green PRs"
+    fi
+  else
+    echo "    + create $PR_REPO (private, from repo-skeleton/) if it does not already exist"
+    echo "    + gh repo edit $PR_REPO --enable-auto-merge (best effort, may be refused on a private repo)"
+  fi
+fi
+
+# ---------- 2c. the standard layout in every project this agent touches ------
+# An agent reads .claude/skills/INDEX.md out of the checkout it is working in,
+# so a repo with no such file gives it nothing to follow. Lay the layout down
+# here rather than waiting for somebody to remember. Idempotent, and a file the
+# project has edited is never overwritten.
+[ -n "$REPO" ] && SYNC_PROJECTS="$SYNC_PROJECTS${SYNC_PROJECTS:+ }$REPO"
+if [ -n "$SYNC_PROJECTS" ]; then
+  step 2c "the standard agent layout in: $SYNC_PROJECTS"
+  SYNC_SH="$CORE_ROOT/scripts/sync-project.sh"
+  [ -x "$SYNC_SH" ] || die "no sync-project.sh at $SYNC_SH" \
+    "the create-agent template is missing scripts/sync-project.sh; reinstall the template"
+  for project in $SYNC_PROJECTS; do
+    if [ "$DRY_RUN" = "yes" ]; then
+      AGENT_SLUG="$SLUG" BOARD_ADAPTER="$BOARD" BOARD_ID="$BOARD_ID" \
+        bash "$SYNC_SH" "$project" --dry-run 2>&1 | sed 's/^/    /' || true
+    else
+      AGENT_SLUG="$SLUG" BOARD_ADAPTER="$BOARD" BOARD_ID="$BOARD_ID" \
+        bash "$SYNC_SH" "$project" 2>&1 | sed 's/^/    /'
+    fi
+  done
+fi
+
 # ---------- 3. conf ----------
 step 3 "write $CONF_FILE (0600; existing values are kept, only missing keys are added)"
 CONF_CONTENT="$(cat <<EOF
@@ -291,6 +408,14 @@ MAX_CONCURRENT_RUNS="$MAX_CONCURRENT_RUNS"
 WIRING="$WIRING"
 EOF
 )"
+# PR_REPO only when given: an empty PR_REPO="" written to a conf that has
+# none yet would satisfy core_write_missing_keys and still leave the runner's
+# required-key check failing on an empty value, silently hiding the real
+# "run create-agent --pr-repo" fix behind a key that already exists.
+if [ -n "$PR_REPO" ]; then
+  CONF_CONTENT="$CONF_CONTENT
+PR_REPO=\"$PR_REPO\""
+fi
 if [ "$DRY_RUN" != "yes" ]; then
   mkdir -p "$CONFIG_DIR"
   core_write_missing_keys "$CONF_FILE" "$CONF_CONTENT"
@@ -334,6 +459,7 @@ echo "=== check before you say done ==="
 cat <<EOF
   [ ] $CONF_FILE is 0600 and names the right board, sections and skills index
   [ ] every index in $SKILLS_INDEX exists, and the bot pack ($SKILLS_INDEX_LAST) has a skill whose trigger matches this agent's work
+  [ ] PR_REPO is set in $CONF_FILE, either from --pr-repo above or added by hand: agent-board-poll refuses to tick without it
 EOF
 if [ "$BOARD" != "none" ]; then
   cat <<EOF

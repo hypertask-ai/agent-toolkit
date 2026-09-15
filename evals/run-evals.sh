@@ -199,3 +199,13 @@ if failed:
     print("failing case ids: %s" % " ".join(case_id for case_id, _ in failed))
     sys.exit(1)
 PYEOF
+
+# The case file replays text corrections. sync-project.sh is about what lands
+# on disk when the layout is synced twice into a repo somebody edited in
+# between, which no predicate over a string can express, so it has its own
+# suite. Skipped when a single case was named with --case.
+if [ -z "$ONLY" ] && [ -x "$HERE/sync-project.test.sh" ]; then
+  echo ""
+  echo "-- sync-project behavioural checks --"
+  bash "$HERE/sync-project.test.sh"
+fi

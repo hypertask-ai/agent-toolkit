@@ -552,33 +552,28 @@ adapter_pick_rank() {
 
   comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")"
 
-  # The pull request is the other half of "finished", and GitHub is the only
-  # place that knows whether it merged. Three states, not two: this agent has
-  # no PR_REPO configured (ordinary, most agents hand code work to a dev and
-  # never set it), gh is missing or the call failed (a real fault, loud on
-  # purpose so the supervisor's log check catches it), or gh answered. Only
-  # the last one may claim a pull request state; the other two fall through
-  # to "not finished" below exactly the same, because a ticket this agent
-  # still owes runs either way and lets the run itself discover the truth.
-  if [ -n "$repo" ]; then
-    if command -v gh >/dev/null 2>&1; then
-      if pr_json="$(gh pr list --repo "$repo" --state all --search "$ref" \
-                   --json number,state,url,headRefName --limit 10 2>&1)"; then
-        pr_known="yes"
-      else
-        printf 'ERROR: gh pr list failed for %s in %s: %s\n' "$ref" "$repo" "$pr_json" >&2
-        pr_json=""
-      fi
+  # PR_REPO is required (agent-board-poll refuses to tick without it), so the
+  # only question here is whether gh could answer. gh missing or the call
+  # failing is a real fault, loud on purpose so the supervisor's log check
+  # catches it; only a successful call may claim a pull request state. Either
+  # way a ticket this agent still owes falls through to "not finished" below,
+  # and the run itself discovers the truth.
+  if command -v gh >/dev/null 2>&1; then
+    if pr_json="$(gh pr list --repo "$repo" --state all --search "$ref" \
+                 --json number,state,url,headRefName --limit 10 2>&1)"; then
+      pr_known="yes"
     else
-      printf 'ERROR: PR_REPO=%s is set but gh is not on PATH, so %s cannot learn its pull request state\n' \
-        "$repo" "$ref" >&2
+      printf 'ERROR: gh pr list failed for %s in %s: %s\n' "$ref" "$repo" "$pr_json" >&2
+      pr_json=""
     fi
+  else
+    printf 'ERROR: PR_REPO=%s is set but gh is not on PATH, so %s cannot learn its pull request state\n' \
+      "$repo" "$ref" >&2
   fi
 
   printf '%s' "$comments" | \
   AGENT_ID="$agent_id" AGENT_NAME="$agent_name" REF="$ref" SECTION="$section" \
   REASON="$reason" PR_JSON="${pr_json:-[]}" HAVE_PR_VIEW="$pr_known" \
-  REPO_CONFIGURED="$([ -n "$repo" ] && echo yes || echo no)" \
   python3 -c '
 import json, os, re, sys
 
@@ -628,7 +623,6 @@ prs = [p for p in prs if ref.casefold() in
 merged = any(str(p.get("state") or "").upper() == "MERGED" for p in prs)
 open_pr = [p for p in prs if str(p.get("state") or "").upper() == "OPEN"]
 pr_known = os.environ["HAVE_PR_VIEW"] == "yes"
-repo_configured = os.environ["REPO_CONFIGURED"] == "yes"
 
 if done:
     print("0 %s is %s, nothing left to do" % (ref, section))
@@ -640,12 +634,7 @@ elif claimed and open_pr:
     print("1 %s is claimed by this agent and its pull request %s is still open, so this agent owes it a fix"
           % (ref, open_pr[0].get("url")))
 elif claimed and not merged:
-    if not repo_configured:
-        detail = "no PR_REPO configured for this agent"
-    elif pr_known:
-        detail = "no pull request yet"
-    else:
-        detail = "pull request state unknown, gh failed, see the tick log"
+    detail = "no pull request yet" if pr_known else "pull request state unknown, gh failed, see the tick log"
     print("1 %s is claimed by this agent and is not finished (%s)" % (ref, detail))
 else:
     print("3 %s is new work (%s)" % (ref, reason))
@@ -781,9 +770,14 @@ FINISH IT. The run counts for something only when the work is in a pull
 request that can merge on its own: branch off the production branch, commit,
 push, open the PR, and turn auto-merge on with
 \`gh pr merge --auto --squash <number>\` in the same breath as opening it. A
-PR sitting green with auto-merge off is work nobody gets. Then move the ticket
-to the review lane the lifecycle skill names. Do not leave commits unpushed:
-this working directory is thrown away when the process exits.
+PR sitting green with auto-merge off is work nobody gets. GitHub refuses that
+command on a private repo whose plan does not carry auto-merge; when it is
+refused, do not retry it and do not fail the run over it: leave the PR open,
+say so in your result comment, and move the ticket to the review lane anyway.
+Checks turning green on a PR that could not get auto-merge is what the
+supervisor's pr-hygiene check looks for; it merges those by hand. Then move
+the ticket to the review lane the lifecycle skill names. Do not leave commits
+unpushed: this working directory is thrown away when the process exits.
 
 When you are stuck, and you have already tried two different approaches, run
 \`agent-advisor "<one precise question>"\` and read the answer before you try a
