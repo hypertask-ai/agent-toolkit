@@ -5,6 +5,11 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.17.1 - 2026-09-16
+
+- AGTE-6: `agent-template update` now converts an old-schema conf without an
+  optional `HT_AGENT_SLUG` instead of exiting before its filename fallback.
+
 ## 3.17.0 - 2026-09-16
 
 - One ticket now stays with its agent until its pull request is merged,

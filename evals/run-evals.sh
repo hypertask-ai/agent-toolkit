@@ -225,3 +225,8 @@ if [ -z "$ONLY" ] && [ -x "$HERE/one-ticket-live.test.sh" ]; then
   echo "-- one ticket until live behavioural checks --"
   bash "$HERE/one-ticket-live.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/agent-template-update.test.sh" ]; then
+  echo ""
+  echo "-- agent-template update behavioural checks --"
+  bash "$HERE/agent-template-update.test.sh"
+fi

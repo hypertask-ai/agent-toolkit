@@ -291,7 +291,7 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
         SKIPPED=$((SKIPPED + 1))
         continue
       fi
-      slug="$(grep -m1 '^HT_AGENT_SLUG=' "$f" | sed -E 's/^HT_AGENT_SLUG=//; s/^"//; s/"$//')"
+      slug="$(grep -m1 '^HT_AGENT_SLUG=' "$f" | sed -E 's/^HT_AGENT_SLUG=//; s/^"//; s/"$//' || true)"
       [ -n "$slug" ] || slug="$base"
       unit="hypertask-agent-worker@$slug.service"
       unit_state="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
