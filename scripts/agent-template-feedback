@@ -136,6 +136,7 @@ for row in rows or []:
 INBOX="$(section_named Inbox)"
 ACCEPTED="$(section_named Accepted)"
 DONE="$(section_named Done)"
+[ -n "$DONE" ] || DONE="$(section_named Fixed)"
 DECLINED="$(section_named Declined)"
 [ -n "$DECLINED" ] || DECLINED="$(section_named Rejected)"
 [ -n "$INBOX" ] && [ -n "$ACCEPTED" ] && [ -n "$DONE" ] \

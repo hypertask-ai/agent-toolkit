@@ -1,3 +1,6 @@
+## 3.18.2
+- agent-template-feedback: accept a "Fixed" section as the shipped column (board 5500 uses Inbox, Accepted, Fixed, Rejected). ACTION: none.
+
 # agent-template changelog
 
 One entry per version. A line marked `ACTION:` is something the template
