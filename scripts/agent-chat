@@ -26,6 +26,9 @@ from typing import Any
 
 ERROR_REPLY = "I could not answer this, error logged."
 MAX_WEBHOOK_BODY = 1024 * 1024
+RUNTIME_HEARTBEAT_SECONDS = 30
+POLL_CADENCE_SECONDS = 60
+TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")
 
 
 def parse_conf(path: Path) -> dict[str, str]:
@@ -51,6 +54,52 @@ def api_base(values: dict[str, str]) -> str:
         return str(json.loads(config.read_text())["apiUrl"]).rstrip("/")
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return "https://app.hypertask.ai/api"
+
+
+def model_name(command: str) -> str:
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return "Unreported"
+    for index, value in enumerate(argv):
+        if value == "--model" and index + 1 < len(argv):
+            return argv[index + 1]
+        if value.startswith("--model="):
+            return value.partition("=")[2]
+    return Path(argv[0]).name if argv else "Unreported"
+
+
+def board_sections(path: Path, watch_sections: str) -> tuple[str, ...]:
+    configured: list[str] = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        lines = []
+    in_sections = False
+    base_indent = 0
+    for raw in lines:
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        stripped = line.strip()
+        if indent == 0:
+            key = stripped.partition(":")[0]
+            in_sections = key in {"roles", "columns", "waiting"}
+            base_indent = indent
+            if not in_sections:
+                continue
+        elif not in_sections or indent <= base_indent:
+            continue
+        value = stripped[2:].strip() if stripped.startswith("- ") else stripped.partition(":")[2].strip()
+        value = value.strip('"\'')
+        if value and value not in {"[]", "{}"} and not value.isdigit():
+            configured.append(value)
+    watched = [item.strip() for item in watch_sections.split(",") if item.strip()]
+    if watched and watched != ["*"]:
+        selected = [item for item in configured if item in watched]
+        configured = selected or watched
+    return tuple(dict.fromkeys(configured))
 
 
 @dataclass(frozen=True)
@@ -111,6 +160,159 @@ class Agent:
         return self.token_file.read_text(encoding="utf-8").strip()
 
 
+@dataclass(frozen=True)
+class RuntimeAgent:
+    slug: str
+    token_file: Path
+    api_url: str
+    board_ids: tuple[int, ...]
+    source_sections: tuple[tuple[int, str], ...]
+    model: str
+
+    @classmethod
+    def from_conf(cls, path: Path) -> "RuntimeAgent | None":
+        values = parse_conf(path)
+        required = ("AGENT_SLUG", "TOKEN_FILE", "BOARD_ID", "MODEL_CLI")
+        if any(not values.get(key) for key in required):
+            return None
+        try:
+            board_ids = tuple(int(item.strip()) for item in values["BOARD_ID"].split(",") if item.strip())
+        except ValueError:
+            return None
+        if not board_ids:
+            return None
+        sections: list[tuple[int, str]] = []
+        for board_id in board_ids:
+            specific = path.parent / f"board-{board_id}.yml"
+            board_file = specific if specific.is_file() else path.parent / "board.yml"
+            for section in board_sections(board_file, values.get("WATCH_SECTIONS", "")):
+                sections.append((board_id, section))
+        return cls(
+            slug=values["AGENT_SLUG"],
+            token_file=Path(values["TOKEN_FILE"]).expanduser(),
+            api_url=api_base(values),
+            board_ids=board_ids,
+            source_sections=tuple(sections),
+            model=model_name(values["MODEL_CLI"]),
+        )
+
+    def token(self) -> str:
+        return self.token_file.read_text(encoding="utf-8").strip()
+
+
+class JsonState:
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.Lock()
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            self.value = value if isinstance(value, dict) else {}
+        except (OSError, ValueError, json.JSONDecodeError):
+            self.value = {}
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        temporary = self.path.with_suffix(self.path.suffix + ".new")
+        temporary.write_text(json.dumps(self.value, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(self.path)
+
+
+class RuntimeState(JsonState):
+    def next_sequence(self, agent: RuntimeAgent) -> tuple[int, str]:
+        marker = hashlib.sha256(agent.token().encode()).hexdigest()
+        with self.lock:
+            row = self.value.get(agent.slug)
+            if not isinstance(row, dict) or row.get("credential") != marker:
+                row = {"credential": marker, "next": 1}
+            sequence = int(row.get("next", 1))
+            self.value[agent.slug] = {"credential": marker, "next": sequence + 1}
+            self.save()
+        return sequence, marker
+
+    def reset(self, agent: RuntimeAgent, marker: str, sequence: int) -> None:
+        with self.lock:
+            self.value[agent.slug] = {"credential": marker, "next": sequence}
+            self.save()
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def runtime_payload(agent: RuntimeAgent, board_state_dir: Path, sequence: int, version: str) -> dict[str, Any]:
+    queue: list[dict[str, Any]] = []
+    last_progress_at: str | None = None
+    lock = read_json(board_state_dir / f"{agent.slug}.lock")
+    ticket = str(lock.get("ticket") or "").upper()
+    if TICKET_PATTERN.fullmatch(ticket):
+        started_at = str(lock.get("started_at") or "") or None
+        queue.append({
+            "ticket": ticket,
+            "board_id": int(lock.get("board_id") or agent.board_ids[0]),
+            "state": "running",
+            "reason": "other",
+            "started_at": started_at,
+        })
+        last_progress_at = started_at
+    else:
+        blocked = read_json(board_state_dir / f"{agent.slug}.blocked")
+        blocked_ticket = str(blocked.get("ticket") or "").upper()
+        if TICKET_PATTERN.fullmatch(blocked_ticket) and blocked.get("pr"):
+            state = str(blocked.get("state") or "red")
+            started_at = str(blocked.get("since") or "") or None
+            queue.append({
+                "ticket": blocked_ticket,
+                "board_id": agent.board_ids[0],
+                "state": "waiting",
+                "reason": f"waiting on PR {blocked['pr']} ({state})",
+                "started_at": started_at,
+            })
+            last_progress_at = started_at
+
+    processed: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        lines = (board_state_dir / f"{agent.slug}.log").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+    except OSError:
+        lines = []
+    for line in reversed(lines):
+        if "run done " not in line and "run FAILED " not in line:
+            continue
+        match = TICKET_PATTERN.search(line)
+        if not match:
+            continue
+        ref = match.group(0)
+        if last_progress_at is None:
+            last_progress_at = line.split(" ", 1)[0]
+        if ref not in seen:
+            processed.append({"board_id": agent.board_ids[0], "ticket": ref})
+            seen.add(ref)
+        if len(processed) == 50:
+            break
+
+    return {
+        "worker_id": agent.slug,
+        "sequence": sequence,
+        "runtime": f"agent-board-poll {version}",
+        "model": agent.model,
+        "cadence_seconds": POLL_CADENCE_SECONDS,
+        "source_sections": [
+            {"board_id": board_id, "section": section}
+            for board_id, section in agent.source_sections
+        ],
+        "processed_tickets": processed,
+        "last_progress_at": last_progress_at,
+        "queue": queue,
+    }
+
+
 class HandledState:
     def __init__(self, path: Path):
         self.path = path
@@ -151,10 +353,11 @@ class ApiError(RuntimeError):
     def __init__(self, status: int, detail: str):
         super().__init__(f"HTTP {status}: {detail[:500]}")
         self.status = status
+        self.detail = detail
 
 
 class AgentApi:
-    def __init__(self, agent: Agent):
+    def __init__(self, agent: Agent | RuntimeAgent):
         self.agent = agent
 
     def request(self, method: str, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -177,6 +380,20 @@ class AgentApi:
         if not isinstance(payload, dict) or payload.get("success") is False:
             raise RuntimeError(f"invalid API response: {payload!r}")
         return payload
+
+    def heartbeat(self, body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return self.request("POST", "/mcp/agents/runtime-heartbeat", body)
+        except ApiError as error:
+            if error.status == 409:
+                try:
+                    payload = json.loads(error.detail)
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if isinstance(payload, dict) and payload.get("reset_sequence"):
+                        return payload
+            raise
 
     def pending(self) -> list[dict[str, Any]]:
         payload = self.request("GET", "/mcp/chat/pending")
@@ -267,16 +484,29 @@ def run_provider(agent: Agent, prompt: str, timeout: int = 90) -> str:
 
 
 class ChatDaemon:
-    def __init__(self, config_dir: Path, state_dir: Path, workers: int = 16):
+    def __init__(
+        self,
+        config_dir: Path,
+        state_dir: Path,
+        workers: int = 16,
+        board_state_dir: Path | None = None,
+    ):
         self.config_dir = config_dir
         self.state_dir = state_dir
+        self.board_state_dir = board_state_dir or Path.home() / ".local/state/agent-board-poll"
         self.state = HandledState(state_dir / "handled.jsonl")
+        self.runtime_state = RuntimeState(state_dir / "runtime-sequences.json")
+        self.runtime_status = JsonState(state_dir / "runtime-status.json")
+        try:
+            self.version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
+        except OSError:
+            self.version = "unknown"
         self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="agent-chat")
         self.inflight: set[str] = set()
         self.inflight_lock = threading.Lock()
         self.stop = threading.Event()
 
-    def log(self, agent: Agent, text: str) -> None:
+    def log(self, agent: Agent | RuntimeAgent, text: str) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         line = f"{datetime.now(timezone.utc).isoformat()} {text}\n"
         with (self.state_dir / f"{agent.slug}.log").open("a", encoding="utf-8") as handle:
@@ -294,6 +524,25 @@ class ChatDaemon:
                 self.state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
                 with (self.state_dir / f"{fallback}.log").open("a", encoding="utf-8") as handle:
                     handle.write(f"{datetime.now(timezone.utc).isoformat()} config error: {error}\n")
+        return agents
+
+    def runtime_agents(self) -> list[RuntimeAgent]:
+        agents: list[RuntimeAgent] = []
+        for path in sorted(self.config_dir.glob("*.conf")):
+            try:
+                agent = RuntimeAgent.from_conf(path)
+                if agent:
+                    agents.append(agent)
+            except Exception as error:
+                fallback = RuntimeAgent(
+                    slug=path.stem,
+                    token_file=Path("/missing"),
+                    api_url="",
+                    board_ids=(0,),
+                    source_sections=(),
+                    model="Unreported",
+                )
+                self.log(fallback, f"runtime config error: {type(error).__name__}: {error}")
         return agents
 
     def handle(self, agent: Agent, message: dict[str, Any], api: AgentApi | None = None) -> None:
@@ -337,6 +586,38 @@ class ChatDaemon:
     def _finished(self, message_id: str) -> None:
         with self.inflight_lock:
             self.inflight.discard(message_id)
+
+    def record_runtime_status(self, agent: RuntimeAgent, result: str, detail: str = "") -> None:
+        with self.runtime_status.lock:
+            self.runtime_status.value[agent.slug] = {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "result": result,
+                "detail": detail[:500],
+                "runtime": f"agent-board-poll {self.version}",
+            }
+            self.runtime_status.save()
+
+    def heartbeat_once(self, api_factory: Any = AgentApi) -> None:
+        for agent in self.runtime_agents():
+            try:
+                sequence, marker = self.runtime_state.next_sequence(agent)
+                body = runtime_payload(agent, self.board_state_dir, sequence, self.version)
+                response = api_factory(agent).heartbeat(body)
+                reset_sequence = response.get("reset_sequence")
+                if isinstance(reset_sequence, int) and reset_sequence > 0:
+                    self.runtime_state.reset(agent, marker, reset_sequence)
+                    self.record_runtime_status(agent, "resync", f"next sequence {reset_sequence}")
+                else:
+                    self.record_runtime_status(agent, "ok")
+            except Exception as error:
+                detail = f"{type(error).__name__}: {error}"
+                self.record_runtime_status(agent, "error", detail)
+                self.log(agent, f"runtime heartbeat error: {detail}")
+
+    def heartbeat_loop(self, interval: float = RUNTIME_HEARTBEAT_SECONDS) -> None:
+        while not self.stop.is_set():
+            self.heartbeat_once()
+            self.stop.wait(interval)
 
     def poll_once(self) -> None:
         for agent in self.agents():
@@ -420,20 +701,55 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.send_json(202, "accepted")
 
 
+def show_status(config_dir: Path, state_dir: Path) -> int:
+    status = read_json(state_dir / "runtime-status.json")
+    shown = 0
+    for path in sorted(config_dir.glob("*.conf")):
+        agent = RuntimeAgent.from_conf(path)
+        if not agent:
+            continue
+        row = status.get(agent.slug)
+        row = row if isinstance(row, dict) else {}
+        print(
+            f"{agent.slug}\t{row.get('result', 'never')}\t"
+            f"{row.get('at', 'never')}\t{row.get('runtime', 'agent-board-poll unknown')}"
+        )
+        shown += 1
+    return 0 if shown else 1
+
+
 def main() -> int:
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
-        print("agent-chat: poll and answer Agent Chat for every conf with CHAT=on")
+        print("agent-chat: answer Agent Chat and publish runtime heartbeats for this host")
+        print("usage: agent-chat [--status]")
         return 0
     config_dir = Path(os.environ.get("AGENT_CHAT_CONFIG_DIR", str(Path.home() / ".config/hypertask-agents")))
     state_dir = Path(os.environ.get("AGENT_CHAT_STATE_DIR", str(Path.home() / ".local/state/agent-chat")))
+    if sys.argv[1:] == ["--status"]:
+        return show_status(config_dir, state_dir)
+    if sys.argv[1:]:
+        raise SystemExit(f"unknown option: {sys.argv[1]}")
     interval = float(os.environ.get("AGENT_CHAT_POLL_SECONDS", "3"))
+    heartbeat_interval = float(os.environ.get("AGENT_RUNTIME_HEARTBEAT_SECONDS", str(RUNTIME_HEARTBEAT_SECONDS)))
     if interval <= 0:
         raise SystemExit("AGENT_CHAT_POLL_SECONDS must be greater than zero")
-    daemon = ChatDaemon(config_dir, state_dir)
+    if heartbeat_interval <= 0:
+        raise SystemExit("AGENT_RUNTIME_HEARTBEAT_SECONDS must be greater than zero")
+    board_state_dir = Path(os.environ.get(
+        "AGENT_BOARD_STATE_DIR", str(Path.home() / ".local/state/agent-board-poll")
+    ))
+    daemon = ChatDaemon(config_dir, state_dir, board_state_dir=board_state_dir)
     signal.signal(signal.SIGTERM, lambda *_args: daemon.stop.set())
     signal.signal(signal.SIGINT, lambda *_args: daemon.stop.set())
     port = int(os.environ.get("AGENT_CHAT_WEBHOOK_PORT", "0"))
     server = None
+    heartbeat_thread = threading.Thread(
+        target=daemon.heartbeat_loop,
+        args=(heartbeat_interval,),
+        daemon=True,
+        name="agent-runtime-heartbeat",
+    )
+    heartbeat_thread.start()
     if port:
         server = ThreadingHTTPServer(("127.0.0.1", port), WebhookHandler)
         server.daemon_ref = daemon  # type: ignore[attr-defined]
@@ -441,6 +757,8 @@ def main() -> int:
     try:
         daemon.serve(interval)
     finally:
+        daemon.stop.set()
+        heartbeat_thread.join(timeout=5)
         if server:
             server.shutdown()
     return 0

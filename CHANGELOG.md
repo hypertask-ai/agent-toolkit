@@ -1,3 +1,18 @@
+## 3.20.0 - 2026-09-16
+
+- `agent-chat.service` now publishes each configured agent's runtime snapshot
+  every 30 seconds without coupling failures between agents.
+- Operations receives the runner version and model, board sections, recent
+  completions, an active ticket from `<slug>.lock`, or PR debt from
+  `<slug>.blocked`.
+- `agent-chat --status` reports each agent's last publish result without
+  exposing credentials. Heartbeat queue evals cover running, waiting, and a
+  failed POST that does not stop the next agent.
+- App gaps remain explicit: runtime heartbeat does not update the durable top
+  status timestamp, poll runs have no app-created run ID for activity cards,
+  and the ticket-independent activity route is feature-flag gated.
+- ACTION: run `agent-template update` on each bot host, then use `agent-chat --status` and the per-agent daemon log to verify heartbeat delivery.
+
 ## 3.18.6
 - agent-template-feedback: when auto-merge is refused (no branch protection) wait for green checks and merge, else leave the PR open and continue; the job no longer exits 1 after one ticket. ACTION: none.
 

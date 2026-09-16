@@ -128,13 +128,14 @@ behind Cloudflare and on hosts with no public port.
 
 ## Chat lane
 
-`agent-chat.service` is one always-on process per host. Every three seconds it
-finds each conf with `CHAT="on"`, heartbeats the agent's polling runtime, and
-asks for its newest unanswered message. Each agent runs concurrently with the
-others and with ticket work. It reads conversation history, the company skills
-index first, then the agent's own indexes, and a short brief from the conf and
-the latest `agent-board-poll` log. Chat prompts forbid board writes and
-worktrees.
+`agent-chat.service` is one always-on process per host. Its chat loop finds
+each conf with `CHAT="on"` every three seconds and asks for its newest
+unanswered message. A separate loop publishes runtime state every 30 seconds
+for every valid agent conf, including agents with chat off. Each agent runs
+concurrently with the others and with ticket work. Chat reads conversation
+history, the company skills index first, then the agent's own indexes, and a
+short brief from the conf and latest `agent-board-poll` log. Chat prompts
+forbid board writes and worktrees.
 
 Replies use `CHAT_CLI` from the conf, falling back to `MODEL_CLI`, with a 90-second
 timeout. The MCP reply uses the human message id as its idempotency key, and
@@ -153,6 +154,27 @@ on a host with a real public HTTPS route. Both modes call the same handler.
 Provisioning prints `https://app.hypertask.ai/agents/chat?agent=<slug>`. Send a
 message there with a human account, then quote the timestamped reply from the
 agent log. Never send that test with the owner's CLI token.
+
+## Agent page
+
+`https://app.hypertask.ai/agents/<slug>` shows an Operations health badge, the
+`agent-board-poll <version>` runtime and model, and current work. The second
+loop in `agent-chat.service` feeds that block every 30 seconds with each
+agent's own MCP token. It reads the active ticket and start time from
+`~/.local/state/agent-board-poll/<slug>.lock`, PR waits from `<slug>.blocked`,
+recent completions from `<slug>.log`, and source sections from `board.yml`
+beside the conf. One failed agent POST is logged and does not delay the rest.
+
+A fresh empty queue is `connected`; an active ticket is `working`; PR debt is
+`waiting`; a run with no progress for five minutes is `stalled`; and a missing
+or stale heartbeat is `offline`. Run `agent-chat --status` for each agent's
+last publish result, or read `~/.local/state/agent-chat/<slug>.log` for errors.
+
+The page's separate top word uses the durable `Agent.heartbeatAt`, which the
+runtime-heartbeat app route does not currently update. Recent comments and
+evidence still appear, but poll runs cannot add run activity cards: the app
+creates run IDs only for webhook or chat runs, and its ticket-independent chat
+activity fallback is feature-flag gated.
 
 ## Where the agent runs
 

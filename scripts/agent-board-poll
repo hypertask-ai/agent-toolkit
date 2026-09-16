@@ -491,11 +491,15 @@ ELIGIBLE=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=(); E_REASON=(); E_PR_FIX
 # ---------- one tick at a time ----------
 # The systemd unit is Type=oneshot, so systemd already refuses a second run
 # while one is active. This lock covers hand-runs and any other trigger.
-exec 9>"$LOCK"
+exec 9<>"$LOCK"
 if ! flock -n 9; then
   log "tick skipped: another tick for $SLUG is still running"
   exit 0
 fi
+# Keep the lock inode stable: another hand-run opens this file before flocking,
+# so replacing it would detach the metadata from the lock that protects it.
+: > "$LOCK"
+trap ': > "$LOCK"' EXIT
 
 MENTION="$(adapter_mention_token "$AGENT_ID")"
 # Which skills this tick will read, by version, logged before any ticket is
@@ -516,6 +520,7 @@ PR_GATE=""
 PR_GATE_ACTION=""
 PR_GATE_NUMBER=""
 PR_GATE_STATE=""
+PR_GATE_TICKET=""
 if declare -F adapter_pr_gate >/dev/null 2>&1; then
   PR_GATE="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
               "$SLUG" "$PR_LIVE_CACHE" 2>>"$LOG")" || die \
@@ -526,6 +531,7 @@ if [ -n "$PR_GATE" ]; then
   PR_GATE_ACTION="$(row_field "$PR_GATE" action)"
   PR_GATE_NUMBER="$(row_field "$PR_GATE" number)"
   PR_GATE_STATE="$(row_field "$PR_GATE" state)"
+  PR_GATE_TICKET="$(row_field "$PR_GATE" ticket)"
   prior_since=""
   if [ -r "$BLOCKED" ]; then
     prior_since="$(PR="$PR_GATE_NUMBER" python3 - "$BLOCKED" <<'PYEOF' 2>/dev/null || true
@@ -540,9 +546,10 @@ PYEOF
 )"
   fi
   blocked_since="${prior_since:-$(row_field "$PR_GATE" since)}"
-  PR="$PR_GATE_NUMBER" STATE="$PR_GATE_STATE" SINCE="$blocked_since" python3 -c '
+  PR="$PR_GATE_NUMBER" STATE="$PR_GATE_STATE" SINCE="$blocked_since" TICKET="$PR_GATE_TICKET" python3 -c '
 import json, os
-print(json.dumps({"pr": int(os.environ["PR"]), "state": os.environ["STATE"], "since": os.environ["SINCE"]}))
+print(json.dumps({"pr": int(os.environ["PR"]), "state": os.environ["STATE"],
+                  "since": os.environ["SINCE"], "ticket": os.environ["TICKET"]}))
 ' > "$BLOCKED"
   log "blocked on PR #$PR_GATE_NUMBER: $PR_GATE_STATE (one ticket until live)"
 else
@@ -992,6 +999,12 @@ $PROMPT"
   # comments, and only this run's own posts belong to what gets read back
   # below once it finishes.
   : > "$POSTED"
+  run_started_at="$(date -Is)"
+  REF="$ref" TITLE="$title" BOARD="$board" STARTED_AT="$run_started_at" python3 -c '
+import json, os
+print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
+                  "board_id": int(os.environ["BOARD"]), "started_at": os.environ["STARTED_AT"]}))
+' > "$LOCK"
   if [ "$is_pr_fix" = "yes" ]; then
     log "run start $ref key=$key dir=${RUN_DIR:-.} PR-fix-unlimited: $why"
   else
@@ -1086,6 +1099,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     rm -f "$STATUS"
     log "run done $ref exit=0"
   fi
+  : > "$LOCK"
   # Whether or not this ticket's own run succeeded, a skill edit the agent
   # made along the way is checked and pushed on its own: it lives in the
   # skills repo, not this ticket's worktree, and its fate is not this

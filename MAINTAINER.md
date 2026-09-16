@@ -146,8 +146,8 @@ work is rejected. The agent continues even if a supervisor flags a PR older
 than 24 hours for a human look.
 
 The owner-facing state is one JSON line at
-`~/.local/state/agent-board-poll/<slug>.blocked`, with `pr`, `state`, and
-`since`. The agents page can render that as “waiting on PR n”. The file is
+`~/.local/state/agent-board-poll/<slug>.blocked`, with `pr`, `state`, `since`,
+and `ticket`. The agents page can render that as “waiting on PR n”. The file is
 removed only after all attributed PRs are LIVE. This is the first place to
 look when an agent appears idle while its board still has work.
 
@@ -179,6 +179,23 @@ Check `systemctl --user is-active agent-chat.service`, then read
 `~/.local/state/agent-chat/<slug>.log`. Test through
 `https://app.hypertask.ai/agents/chat?agent=<slug>` with a human account and
 quote the timestamped reply. Do not test with the owner's CLI token.
+
+## Agent page
+
+The same host daemon has a second loop that publishes every valid conf's
+runtime snapshot every 30 seconds, whether chat is on or off. The Operations
+block at `https://app.hypertask.ai/agents/<slug>` then shows runtime, model,
+health, active ticket, or the PR it is waiting on. State comes from the poll
+runner's `<slug>.lock`, `<slug>.blocked`, and `<slug>.log`; board sections come
+from `board.yml` beside the conf. POST errors go to the per-agent daemon log
+and never stop the next agent.
+
+Use `agent-chat --status` to see the last publish result without exposing a
+token. Read `~/.local/state/agent-chat/<slug>.log` when it says `error`.
+`working`, `waiting`, `connected`, `stalled`, and `offline` are the Operations
+health words. The separate top `Running` word remains an app gap because the
+runtime route does not update `Agent.heartbeatAt`. Poll runs also have no app
+run ID for activity cards, and `/api/mcp/chat/activity` is feature-flag gated.
 
 ## Where things live
 
