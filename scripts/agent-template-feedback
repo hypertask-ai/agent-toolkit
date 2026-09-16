@@ -327,7 +327,15 @@ Feedback ticket: $URL
 EOF
   PR_URL="$(git -C "$work" status --short >/dev/null; gh pr create --repo valentinyeo/vstack --base main --head "$branch" --title "Agent template: $REF $TITLE" --body-file "$BODY")"
   rm -f "$BODY"
-  gh pr merge --repo valentinyeo/vstack --auto --squash "$PR_URL"
+  if ! gh pr merge --repo valentinyeo/vstack --auto --squash "$PR_URL" 2>/dev/null; then
+    # No branch protection on the repo: auto-merge is refused. Wait for the
+    # checks (10 min cap) and merge green ourselves; otherwise leave it open.
+    if timeout 600 gh pr checks --repo valentinyeo/vstack --watch --interval 30 "$PR_URL" >/dev/null 2>&1; then
+      gh pr merge --repo valentinyeo/vstack --squash "$PR_URL" || log "merge failed for $PR_URL, left open"
+    else
+      log "checks red or timed out for $PR_URL, left open"
+    fi
+  fi
   "$BOARD_CLI" comment add "$REF" --text "<p><strong>Accepted: a fix pull request is open with auto-merge enabled.</strong></p><p><a href=\"$PR_URL\">$PR_URL</a></p>" >/dev/null
   "$BOARD_CLI" task move "$REF" --section "$ACCEPTED" >/dev/null
   log "accepted $REF: $PR_URL"
