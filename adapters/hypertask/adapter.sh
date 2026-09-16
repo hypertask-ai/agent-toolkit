@@ -669,6 +669,30 @@ print(",".join(ids))')" || {
 }
 
 # ---------- one ticket until live ----------
+# _ht_tasks_with_pr <prs-json> <tasks-jsonl>
+# Prints task rows whose reference appears on an open or merged PR.
+_ht_tasks_with_pr() {
+  python3 - "$1" "$2" <<'PYEOF'
+import json, re, sys
+with open(sys.argv[1]) as handle:
+    prs = json.load(handle)
+haystacks = [
+    " ".join(str(pr.get(key) or "") for key in ("title", "body", "headRefName"))
+    for pr in prs
+    if str(pr.get("state") or "").upper() in ("OPEN", "MERGED")
+]
+with open(sys.argv[2]) as handle:
+    for line in handle:
+        if not line.strip():
+            continue
+        task = json.loads(line)
+        ref = str(task.get("ref") or "")
+        pattern = re.compile(r"(?<![0-9A-Za-z])" + re.escape(ref) + r"(?![0-9A-Za-z])", re.I)
+        if any(pattern.search(haystack) for haystack in haystacks):
+            print(json.dumps(task))
+PYEOF
+}
+
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir>
 # Prints one JSON object for the oldest pull request this agent still owes, or
 # nothing when every attributed pull request is live. Attribution is the
@@ -729,22 +753,15 @@ for task in json.load(sys.stdin).get("tasks") or []:
 
   # Assigned tickets are claims. For ticket references appearing on a possible
   # PR but not currently assigned, use the same evidence as adapter_pick_rank:
-  # this agent authored a comment containing "claim".
-  awk 'NF' "$tmp/tasks.jsonl" | while IFS= read -r rows; do
+  # this agent authored a comment containing "claim". Parse the PR payload once
+  # per tick before examining the matching task rows.
+  if ! _ht_tasks_with_pr "$tmp/prs.json" "$tmp/tasks.jsonl" > "$tmp/tasks-with-pr.jsonl"; then
+    printf 'ERROR: cannot match task references to pull requests in %s\n' "$repo" >&2
+    return 1
+  fi
+  while IFS= read -r rows; do
+    [ -n "$rows" ] || continue
     ref="$(ROW="$rows" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["ref"])')"
-    if ! REFS="$ref" PRS="$(cat "$tmp/prs.json")" python3 -c '
-import json, os, re, sys
-ref = os.environ["REFS"]
-pattern = re.compile(r"(?<![0-9A-Za-z])" + re.escape(ref) + r"(?![0-9A-Za-z])", re.I)
-for pr in json.loads(os.environ["PRS"]):
-    if str(pr.get("state") or "").upper() not in ("OPEN", "MERGED"):
-        continue
-    if pattern.search(" ".join(str(pr.get(k) or "") for k in ("title", "body", "headRefName"))):
-        sys.exit(0)
-sys.exit(1)
-'; then
-      continue
-    fi
     assigned="$(ROW="$rows" python3 -c 'import json,os;print("yes" if json.loads(os.environ["ROW"])["assigned"] else "no")')"
     if [ "$assigned" = "yes" ]; then
       printf '%s\n' "$ref" >> "$tmp/claimed"
@@ -770,7 +787,7 @@ sys.exit(1)
 '; then
       printf '%s\n' "$ref" >> "$tmp/claimed"
     fi
-  done
+  done < "$tmp/tasks-with-pr.jsonl"
   claimed_refs="$(sort -u "$tmp/claimed" 2>/dev/null | paste -sd, - || true)"
 
   CLAIMED="$claimed_refs" PREFIX="$prefix" python3 - "$tmp/prs.json" <<'PYEOF' > "$tmp/candidates.jsonl"

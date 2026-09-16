@@ -1,3 +1,11 @@
+## 3.21.1 - 2026-09-16
+
+- AGTE-2 follow-up: Hypertask PR eligibility matching now reads the pull request
+  payload from disk once per tick instead of copying it into the environment
+  for every task row, avoiding host argument-size limits on large repositories.
+- A 400 KB pull request fixture verifies the expected matches across 50 task rows.
+- ACTION: run `agent-template update` on bot hosts so QA agents resume verifying eligible work.
+
 ## 3.21.0 - 2026-09-16
 
 - Agent ticket, triage, chat, and advisor provider processes now put a
