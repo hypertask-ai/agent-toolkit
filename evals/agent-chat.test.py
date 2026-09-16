@@ -92,9 +92,9 @@ with tempfile.TemporaryDirectory() as temporary:
     print("PASS agent-chat-two-agents-independent")
 
 
-def runtime_conf(root, slug, token, model="runner --model test-model"):
+def runtime_conf(root, slug, token, model="runner --model test-model", board_ids="15"):
     (root / f"{slug}.conf").write_text(
-        f'AGENT_SLUG="{slug}"\nTOKEN_FILE="{token}"\nBOARD_ID="15"\n'
+        f'AGENT_SLUG="{slug}"\nTOKEN_FILE="{token}"\nBOARD_ID="{board_ids}"\n'
         f'WATCH_SECTIONS="Bugs,In Progress"\nMODEL_CLI="{model}"\nCHAT="off"\n'
     )
 
@@ -120,9 +120,10 @@ with tempfile.TemporaryDirectory() as temporary:
     board_state.mkdir()
     token = temporary / "token"
     token.write_text("secret-token")
-    runtime_conf(config, "runner", token)
+    runtime_conf(config, "runner", token, board_ids="15,5156")
     (config / "board.yml").write_text(
-        "project: 15\ncolumns:\n  work:\n    bug: Bugs\n  in-progress: In Progress\n  done: Done\n"
+        "project: 15\nfactory_project: 5156\ncolumns:\n  work:\n    bug: Bugs\n"
+        "  in-progress: In Progress\n  done: Done\n"
     )
     (board_state / "runner.lock").write_text(
         '{"ticket":"HTPR-7000","title":"Live work","board_id":15,'

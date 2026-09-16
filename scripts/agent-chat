@@ -69,6 +69,22 @@ def model_name(command: str) -> str:
     return Path(argv[0]).name if argv else "Unreported"
 
 
+def board_projects(path: Path) -> tuple[int, ...]:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ()
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        key, separator, value = line.partition(":")
+        if separator and key in {"project", "board_id"}:
+            try:
+                return tuple(int(item.strip()) for item in value.strip('"\'').split(",") if item.strip())
+            except ValueError:
+                return ()
+    return ()
+
+
 def board_sections(path: Path, watch_sections: str) -> tuple[str, ...]:
     configured: list[str] = []
     try:
@@ -185,6 +201,9 @@ class RuntimeAgent:
         for board_id in board_ids:
             specific = path.parent / f"board-{board_id}.yml"
             board_file = specific if specific.is_file() else path.parent / "board.yml"
+            described_projects = board_projects(board_file)
+            if not specific.is_file() and described_projects and board_id not in described_projects:
+                continue
             for section in board_sections(board_file, values.get("WATCH_SECTIONS", "")):
                 sections.append((board_id, section))
         return cls(
