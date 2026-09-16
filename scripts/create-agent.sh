@@ -326,7 +326,7 @@ fi
 if [ "$BOARD" != "none" ]; then
   step 2 "install the board CLI wrapper at $BOARD_CLI (reads the token file at call time)"
   if [ "$DRY_RUN" != "yes" ]; then
-    adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" "$DISPLAY_NAME"
+    adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" "$DISPLAY_NAME" "$AGENT_ID" "$BOARD_ID"
   fi
 fi
 

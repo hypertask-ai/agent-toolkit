@@ -238,6 +238,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/owned-reply-trigger.test.sh" ]; then
   echo "-- owned reply trigger behavioural checks --"
   bash "$HERE/owned-reply-trigger.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/comment-loop.test.sh" ]; then
+  echo ""
+  echo "-- comment loop behavioural checks --"
+  bash "$HERE/comment-loop.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/one-ticket-live.test.sh" ]; then
   echo ""
   echo "-- one ticket until live behavioural checks --"

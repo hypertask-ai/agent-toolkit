@@ -290,7 +290,7 @@ echo 'PASS merged but undeployed PR claims no new ticket'
 rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
 deployed_run="$(PR_TEST_SCENARIO=deployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$deployed_run" == *'would pick up HTPR-1'* ]]
-[[ "$deployed_run" == *'skip  HTPR-3: unassigned, but this agent does not claim unassigned tickets'* ]]
+[[ "$deployed_run" == *"skip  HTPR-3: newest comment 0 is by this agent's own identity, so it cannot trigger another run"* ]]
 [[ "$deployed_run" == *'skip  HTPR-4: assigned to another owner and neither assigned nor mentioned to this agent'* ]]
 echo 'PASS deployed PR releases the next ticket and explains every ineligible candidate'
 
@@ -302,8 +302,8 @@ for _ in 1 2 3 4 5 6; do printf 'pr-1 %s cursor-agent failed\n' "$(date +%s)" >>
 rm -rf "$state/pr-live-cache"
 red_run="$(PR_TEST_SCENARIO=red HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$red_run" == *'would pick up HTPR-1'* ]]
-[[ "$red_run" == *'no ticket attempts, cooldown, triage, or escalation'* ]]
-echo 'PASS red PR still runs after many attempts with no cooldown or escalation'
+[[ "$red_run" == *'no ticket attempts, triage, or escalation; ticket cooldown still applies'* ]]
+echo 'PASS red PR ignores failed attempts while retaining the ticket cooldown'
 
 rm -f "$TMP/opened-marker"
 PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency MODEL_OPEN_MARKER="$TMP/opened-marker" \

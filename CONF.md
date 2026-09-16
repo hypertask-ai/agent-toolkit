@@ -53,6 +53,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `MAX_CONCURRENT_RUNS` | Runs started per tick, default 1. |
 | `RETRY_LIMIT` | Total failed attempts allowed per window. By default this is three plus the number of `LADDER` commands. |
 | `RETRY_WINDOW_SECONDS` | Failure window, default 21600. |
+| `RUN_COOLDOWN_SECONDS` | Minimum seconds between runs of one ticket without a new external comment, default 1800. |
 | `TRIAGE` | Whether to score difficulty before pickup. |
 | `TRIAGE_MODEL_CLI` | Optional tie-break scoring command, default `MODEL_CLI`. |
 | `ADVISOR_MAX` | Research calls per run, default 2 when `RESEARCH_CLI` exists. |

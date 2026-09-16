@@ -1,3 +1,16 @@
+## 3.21.5 - 2026-09-16
+
+- Comment candidates now reject the current agent's identity in both owned-reply
+  and mention paths, including QA-returned tickets.
+- A per-ticket run ledger enforces a 30-minute cooldown unless a new human or
+  different-agent comment arrived after the prior run began.
+- The prompt and refreshed board wrapper limit board-owner mentions to one per
+  ticket per 24 hours, with refused repeats recorded only in the runner log.
+- Focused coverage verifies own-comment filtering, cooldown bypass rules, and
+  prompt plus mechanical owner-mention enforcement.
+- ACTION: run `agent-template update` on bot hosts so pollers refresh existing
+  board wrappers and stop self-triggered comment loops.
+
 ## 3.21.4 - 2026-09-16
 
 - The one-ticket-until-live gate now owns a PR by agent branch prefix, current

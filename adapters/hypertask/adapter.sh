@@ -165,6 +165,7 @@ PYEOF
 # agent's own tick log, never on the ticket.
 adapter_install_board_cli() {
   local slug="$1" token_file="$2" dest="$3" agent_name="${4:-}"
+  local agent_id="${5:-}" board_ids="${6:-}"
   mkdir -p "$(dirname "$dest")"
   cat > "$dest" <<EOF
 #!/usr/bin/env bash
@@ -172,8 +173,11 @@ adapter_install_board_cli() {
 set -euo pipefail
 TOKEN_FILE="$token_file"
 AGENT_NAME="$agent_name"
+AGENT_ID="$agent_id"
+BOARD_IDS="$board_ids"
 RUN_LOG="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.log"
 POSTED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.posted-comments"
+OWNER_MENTIONS="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.owner-mentions"
 [ -r "\$TOKEN_FILE" ] || {
   echo "ERROR: cannot read \$TOKEN_FILE. Do this next: capture the agent token into that file" >&2
   exit 1
@@ -188,6 +192,49 @@ _comment_cap_note() {
   printf '%s comment-cap: %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$1" >> "\$RUN_LOG" 2>/dev/null || true
 }
 
+_board_owner_ids() {
+  local ids="" board project owner_id
+  for board in \$(printf '%s' "\$BOARD_IDS" | tr ',' ' '); do
+    project="\$(hypertask --token "\$TOKEN" --json project show "\$board" 2>/dev/null || true)"
+    owner_id="\$(PROJECT="\$project" python3 -c '
+import json, os
+try:
+    doc = json.loads(os.environ["PROJECT"])
+except json.JSONDecodeError:
+    doc = {}
+project = doc.get("project") if isinstance(doc.get("project"), dict) else doc
+print(project.get("ownerId") or (project.get("owner") or {}).get("id") or "")
+')"
+    [ -z "\$owner_id" ] || ids="\${ids}\${ids:+,}\$owner_id"
+  done
+  printf '%s' "\$ids"
+}
+
+# An update has no ticket reference, so it cannot safely spend a per-ticket
+# allowance. Owner mentions must be added in a new comment where the wrapper
+# can identify the ticket and enforce its 24-hour ledger.
+if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "update" ] && [ -n "\${3:-}" ]; then
+  TEXT=""
+  args=("\$@")
+  for ((i = 0; i < \${#args[@]}; i++)); do
+    case "\${args[\$i]}" in
+      --text|--body) TEXT="\${args[\$((i + 1))]:-}" ;;
+    esac
+  done
+  if [ -n "\$TEXT" ]; then
+    OWNER_IDS="\$(_board_owner_ids)"
+    if TEXT="\$TEXT" OWNER_IDS="\$OWNER_IDS" python3 -c '
+import os, re, sys
+mentions = set(re.findall(r"data-label\s*=\s*[^>]*?name-([A-Za-z0-9_-]+)", os.environ["TEXT"], re.I))
+owners = {value for value in os.environ["OWNER_IDS"].split(",") if value}
+sys.exit(0 if (mentions & owners) or (mentions and not owners) else 1)
+'; then
+      _comment_cap_note "owner-mention budget: comment update refused because an owner mention must use a ticket-addressed comment add"
+      exit 0
+    fi
+  fi
+fi
+
 if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
   REF="\$3"
   TEXT=""
@@ -198,9 +245,16 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
     esac
   done
   if [ -n "\$TEXT" ]; then
+    mkdir -p "\$(dirname "\$OWNER_MENTIONS")" 2>/dev/null || true
+    touch "\$OWNER_MENTIONS"
+    exec 9>>"\$OWNER_MENTIONS.lock"
+    flock 9
+    OWNER_IDS="\$(_board_owner_ids)"
     EXISTING="\$(hypertask --token "\$TOKEN" --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
-    VERDICT="\$(EXISTING="\$EXISTING" NEW_TEXT="\$TEXT" AGENT_NAME="\$AGENT_NAME" python3 -c '
-import json, os, re
+    VERDICT="\$(EXISTING="\$EXISTING" NEW_TEXT="\$TEXT" AGENT_NAME="\$AGENT_NAME" \
+      AGENT_ID="\$AGENT_ID" OWNER_IDS="\$OWNER_IDS" REF="\$REF" \
+      OWNER_MENTIONS="\$OWNER_MENTIONS" NOW="\$(date +%s)" python3 -c '
+import datetime, json, os, re
 
 def first_line(html):
     # The bold lead, not the whole comment: "Nothing from you." said three
@@ -222,28 +276,73 @@ def author_of(c):
         return str(who.get("displayName") or who.get("name") or "")
     return str(who)
 
+def is_mine(c):
+    agent = c.get("agent") if isinstance(c.get("agent"), dict) else {}
+    agent_id = str(agent.get("id") or "")
+    return (agent_id and agent_id == os.environ["AGENT_ID"]) or (
+        not agent_id and author_of(c).strip().casefold() == agent_name)
+
+def mention_ids(text):
+    return set(re.findall(r"data-label\s*=\s*[^>]*?name-([A-Za-z0-9_-]+)", text, re.I))
+
+def created_epoch(c):
+    value = str(c.get("createdAt") or "")
+    try:
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0
+
 try:
     comments = json.loads(os.environ["EXISTING"]).get("comments") or []
 except json.JSONDecodeError:
     comments = []
 agent_name = os.environ["AGENT_NAME"].strip().casefold()
-new_first = first_line(os.environ["NEW_TEXT"])
+owner_ids = {value for value in os.environ["OWNER_IDS"].split(",") if value}
+new_text = os.environ["NEW_TEXT"]
+new_mentions = mention_ids(new_text)
+new_owner_mention = bool(new_mentions & owner_ids)
+now = int(os.environ["NOW"])
 
 mine = []
+recent_owner_mention = False
 for c in comments:
-    if agent_name and author_of(c).strip().casefold() != agent_name:
+    if not is_mine(c):
         continue
     text = c.get("text") or c.get("commentText") or c.get("comment") or c.get("html") or ""
     mine.append(first_line(text))
+    if now - created_epoch(c) < 86400 and mention_ids(text) & owner_ids:
+        recent_owner_mention = True
 
-if new_first and new_first in mine:
+try:
+    with open(os.environ["OWNER_MENTIONS"], encoding="utf-8") as handle:
+        for line in handle:
+            ref, at = (line.rstrip("\n").split("\t") + ["", ""])[:2]
+            if ref == os.environ["REF"] and now - int(at) < 86400:
+                recent_owner_mention = True
+except (OSError, ValueError):
+    pass
+
+new_first = first_line(new_text)
+if new_mentions and not owner_ids:
+    print("OWNER_UNKNOWN")
+elif new_owner_mention and recent_owner_mention:
+    print("OWNER")
+elif new_first and new_first in mine:
     print("DUP")
 elif len(mine) >= 3:
     print("CAP")
+elif new_owner_mention:
+    print("OK_OWNER")
 else:
     print("OK")
 ')"
     case "\$VERDICT" in
+      OWNER)
+        _comment_cap_note "owner-mention budget: comment add refused on \$REF because this agent already @mentioned the board owner in the last 24 hours"
+        exit 0 ;;
+      OWNER_UNKNOWN)
+        _comment_cap_note "owner-mention budget: comment add refused on \$REF because the board owner could not be verified"
+        exit 0 ;;
       DUP)
         _comment_cap_note "comment add refused on \$REF: this agent already has a comment starting the same way, not posting it again"
         exit 0 ;;
@@ -265,8 +364,22 @@ else:
     fi
     printf '%s\n' "\$OUT"
     if [ "\$RC" -eq 0 ]; then
+      if [ "\$VERDICT" = "OK_OWNER" ]; then
+        REF="\$REF" AT="\$(date +%s)" python3 - "\$OWNER_MENTIONS" <<'PYEOF'
+import os, sys
+path = sys.argv[1]
+ref = os.environ["REF"]
+with open(path, encoding="utf-8") as handle:
+    rows = [line for line in handle if line.split("\t", 1)[0] != ref]
+rows.append("%s\t%s\n" % (ref, os.environ["AT"]))
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    handle.writelines(rows)
+os.replace(temporary, path)
+PYEOF
+      fi
       LISTED="\$(hypertask --token "\$TOKEN" --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
-      NEWID="\$(LISTED="\$LISTED" AGENT_NAME="\$AGENT_NAME" python3 -c '
+      NEWID="\$(LISTED="\$LISTED" AGENT_NAME="\$AGENT_NAME" AGENT_ID="\$AGENT_ID" python3 -c '
 import json, os
 
 def author_of(c):
@@ -280,7 +393,12 @@ try:
 except json.JSONDecodeError:
     comments = []
 agent_name = os.environ["AGENT_NAME"].strip().casefold()
-mine = [c for c in comments if not agent_name or author_of(c).strip().casefold() == agent_name]
+agent_id = os.environ["AGENT_ID"]
+def is_mine(c):
+    agent = c.get("agent") if isinstance(c.get("agent"), dict) else {}
+    found = str(agent.get("id") or "")
+    return (found and found == agent_id) or (not found and author_of(c).strip().casefold() == agent_name)
+mine = [c for c in comments if is_mine(c)]
 if mine:
     best = max(mine, key=lambda c: c.get("id") or 0)
     print(best.get("id") or "")
@@ -403,8 +521,8 @@ print(json.dumps({
 # _ht_owned_row <token-file> <task-id> <row-json> <board-id> <agent-id>
 # Given a candidate row (already known to be assigned to this agent, or to
 # have at least one comment) and its task id, prints the same row with
-# "trigger": "new_comment" added when its newest comment is a human's and
-# this agent owns the ticket, or nothing at all. One comments read.
+# "trigger": "new_comment" added when its newest comment is a human's or
+# another agent's and this agent owns the ticket, or nothing at all. One read.
 #
 # Ownership here is assigned, or having posted the most recent agent comment
 # before this one: the "claimed by a comment, never assigned" case a plain
@@ -424,9 +542,10 @@ if not comments:
     sys.exit(0)
 comments.sort(key=lambda c: (c.get("createdAt") or "", c.get("id") or 0))
 newest = comments[-1]
-# A comment posted by any agent, this one or another, is not new work for a
-# human-reply trigger: the thread already has the last word from an agent.
-if isinstance(newest.get("agent"), dict):
+# This agent cannot wake itself. A human or a different agent can provide new
+# instruction and therefore may bypass the per-ticket cooldown in core.
+newest_agent = newest.get("agent") if isinstance(newest.get("agent"), dict) else {}
+if str(newest_agent.get("id") or "") == aid:
     sys.exit(0)
 assigned = aid in (row.get("agent_ids") or [])
 last_agent = None
@@ -459,7 +578,7 @@ print(json.dumps(row))
 # Optional: core calls this only if it is defined (declare -F), the same way
 # it calls adapter_pick_rank. Prints one row per ticket, same shape as
 # adapter_list_candidates plus "trigger": "new_comment", for every ticket this
-# agent owns whose newest comment is a human's -- in any section, not only
+# agent owns whose newest comment is external -- in any section, not only
 # WATCH_SECTIONS, because a ticket this agent claimed can move to a review
 # column the poll never watches, and a reply there would otherwise be
 # invisible. Bounded by OWNED_COMMENT_READ_CAP (default 40) comments reads

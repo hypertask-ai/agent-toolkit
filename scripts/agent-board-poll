@@ -94,6 +94,7 @@ LADDER_AFTER_FAILURES=3
 LADDER_COUNT="$(core_ladder_count "$LADDER")"
 RETRY_LIMIT="${RETRY_LIMIT:-$((LADDER_AFTER_FAILURES + LADDER_COUNT))}"
 RETRY_WINDOW_SECONDS="${RETRY_WINDOW_SECONDS:-21600}"
+RUN_COOLDOWN_SECONDS="${RUN_COOLDOWN_SECONDS:-1800}"
 # How hard is this ticket, decided before the run starts, so a hard one gets a
 # stronger model and is made to plan first instead of being discovered halfway
 # through on the cheap model. Only an agent that BUILDS is scored: a QA agent
@@ -164,8 +165,6 @@ SKILLS_INDEX_SENTENCE="$SKILLS_INDEX_SENTENCE (in that order, the company pack f
 # adapter reaches for. That has always been the company pack.
 SKILLS_INDEX_PRIMARY="$COMPANY_SKILLS_DIR/INDEX.md"
 core_require_abs "$TOKEN_FILE" "TOKEN_FILE"
-[ -x "$BOARD_CLI" ] || die "the board CLI $BOARD_CLI is missing or not executable" \
-  "re-run create-agent.sh --resume for this agent to reinstall its board wrapper"
 if [ -n "${PROMPT_FILE:-}" ]; then
   core_require_abs "$PROMPT_FILE" "PROMPT_FILE"
   [ -f "$PROMPT_FILE" ] || die "PROMPT_FILE $PROMPT_FILE does not exist" \
@@ -174,6 +173,13 @@ fi
 
 core_load_adapter "$BOARD_ADAPTER"
 adapter_require_tools
+if [ "$BOARD_ADAPTER" = "hypertask" ]; then
+  # Refresh old wrappers too. Template updates replace this runner, but agent
+  # wrappers live outside the template and otherwise keep stale write guards.
+  adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" "$AGENT_NAME" "$AGENT_ID" "$BOARD_ID"
+fi
+[ -x "$BOARD_CLI" ] || die "the board CLI $BOARD_CLI is missing or not executable" \
+  "re-run create-agent.sh --resume for this agent to reinstall its board wrapper"
 
 CORE_STATE_NAME="agent-board-poll"
 STATE_DIR="$(core_state_dir)"
@@ -192,6 +198,9 @@ SEEN="$STATE_DIR/$SLUG.seen"
 # tick as if it were someone else's: the state key is the newest comment id,
 # which becomes this agent's own reply's id the moment the run finishes.
 POSTED="$STATE_DIR/$SLUG.posted-comments"
+# One current row per ticket: <ticket-ref> <run-start-epoch> <trigger-comment-id>.
+# A run start, including a failed one, spends the ticket's 30-minute slot.
+RUNS="$STATE_DIR/$SLUG.ticket-runs"
 LOCK="$STATE_DIR/$SLUG.lock"
 # The agents feed can read this one-line JSON reason directly. It remains while
 # a pull request blocks pickup and disappears only after every owed PR is LIVE.
@@ -221,7 +230,31 @@ TRIAGE_STATE_DIR="${TRIAGE_STATE_DIR:-$STATE_DIR/triage}"
 # about this ticket, and the count of how many it has already answered.
 ADVISOR_DIR="${ADVISOR_DIR:-$STATE_DIR/advisor}"
 TRIAGE_SH="$CORE_ROOT/scripts/triage.sh"
-touch "$SEEN" "$ATTEMPTS" "$POSTED" "$OPENED_PRS"
+touch "$SEEN" "$ATTEMPTS" "$POSTED" "$OPENED_PRS" "$RUNS"
+
+# ticket_run_state <ticket-ref>: newest "<epoch> <comment-id>" row, if any.
+ticket_run_state() {
+  awk -F '\t' -v task="$1" '$1 == task { at=$2; comment=$3 } END { if (at) print at, comment }' "$RUNS"
+}
+
+# record_ticket_run <ticket-ref> <epoch> <comment-id>: atomically replace its row.
+record_ticket_run() {
+  TASK="$1" AT="$2" COMMENT_ID="$3" python3 - "$RUNS" <<'PYEOF'
+import os, sys
+path = sys.argv[1]
+task = os.environ["TASK"]
+rows = []
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        if line.split("\t", 1)[0] != task:
+            rows.append(line)
+rows.append("%s\t%s\t%s\n" % (task, os.environ["AT"], os.environ["COMMENT_ID"]))
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    handle.writelines(rows)
+os.replace(temporary, path)
+PYEOF
+}
 
 # attempts_recent <task-id> : failures in the current window.
 attempts_recent() {
@@ -613,8 +646,8 @@ for key in order:
 ')"
 fi
 # A red owed PR is represented as a candidate so it uses the normal isolated
-# workdir and model launch. It is never a board claim and never enters the
-# ticket retry/cooldown ladder.
+# workdir and model launch. It is never a board claim or part of the failure
+# retry ladder, but it shares the per-ticket run cooldown.
 if [ "$PR_GATE_ACTION" = "fix" ]; then
   pr_row="$(GATE="$PR_GATE" AID="$AGENT_ID" BOARD="${BOARD_ID%%,*}" python3 -c '
 import json, os
@@ -682,6 +715,7 @@ print("yes" if json.loads(os.environ["ROW"]).get("assignee_count", 1) == 0 else 
   # agent, and the state key, so a reply on an old ticket counts as new work.
   comment_id=0
   comment_text=""
+  comment_is_own="no"
   mentioned="no"
   if [ "$is_pr_fix" = "yes" ]; then
     comment_json=""
@@ -695,7 +729,15 @@ print("yes" if json.loads(os.environ["ROW"]).get("assignee_count", 1) == 0 else 
 import html, json, os, re
 doc = json.loads(os.environ["CJ"])
 print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:1200])')"
-    if CJ="$comment_json" M="$MENTION" python3 -c '
+    if CJ="$comment_json" AID="$AGENT_ID" NAME="$AGENT_NAME" python3 -c '
+import json, os, sys
+doc = json.loads(os.environ["CJ"])
+agent_id = str(doc.get("agent_id") or "")
+author = str(doc.get("author") or "").strip().casefold()
+own = agent_id == os.environ["AID"] or (not agent_id and author == os.environ["NAME"].strip().casefold())
+sys.exit(0 if own else 1)'; then
+      comment_is_own="yes"
+    elif CJ="$comment_json" M="$MENTION" python3 -c '
 import json, os, sys
 sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or "") else 1)'; then
       mentioned="yes"
@@ -715,6 +757,12 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
     reason="unclaimed"
   fi
   if [ -n "$trigger" ]; then reason="${reason:+$reason+}$trigger"; fi
+  # An agent-authored comment is never a wake-up from that same agent, even
+  # when an old assignment or QA state would otherwise give the ticket a rank.
+  if [ "$comment_is_own" = "yes" ]; then
+    explain "skip  $ref: newest comment $comment_id is by this agent's own identity, so it cannot trigger another run"
+    continue
+  fi
   if [ -z "$reason" ]; then
     # Nothing about this ticket made it eligible for this agent (not
     # assigned, not mentioned, and either claimed already or this agent does
@@ -769,25 +817,25 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
     *,urgent,*) rank=-1; why="$why (urgent: ranks above this agent's own unfinished work)" ;;
   esac
 
-  # This agent's own comment is not new work. Without this an agent that
-  # finishes and leaves the ticket in a watched column picks it straight back
-  # up on the next tick, because its own reply changed the state key. A ticket
-  # it still owes (rank 1) or that QA sent back (rank 2) is the exception, and
-  # so is an @mention: both are somebody asking for another pass.
-  if [ "$reason" = "assigned" ] && [ "$rank" = "3" ] && [ -n "$comment_json" ]; then
-    if CJ="$comment_json" NAME="$AGENT_NAME" python3 -c '
-import json, os, sys
-author = (json.loads(os.environ["CJ"]).get("author") or "").strip().casefold()
-sys.exit(0 if author and author == os.environ["NAME"].strip().casefold() else 1)'; then
-      explain "skip  $ref: the newest comment is this agent's own, so there is nothing new to answer"
-      continue
-    fi
-  fi
-
   key="$task_id:$comment_id"
   if [ "$is_pr_fix" = "no" ] && grep -qxF "$key" "$SEEN"; then
     explain "skip  $ref: already handled at this point in its history ($key)"
     continue
+  fi
+
+  last_run="$(ticket_run_state "$ref")"
+  if [ -n "$last_run" ]; then
+    read -r last_run_at last_run_comment <<< "$last_run"
+    now="$(date +%s)"
+    age=$((now - last_run_at))
+    fresh_external="no"
+    if [ "$comment_id" != "0" ] && [ "$comment_id" != "${last_run_comment:-0}" ]; then
+      fresh_external="yes"
+    fi
+    if [ "$age" -lt "$RUN_COOLDOWN_SECONDS" ] && [ "$fresh_external" = "no" ]; then
+      explain "skip  $ref: last run was ${age}s ago; no new human or other-agent comment bypasses the ${RUN_COOLDOWN_SECONDS}s ticket cooldown"
+      continue
+    fi
   fi
 
   tries=0
@@ -844,7 +892,7 @@ if [ "$DRY_RUN" = "yes" ]; then
     # for an answer about tickets this tick was never going to touch, and the
     # board's host starts answering with a bot challenge.
     if [ "${E_PR_FIX[$i]}" = "yes" ]; then
-      echo "    pull-request fix: no ticket attempts, cooldown, triage, or escalation"
+      echo "    pull-request fix: no ticket attempts, triage, or escalation; ticket cooldown still applies"
     elif [ "$TRIAGE" = "yes" ] && [ "$shown" -le "$MAX_CONCURRENT_RUNS" ]; then
       row_board="$(row_field "$row" board)"; [ -n "$row_board" ] || row_board="${BOARD_ID%%,*}"
       triage_verdict="$(triage_score "$(row_field "$row" ref)" "$(row_field "$row" id)" \
@@ -1007,6 +1055,10 @@ post a fourth comment to say the plan is done.
 $PROMPT"
   fi
 
+  PROMPT="$PROMPT
+
+OWNER-MENTION BUDGET: You may @mention the board owner at most once on this ticket in any 24-hour period. Before mentioning the owner, read the recent ticket comments. If this agent already mentioned the owner in the last 24 hours, write the update without that mention and do not try the mention again. The board wrapper enforces this limit mechanically and logs a refused second mention outside the ticket."
+
   RUN_DIR="${AGENT_REPO:-}"
   if [ "$WORKDIR_MODE" = "per-run" ]; then
     RUN_DIR="$(core_workdir_create "${AGENT_REPO:-}" "$WORKDIR_ROOT" "$SLUG-$ref" 2>>"$LOG")" || {
@@ -1024,6 +1076,8 @@ $PROMPT"
   # comments, and only this run's own posts belong to what gets read back
   # below once it finishes.
   : > "$POSTED"
+  run_started_epoch="$(date +%s)"
+  record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
   run_started_at="$(date -Is)"
   REF="$ref" TITLE="$title" BOARD="$board" STARTED_AT="$run_started_at" python3 -c '
 import json, os
@@ -1119,7 +1173,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     detail="$(tail -c 2000 "$ERRFILE" 2>/dev/null)"
     write_failure_status "$ref" "$rc" "$detail"
     if [ "$is_pr_fix" = "yes" ]; then
-      printf 'ERROR: the PR-fix run for %s exited %s. Do this next: read %s; the next tick retries this PR with no limit or cooldown\n' \
+      printf 'ERROR: the PR-fix run for %s exited %s. Do this next: read %s; this PR has no attempt limit and retries after the ticket cooldown\n' \
         "$ref" "$rc" "$LOG" >&2
     else
       printf 'ERROR: the run for %s exited %s. Do this next: read %s, fix the cause; it has %s of %s attempts left in this window\n' \

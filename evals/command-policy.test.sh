@@ -153,7 +153,7 @@ else
   bad override-full-command "launch=$(cat "$capture" 2>/dev/null || true)"
 fi
 
-# A failed mention writes host status only and remains eligible next tick.
+# A failed mention writes host status only but still spends the ticket cooldown.
 state="$TMP/state-failure"; capture="$TMP/capture-failure"; board_capture="$TMP/board-failure"
 write_board TEST-4
 write_conf "$state"
@@ -169,10 +169,11 @@ if [ -f "$status_file" ] \
    && python3 -c 'import json,sys; row=json.load(open(sys.argv[1])); assert row["state"] == "failed" and row["ticket"] == "TEST-4"' "$status_file" \
    && ! grep -q 'comment add' "$board_capture" 2>/dev/null \
    && ! grep -q '^task-TEST-4:99$' "$state/agent-board-poll/test.seen" \
-   && grep -q 'would pick up TEST-4' "$TMP/failure-next.out"; then
-  ok failed-mention-remains-eligible "failure posts nothing and the next tick still sees the mention"
+   && grep -q 'no new human or other-agent comment bypasses the 1800s ticket cooldown' "$TMP/failure-next.out" \
+   && ! grep -q 'would pick up TEST-4' "$TMP/failure-next.out"; then
+  ok failed-mention-obeys-cooldown "failure posts nothing and cannot rerun the same mention for 30 minutes"
 else
-  bad failed-mention-remains-eligible "status=$(cat "$status_file" 2>/dev/null || true) board=$(cat "$board_capture" 2>/dev/null || true) next=$(cat "$TMP/failure-next.out")"
+  bad failed-mention-obeys-cooldown "status=$(cat "$status_file" 2>/dev/null || true) board=$(cat "$board_capture" 2>/dev/null || true) next=$(cat "$TMP/failure-next.out")"
 fi
 
 # Migration preserves the old cursor policy and leaves a custom pi conf alone.
