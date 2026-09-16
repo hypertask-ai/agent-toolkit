@@ -414,10 +414,10 @@ print(json.dumps({
 _ht_owned_row() {
   local token_file="$1" task_id="$2" row="$3" board_id="$4" agent_id="$5" comments
   comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}" 2>/dev/null)" || return 0
-  ROW="$row" CJ="$comments" AID="$agent_id" python3 -c '
+  if ! printf '%s\n%s' "$row" "$comments" | AID="$agent_id" python3 -c '
 import json, os, sys
-row = json.loads(os.environ["ROW"])
-doc = json.loads(os.environ["CJ"])
+row = json.loads(sys.stdin.readline())
+doc = json.load(sys.stdin)
 aid = os.environ["AID"]
 comments = doc.get("comments") or []
 if not comments:
@@ -440,7 +440,10 @@ if not (assigned or claimed):
     sys.exit(0)
 row["trigger"] = "new_comment"
 print(json.dumps(row))
-'
+'; then
+    echo "ERROR: could not inspect comments for task $task_id; its owned-reply wake check failed" >&2
+    return 1
+  fi
 }
 
 # adapter_new_comments_on_owned <token-file> <board-id> <agent-id> <agent-name>

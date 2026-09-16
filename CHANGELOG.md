@@ -5,6 +5,13 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.18.1 - 2026-09-16
+
+- AGTE-2: owned-ticket reply checks now stream ticket and comment JSON to
+  Python, so large comment threads cannot exceed the process argument limit.
+- A parsing failure now writes an explicit `ERROR:` line instead of silently
+  skipping that ticket's wake check.
+
 ## 3.18.0 - 2026-09-16
 
 - Feedback uses one documented `--kind/--what/--got/--expected` interface, and
