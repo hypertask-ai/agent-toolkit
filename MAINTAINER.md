@@ -125,11 +125,16 @@ pr-hygiene check merges a green PR that could not get auto-merge.
 
 ## One ticket until live
 
-Before any normal pickup, the runner lists every open PR whose branch starts
-with `PR_BRANCH_PREFIX` (default `agent/<slug>-`) and every PR that names a
-ticket assigned to or claimed by this agent. If one is not LIVE, the oldest is
-the agent's only work. An `emergency` ticket may interrupt it; an `urgent`
-ticket may not.
+Before any normal pickup, the runner lists PRs authored by this agent. A PR is
+authored when its branch starts with this agent's `PR_BRANCH_PREFIX` (default
+`agent/<slug>-`), or its author matches this agent's optional `GITHUB_LOGIN`.
+Ticket assignments, claims, and comments never transfer PR ownership. If an
+authored PR is not LIVE, the oldest is the agent's only work. An `emergency`
+ticket may interrupt it; an `urgent` ticket may not.
+
+An open PR that matches no living agent conf is ignored by every gate. Once per
+UTC day, a tick logs `orphaned PR #<n> (<branch>) has no owning agent` so the
+supervisor can decide who should take it.
 
 LIVE means all of the following:
 
@@ -156,7 +161,7 @@ than 24 hours for a human look.
 The owner-facing state is one JSON line at
 `~/.local/state/agent-board-poll/<slug>.blocked`, with `pr`, `state`, `since`,
 and `ticket`. The agents page can render that as “waiting on PR n”. The file is
-removed only after all attributed PRs are LIVE. This is the first place to
+removed only after all authored PRs are LIVE. This is the first place to
 look when an agent appears idle while its board still has work.
 
 ## What wakes it

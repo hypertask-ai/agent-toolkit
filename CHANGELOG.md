@@ -1,3 +1,15 @@
+## 3.21.2 - 2026-09-16
+
+- The one-ticket-until-live gate now assigns PR debt only by the agent's
+  configured branch prefix or optional GitHub login. Ticket claims,
+  assignments, and comments no longer transfer PR ownership.
+- Open PRs with no matching living agent conf block nobody and produce one
+  orphan warning per UTC day for supervisor follow-up.
+- Focused coverage verifies QA claim isolation, authored dev debt, configured
+  GitHub and custom-prefix ownership, and once-daily orphan reporting.
+- ACTION: run `agent-template update` on bot hosts so QA and retired-agent PRs
+  use the corrected gate scope.
+
 ## 3.21.1 - 2026-09-16
 
 - AGTE-2 follow-up: Hypertask PR eligibility matching now reads the pull request

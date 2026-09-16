@@ -15,36 +15,6 @@ bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
 COMMENTS="$TMP/comments.json"
 _ht_get() { cat "$COMMENTS"; }
 
-PRS="$TMP/prs.json"
-TASKS="$TMP/tasks.jsonl"
-python3 - "$PRS" "$TASKS" <<'PYEOF'
-import json, sys
-prs = []
-with open(sys.argv[2], "w", encoding="utf-8") as tasks:
-    for number in range(1, 51):
-        ref = "LOAD-%d" % number
-        body = "x" * 8_200
-        if number <= 48:
-            body += " " + ref
-        prs.append({"number": number, "state": "OPEN", "title": "Load test", "body": body,
-                    "headRefName": "work-%d" % number})
-        tasks.write(json.dumps({"id": "task-%d" % number, "ref": ref, "board": "1",
-                                "assigned": True}) + "\n")
-with open(sys.argv[1], "w", encoding="utf-8") as handle:
-    json.dump(prs, handle)
-PYEOF
-set +e
-output="$(_ht_tasks_with_pr "$PRS" "$TASKS" 2>"$TMP/prs.err")"
-status=$?
-set -e
-refs="$(printf '%s\n' "$output" | python3 -c 'import json,sys; print(" ".join(json.loads(line)["ref"] for line in sys.stdin if line.strip()))')"
-expected="$(python3 -c 'print(" ".join("LOAD-%d" % number for number in range(1, 49)))')"
-if [ "$status" -eq 0 ] && [ "$(wc -c < "$PRS")" -ge 400000 ] && [ "$refs" = "$expected" ]; then
-  ok eligibility-large-prs-json 'a 400 KB PR list is loaded once and matches 50 task rows'
-else
-  bad eligibility-large-prs-json "status=$status refs=$refs error=$(cat "$TMP/prs.err")"
-fi
-
 python3 - "$COMMENTS" <<'PYEOF'
 import json, sys
 with open(sys.argv[1], "w", encoding="utf-8") as handle:

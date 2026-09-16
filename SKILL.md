@@ -247,9 +247,8 @@ our own message rather than "command not found" three layers down.
 
 1. Read the agent's conf and load its adapter.
 2. Take a non-blocking lock; if a tick is already running, exit.
-3. List every open PR with the agent's branch prefix, plus PRs that name a
-   ticket this agent claimed, and stop normal pickup on the oldest one that is
-   not LIVE.
+3. List PRs authored through the agent's configured branch prefix or GitHub
+   login, and stop normal pickup on the oldest one that is not LIVE.
 4. List the board's tickets in the watched columns.
 5. Keep the ones **assigned to this agent id**, or whose **newest comment
    @mentions it**.
@@ -264,11 +263,16 @@ our own message rather than "command not found" three layers down.
 
 ## One ticket until live
 
-An agent that has an attributed PR which is not LIVE does not claim another
-normal ticket. Attribution means the PR branch starts with `PR_BRANCH_PREFIX`
-(default `agent/<slug>-`), or its title, body, ticket link, or branch names a
-ticket assigned to or claimed by that agent. Multiple debts are handled oldest
-first. The `emergency` label is the only interrupt; `urgent` is not.
+An agent that has an authored PR which is not LIVE does not claim another
+normal ticket. Authorship means the PR branch starts with that agent's
+`PR_BRANCH_PREFIX` (default `agent/<slug>-`), or the PR author matches its
+optional `GITHUB_LOGIN`. Ticket assignments, claims, and comments do not create
+ownership. Multiple debts are handled oldest first. The `emergency` label is
+the only interrupt; `urgent` is not.
+
+An open PR that matches no living agent conf blocks nobody. The first tick each
+UTC day logs `orphaned PR #<n> (<branch>) has no owning agent` for supervisor
+follow-up.
 
 **LIVE has one exact definition:** the PR is merged, its merge commit is
 contained in its base branch, and the newest GitHub deployment for that base in
@@ -439,7 +443,8 @@ See `CONF.md` for the complete schema.
 | `RETRY_WINDOW_SECONDS` | length of that pre-PR window, default 21600 (six hours); never used for an owed PR |
 | `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
 | `PR_REPO` | **required.** the repository whose pull requests say whether a ticket is finished; `agent-board-poll` refuses to tick without it. Set it with `create-agent.sh --resume --pr-repo <org/name>` |
-| `PR_BRANCH_PREFIX` | branch prefix that attributes a PR to this agent, default `agent/<slug>-` |
+| `PR_BRANCH_PREFIX` | branch prefix that proves this agent authored a PR, default `agent/<slug>-` |
+| `GITHUB_LOGIN` | optional GitHub login that proves this agent authored a PR when the branch prefix differs |
 | `TRIAGE` | `yes` to score a ticket before pickup; defaults to `yes` for `AGENT_KIND=dev` and `no` for everything else |
 | `TRIAGE_MODEL_CLI` | optional command that breaks a tie the rules could not; default `MODEL_CLI` |
 | `ADVISOR_MAX` | `agent-advisor` calls allowed per run, default 2 |

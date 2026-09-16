@@ -32,14 +32,26 @@ if [ "$1 $2" = "pr list" ]; then
     cat <<JSON
 [{"number":9,"state":"OPEN","url":"https://github.test/pull/9","title":"HTPR-9 old","body":"","headRefName":"agent/dev-1-htpr-9","createdAt":"2026-01-01T00:00:00Z"},{"number":10,"state":"OPEN","url":"https://github.test/pull/10","title":"HTPR-10 new","body":"","headRefName":"agent/dev-1-htpr-10","createdAt":"2026-01-02T00:00:00Z"}]
 JSON
-  elif [ "$scenario" = "claimed-body" ]; then
+  elif [ "$scenario" = "qa-claim" ]; then
     cat <<JSON
-[{"number":3,"state":"OPEN","url":"https://github.test/pull/3","title":"A fix","body":"Ticket HTPR-3","headRefName":"someone/else","createdAt":"2026-01-01T00:00:00Z"}]
+[{"number":3,"state":"OPEN","url":"https://github.test/pull/3","title":"HTPR-3 fix","body":"","headRefName":"agent/dev-1-htpr-3","author":{"login":"dev-one"},"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+  elif [ "$scenario" = "orphan" ]; then
+    cat <<JSON
+[{"number":4,"state":"OPEN","url":"https://github.test/pull/4","title":"HTPR-4 fix","body":"","headRefName":"agent/retired-dev-htpr-4","author":{"login":"retired-dev"},"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+  elif [ "$scenario" = "author-owned" ]; then
+    cat <<JSON
+[{"number":5,"state":"OPEN","url":"https://github.test/pull/5","title":"HTPR-5 fix","body":"","headRefName":"contributor/fix-5","author":{"login":"dev-one"},"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+  elif [ "$scenario" = "custom-prefix" ]; then
+    cat <<JSON
+[{"number":6,"state":"OPEN","url":"https://github.test/pull/6","title":"HTPR-6 fix","body":"","headRefName":"cursor-dev-2/htpr-6","author":{"login":"shared-bot"},"createdAt":"2026-01-01T00:00:00Z"}]
 JSON
   else
     state="OPEN"; [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ] || state="OPEN"
     if [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ]; then state="MERGED"; fi
-    printf '[{"number":1,"state":"%s","url":"https://github.test/pull/1","title":"HTPR-1 fix","body":"https://app.hypertask.ai/detail/project-15/1","headRefName":"agent/dev-1-htpr-1","createdAt":"2026-01-01T00:00:00Z"}]\n' "$state"
+    printf '[{"number":1,"state":"%s","url":"https://github.test/pull/1","title":"HTPR-1 fix","body":"https://app.hypertask.ai/detail/project-15/1","headRefName":"agent/dev-1-htpr-1","author":{"login":"dev-one"},"createdAt":"2026-01-01T00:00:00Z"}]\n' "$state"
   fi
   exit 0
 fi
@@ -56,7 +68,7 @@ if [ "$1 $2" = "pr view" ]; then
   checks='[{"name":"ci-tests","status":"IN_PROGRESS","conclusion":"","detailsUrl":"https://github.test/actions/runs/77/job/1"}]'
   reviews='[]'
   comments='[]'
-  if [ "$scenario" = "red" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "claimed-body" ]; then
+  if [ "$scenario" = "red" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "qa-claim" ] || [ "$scenario" = "orphan" ] || [ "$scenario" = "author-owned" ] || [ "$scenario" = "custom-prefix" ]; then
     checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/1"},{"name":"revert-guard","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/2"},{"name":"pr-title","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/3"}]'
     comments='[{"author":{"login":"claude-review"},"body":"CONCERNS: preserve the existing authorization check."}]'
   fi
@@ -116,9 +128,30 @@ PR_REPO="example/repo"
 . "$ROOT/adapters/hypertask/adapter.sh"
 die() { printf 'die: %s %s\n' "$*" >&2; return 1; }
 
+cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<'EOF'
+AGENT_SLUG="dev-1"
+AGENT_KIND="dev"
+PR_REPO="example/repo"
+GITHUB_LOGIN="dev-one"
+EOF
+cat > "$TMP/home/.config/hypertask-agents/qa-1.conf" <<'EOF'
+AGENT_SLUG="qa-1"
+AGENT_KIND="qa"
+PR_REPO="example/repo"
+EOF
+cat > "$TMP/home/.config/hypertask-agents/dev-2.conf" <<'EOF'
+AGENT_SLUG="dev-2"
+AGENT_KIND="dev"
+PR_REPO="example/repo"
+PR_BRANCH_PREFIX="cursor-dev-2/"
+EOF
+
 run_gate() {
-  local scenario="$1" cache="$TMP/cache-$1"
-  PR_TEST_SCENARIO="$scenario" adapter_pr_gate "$TMP/token" 15 agent-1 "Dev One" dev-1 "$cache"
+  local scenario="$1" slug="${2:-dev-1}" name="${3:-Dev One}" cache
+  cache="$TMP/cache-$scenario-$slug"
+  PR_TEST_SCENARIO="$scenario" GITHUB_LOGIN="${4:-}" PR_BRANCH_PREFIX="${5:-}" \
+    adapter_pr_gate "$TMP/token" 15 agent-1 "$name" "$slug" "$cache" \
+      "$TMP/home/.config/hypertask-agents"
 }
 
 red="$(run_gate red)"
@@ -152,9 +185,23 @@ GH_CALL_LOG="$TMP/gh-calls" PR_TEST_SCENARIO=deployed _ht_pr_live_state example/
 [[ "$(wc -l < "$TMP/gh-calls")" = "$first_calls" ]]
 echo 'PASS LIVE answer is cached per PR for 60 seconds'
 
-claimed="$(run_gate claimed-body)"
-[[ "$claimed" == *'"number": 3'* ]]
-echo 'PASS PR body ticket link attributes a comment-claimed ticket'
+qa_claim="$(run_gate qa-claim qa-1 'QA One')"
+[[ -z "$qa_claim" ]]
+echo 'PASS QA claim comment does not attribute another agent branch'
+
+author_owned="$(run_gate author-owned dev-1 'Dev One' dev-one)"
+[[ "$author_owned" == *'"number": 5'* ]]
+echo 'PASS configured GitHub login attributes an authored PR'
+
+custom_prefix="$(run_gate custom-prefix dev-2 'Dev Two' '' 'cursor-dev-2/')"
+[[ "$custom_prefix" == *'"number": 6'* ]]
+echo 'PASS configured custom branch prefix attributes an authored PR'
+
+orphan_log="$TMP/orphan.log"
+run_gate orphan >/dev/null 2>"$orphan_log"
+run_gate orphan >/dev/null 2>>"$orphan_log"
+[[ "$(grep -cF 'orphaned PR #4 (agent/retired-dev-htpr-4) has no owning agent' "$orphan_log")" = 1 ]]
+echo 'PASS orphaned PR blocks nobody and logs once per day'
 
 oldest="$(run_gate oldest)"
 [[ "$oldest" == *'"number": 9'* ]]
@@ -203,4 +250,4 @@ red_run="$(PR_TEST_SCENARIO=red HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_S
 [[ "$red_run" == *'no ticket attempts, cooldown, triage, or escalation'* ]]
 echo 'PASS red PR still runs after many attempts with no cooldown or escalation'
 
-echo '12 one-ticket-until-live checks passed'
+echo '15 one-ticket-until-live checks passed'

@@ -669,43 +669,22 @@ print(",".join(ids))')" || {
 }
 
 # ---------- one ticket until live ----------
-# _ht_tasks_with_pr <prs-json> <tasks-jsonl>
-# Prints task rows whose reference appears on an open or merged PR.
-_ht_tasks_with_pr() {
-  python3 - "$1" "$2" <<'PYEOF'
-import json, re, sys
-with open(sys.argv[1]) as handle:
-    prs = json.load(handle)
-haystacks = [
-    " ".join(str(pr.get(key) or "") for key in ("title", "body", "headRefName"))
-    for pr in prs
-    if str(pr.get("state") or "").upper() in ("OPEN", "MERGED")
-]
-with open(sys.argv[2]) as handle:
-    for line in handle:
-        if not line.strip():
-            continue
-        task = json.loads(line)
-        ref = str(task.get("ref") or "")
-        pattern = re.compile(r"(?<![0-9A-Za-z])" + re.escape(ref) + r"(?![0-9A-Za-z])", re.I)
-        if any(pattern.search(haystack) for haystack in haystacks):
-            print(json.dumps(task))
-PYEOF
-}
-
-# adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir>
+# adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir>
 # Prints one JSON object for the oldest pull request this agent still owes, or
-# nothing when every attributed pull request is live. Attribution is the
-# configured branch prefix (default agent/<slug>-) plus ticket references in a
-# PR title/body/branch that name a ticket assigned to or claimed by this agent.
+# nothing when every authored pull request is live. Authorship is the agent's
+# configured branch prefix (default agent/<slug>-) or its configured GitHub
+# login. Ticket assignments and comments never attribute a pull request.
+#
+# An open PR with no owner among the living conf files is ignored and logged
+# once per UTC day through stderr, which core appends to the tick log.
 #
 # LIVE is merged + the base contains the merge commit + the newest Production
 # deployment created after the merge succeeded and contains that commit. Repos
 # with no deployment records use merged + contained as the documented fallback.
 adapter_pr_gate() (
   local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
-  local repo="${PR_REPO:-}" prefix="${PR_BRANCH_PREFIX:-agent/$slug-}"
-  local tmp prs tasks one rows ref task_id assigned comments claimed_refs candidates pr number live
+  local config_dir="${7:-}" repo="${PR_REPO:-}" prefix="${PR_BRANCH_PREFIX:-agent/$slug-}"
+  local tmp pr number live branch marker today owner_conf owner_slug
   [ -n "$repo" ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
   mkdir -p "$cache_dir"
@@ -713,9 +692,9 @@ adapter_pr_gate() (
   trap 'rm -rf "$tmp"' EXIT
 
   if ! gh pr list --repo "$repo" --state open --limit 1000 \
-      --json number,state,url,title,body,headRefName,createdAt > "$tmp/open.json" \
+      --json number,state,url,title,body,headRefName,createdAt,author > "$tmp/open.json" \
      || ! gh pr list --repo "$repo" --state merged --limit 100 \
-      --json number,state,url,title,body,headRefName,createdAt > "$tmp/merged.json"; then
+      --json number,state,url,title,body,headRefName,createdAt,author > "$tmp/merged.json"; then
     printf 'ERROR: cannot list pull requests in %s for the one-ticket-until-live gate\n' "$repo" >&2
     return 1
   fi
@@ -731,80 +710,70 @@ for path in sys.argv[1:]:
 print(json.dumps(rows))
 PYEOF
 
-  : > "$tmp/tasks.jsonl"
-  for one in $(printf '%s' "$board_ids" | tr ',' ' '); do
-    [ -n "$one" ] || continue
-    tasks="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&limit=100")" || return 1
-    printf '%s' "$tasks" | BOARD="$one" AID="$agent_id" python3 -c '
-import json, os, sys
-for task in json.load(sys.stdin).get("tasks") or []:
-    ref = str(task.get("ticketNumber") or "")
-    if not ref:
-        continue
-    aids = []
-    for who in task.get("assignees") or []:
-        agent = who.get("agent") if isinstance(who, dict) else None
-        if isinstance(agent, dict) and agent.get("id"):
-            aids.append(str(agent["id"]))
-    print(json.dumps({"ref": ref, "id": task.get("id"), "board": os.environ["BOARD"],
-                      "assigned": os.environ["AID"] in aids}))
-' >> "$tmp/tasks.jsonl"
-  done
-
-  # Assigned tickets are claims. For ticket references appearing on a possible
-  # PR but not currently assigned, use the same evidence as adapter_pick_rank:
-  # this agent authored a comment containing "claim". Parse the PR payload once
-  # per tick before examining the matching task rows.
-  if ! _ht_tasks_with_pr "$tmp/prs.json" "$tmp/tasks.jsonl" > "$tmp/tasks-with-pr.jsonl"; then
-    printf 'ERROR: cannot match task references to pull requests in %s\n' "$repo" >&2
-    return 1
+  # One row per living conf in this repository. A removed conf deliberately
+  # stops owning its old branch, which makes an abandoned open PR visible as
+  # orphaned instead of assigning it to whichever agent touched its ticket.
+  printf '%s\t%s\n' "$prefix" "${GITHUB_LOGIN:-}" > "$tmp/owners.tsv"
+  if [ -n "$config_dir" ] && [ -d "$config_dir" ]; then
+    for owner_conf in "$config_dir"/*.conf; do
+      [ -f "$owner_conf" ] || continue
+      (
+        unset AGENT_SLUG PR_BRANCH_PREFIX GITHUB_LOGIN PR_REPO
+        # shellcheck disable=SC1090
+        . "$owner_conf"
+        [ "${PR_REPO:-}" = "$repo" ] || exit 0
+        owner_slug="${AGENT_SLUG:-$(basename "$owner_conf" .conf)}"
+        printf '%s\t%s\n' "${PR_BRANCH_PREFIX:-agent/$owner_slug-}" "${GITHUB_LOGIN:-}"
+      ) >> "$tmp/owners.tsv"
+    done
   fi
-  while IFS= read -r rows; do
-    [ -n "$rows" ] || continue
-    ref="$(ROW="$rows" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["ref"])')"
-    assigned="$(ROW="$rows" python3 -c 'import json,os;print("yes" if json.loads(os.environ["ROW"])["assigned"] else "no")')"
-    if [ "$assigned" = "yes" ]; then
-      printf '%s\n' "$ref" >> "$tmp/claimed"
-      continue
-    fi
-    task_id="$(ROW="$rows" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["id"])')"
-    one="$(ROW="$rows" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["board"])')"
-    comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${one}")" || continue
-    if printf '%s' "$comments" | AID="$agent_id" ANAME="$agent_name" python3 -c '
-import json, os, re, sys
-want_id, want_name = os.environ["AID"], os.environ["ANAME"].strip().casefold()
-for comment in json.load(sys.stdin).get("comments") or []:
-    agent = comment.get("agent") if isinstance(comment.get("agent"), dict) else None
-    author = agent or comment.get("user") or comment.get("author") or {}
-    if isinstance(author, dict):
-        mine = str(author.get("id") or "") == want_id or str(author.get("displayName") or author.get("display_name") or author.get("name") or "").strip().casefold() == want_name
-    else:
-        mine = str(author).strip().casefold() == want_name
-    text = comment.get("text") or comment.get("comment") or comment.get("commentText") or comment.get("html") or ""
-    if mine and re.search(r"\bclaim", re.sub(r"<[^>]+>", " ", text), re.I):
-        sys.exit(0)
-sys.exit(1)
-'; then
-      printf '%s\n' "$ref" >> "$tmp/claimed"
-    fi
-  done < "$tmp/tasks-with-pr.jsonl"
-  claimed_refs="$(sort -u "$tmp/claimed" 2>/dev/null | paste -sd, - || true)"
 
-  CLAIMED="$claimed_refs" PREFIX="$prefix" python3 - "$tmp/prs.json" <<'PYEOF' > "$tmp/candidates.jsonl"
+  PREFIX="$prefix" LOGIN="${GITHUB_LOGIN:-}" python3 - "$tmp/prs.json" <<'PYEOF' > "$tmp/candidates.jsonl"
 import json, os, re, sys
-claimed = {x.casefold() for x in os.environ.get("CLAIMED", "").split(",") if x}
 prefix = os.environ["PREFIX"].casefold()
+login = os.environ.get("LOGIN", "").casefold()
 with open(sys.argv[1]) as handle:
     prs = json.load(handle)
 for pr in sorted(prs, key=lambda row: row.get("createdAt") or ""):
     if str(pr.get("state") or "").upper() not in ("OPEN", "MERGED"):
         continue
+    branch = str(pr.get("headRefName") or "")
+    author = pr.get("author") if isinstance(pr.get("author"), dict) else {}
+    author_login = str(author.get("login") or "").casefold()
+    if not (branch.casefold().startswith(prefix) or (login and author_login == login)):
+        continue
     haystack = " ".join(str(pr.get(k) or "") for k in ("title", "body", "headRefName"))
     refs = re.findall(r"(?<![0-9A-Za-z])([A-Z][A-Z0-9]{1,10}-[0-9]+)(?![0-9A-Za-z])", haystack, re.I)
-    if str(pr.get("headRefName") or "").casefold().startswith(prefix) or any(r.casefold() in claimed for r in refs):
-        pr["ticket"] = refs[0].upper() if refs else "PR-%s" % pr["number"]
-        print(json.dumps(pr))
+    pr["ticket"] = refs[0].upper() if refs else "PR-%s" % pr["number"]
+    print(json.dumps(pr))
 PYEOF
+
+  # Orphans never become candidates. The atomic marker directory makes the
+  # warning once-daily even when several agent timers inspect the same repo.
+  today="$(date -u +%F)"
+  python3 - "$tmp/open.json" "$tmp/owners.tsv" <<'PYEOF' > "$tmp/orphans.tsv"
+import json, sys
+owners = []
+with open(sys.argv[2]) as handle:
+    for line in handle:
+        prefix, _, login = line.rstrip("\n").partition("\t")
+        owners.append((prefix.casefold(), login.casefold()))
+for pr in json.load(open(sys.argv[1])):
+    branch = str(pr.get("headRefName") or "")
+    author = pr.get("author") if isinstance(pr.get("author"), dict) else {}
+    login = str(author.get("login") or "").casefold()
+    if any(branch.casefold().startswith(prefix) or (owner_login and login == owner_login)
+           for prefix, owner_login in owners):
+        continue
+    print("%s\t%s" % (pr.get("number"), branch))
+PYEOF
+  while IFS=$'\t' read -r number branch; do
+    [ -n "$number" ] || continue
+    marker="$cache_dir/orphaned-${repo//\//-}-$number-$today"
+    if mkdir "$marker" 2>/dev/null; then
+      printf 'orphaned PR #%s (%s) has no owning agent\n' "$number" "$branch" >&2
+    fi
+  done < "$tmp/orphans.tsv"
 
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue

@@ -43,6 +43,8 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `AGENT_KIND` | `dev`, `qa`, `worker`, or `cli`. |
 | `AGENT_REPO` | Checkout used for ticket work. |
 | `PR_REPO` | Required `org/name` memory repository. |
+| `PR_BRANCH_PREFIX` | Branch prefix that proves this agent authored a PR, default `agent/<slug>-`. |
+| `GITHUB_LOGIN` | Optional GitHub login that proves this agent authored a PR. |
 | `BOARD_ADAPTER` | Adapter loaded by the runner. |
 | `BOARD_ID` | Board id, or comma-separated ids. |
 | `TOKEN_FILE` | Absolute path to the 0600 token file. |

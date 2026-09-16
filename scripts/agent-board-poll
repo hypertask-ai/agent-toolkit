@@ -518,8 +518,9 @@ if [ "$DRY_RUN" = "yes" ]; then
 fi
 
 # Pull-request debt is a hard pickup gate, not a ranking hint. The adapter
-# attributes PRs, proves LIVE, and returns only the oldest debt. Core records
-# the reason for the agents feed and later permits only this fix or an emergency.
+# identifies authored PRs, proves LIVE, and returns only the oldest debt. Core
+# records the reason for the agents feed and later permits only this fix or an
+# emergency.
 PR_GATE=""
 PR_GATE_ACTION=""
 PR_GATE_NUMBER=""
@@ -527,7 +528,7 @@ PR_GATE_STATE=""
 PR_GATE_TICKET=""
 if declare -F adapter_pr_gate >/dev/null 2>&1; then
   PR_GATE="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
-              "$SLUG" "$PR_LIVE_CACHE" 2>>"$LOG")" || die \
+              "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" 2>>"$LOG")" || die \
     "cannot determine whether $SLUG has a pull request that is not live" \
     "read $LOG and restore GitHub or board access; no ticket was claimed"
 fi
