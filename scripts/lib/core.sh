@@ -157,14 +157,20 @@ core_read_conf() {
 # ---------- command ladder ----------
 # Commands are opaque policy owned by the conf. Core only selects an ordered
 # rung; it never identifies, validates or rewrites a provider, model or harness.
+# It does check that the rung's executable exists on this host (AGTE-4): a
+# ladder rung naming a binary this host lacks must not be run at all, so
+# core_ladder_command prints "" for that rung and the caller falls back to
+# the agent's own MODEL_CLI instead of failing the run with exit=127.
 core_ladder_count() {
   [ -n "${1:-}" ] || { printf '0'; return 0; }
   LADDER_VALUE="$1" python3 -c 'import os; print(len(os.environ["LADDER_VALUE"].split("|")))'
 }
 
-# core_ladder_command <ladder> <one-based-rung> : print one full command.
+# core_ladder_command <ladder> <one-based-rung> : print one full command, or
+# "" if that rung is empty or its executable is not on PATH.
 core_ladder_command() {
-  LADDER_VALUE="$1" LADDER_RUNG="$2" python3 <<'PYEOF'
+  local ladder="$1" rung="$2" command argv0
+  command="$(LADDER_VALUE="$ladder" LADDER_RUNG="$rung" python3 <<'PYEOF'
 import os
 commands = os.environ["LADDER_VALUE"].split("|") if os.environ["LADDER_VALUE"] else []
 try:
@@ -173,6 +179,15 @@ except ValueError:
     rung = 0
 print(commands[rung - 1].strip() if 0 < rung <= len(commands) else "", end="")
 PYEOF
+)"
+  if [ -n "$command" ]; then
+    read -r argv0 _ <<< "$command"
+    if ! command -v "$argv0" >/dev/null 2>&1; then
+      echo "WARNING: ladder rung $rung command '$argv0' is not on this host's PATH; falling back to the agent's configured MODEL_CLI" >&2
+      command=""
+    fi
+  fi
+  printf '%s' "$command"
 }
 
 # ---------- secrets ----------

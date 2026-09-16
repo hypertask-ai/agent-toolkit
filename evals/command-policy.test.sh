@@ -117,6 +117,20 @@ else
   bad ladder-second-rung "launch=$(cat "$capture" 2>/dev/null || true)"
 fi
 
+# AGTE-4: a ladder rung naming a binary this host does not have must not run
+# it (and must not crash the tick) -- the run falls back to MODEL_CLI instead.
+state="$TMP/state-rung-missing"; capture="$TMP/capture-rung-missing"
+write_board TEST-4
+write_conf "$state" 'rung-one --first|absent-command --second'
+seed_failures "$state" TEST-4 4
+run_poll "$state" "$capture" --once >"$TMP/missing.out" 2>"$TMP/missing.err" || true
+if grep -q '^model-only --fixed ' "$capture" \
+   && ! grep -Eq '^(rung-one|absent-command) ' "$capture"; then
+  ok ladder-missing-binary "missing rung binary falls back to MODEL_CLI, not exit=127"
+else
+  bad ladder-missing-binary "launch=$(cat "$capture" 2>/dev/null || true); err=$(cat "$TMP/missing.err" 2>/dev/null || true)"
+fi
+
 # A ticket override is a full command and wins verbatim.
 state="$TMP/state-override"; capture="$TMP/capture-override"
 write_board TEST-3

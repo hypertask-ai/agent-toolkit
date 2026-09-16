@@ -1,3 +1,6 @@
+## 3.18.5
+- AGTE-4: a `LADDER` rung whose command is not on the host's PATH no longer runs (and fails the ticket with exit=127) -- `core_ladder_command` checks with `command -v` first and falls back to the agent's own `MODEL_CLI`, with one `WARNING:` line on stderr. The `MODEL_PROVIDER=codex` conf key the ticket also asked for is not added: post-AGTE-3 (3.16.0) nothing routes on a provider identity, so that key would be unread. ACTION: none.
+
 ## 3.18.4
 - agent-template-feedback: read section names from the CLI field section_title (name is absent), so the board lookup no longer fails. ACTION: none.
 
