@@ -551,17 +551,26 @@ CANDIDATES="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "$WATCH_SECTIONS
 if [ -n "$OWNED_ROWS" ]; then
   CANDIDATES="$(printf '%s\n%s\n' "$CANDIDATES" "$OWNED_ROWS" | python3 -c '
 import json, sys
-seen = set()
+# De-duplicate by id, first occurrence wins, but a later duplicate that carries
+# a trigger (a human replied on a ticket this agent owns) hands that trigger to
+# the kept row. With WATCH_SECTIONS="*" every owned ticket is already in the
+# candidate list without a trigger, and dropping the owned row silently made
+# every human reply invisible (inne Growth Bot, 2026-09-16).
+rows, order = {}, []
 for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
     row = json.loads(line)
     key = row.get("id")
-    if key in seen:
+    if key in rows:
+        if row.get("trigger") and not rows[key].get("trigger"):
+            rows[key]["trigger"] = row["trigger"]
         continue
-    seen.add(key)
-    print(line)
+    rows[key] = row
+    order.append(key)
+for key in order:
+    print(json.dumps(rows[key]))
 ')"
 fi
 # A red owed PR is represented as a candidate so it uses the normal isolated

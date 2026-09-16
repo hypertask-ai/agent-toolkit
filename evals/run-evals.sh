@@ -225,6 +225,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/hypertask-adapter.test.sh" ]; then
   echo "-- hypertask adapter behavioural checks --"
   bash "$HERE/hypertask-adapter.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/owned-reply-trigger.test.sh" ]; then
+  echo ""
+  echo "-- owned reply trigger behavioural checks --"
+  bash "$HERE/owned-reply-trigger.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/one-ticket-live.test.sh" ]; then
   echo ""
   echo "-- one ticket until live behavioural checks --"

@@ -8,6 +8,13 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.18.3 - 2026-09-16
+
+- AGTE-5: when `WATCH_SECTIONS="*"` lists a ticket before its owned-reply row,
+  the kept ticket now inherits the `new_comment` trigger and remains eligible.
+- `OWNED_REPLY_ADDRESSED=yes` can limit unassigned owned replies to messages
+  that name the agent or start with `fix:`.
+
 ## 3.18.1 - 2026-09-16
 
 - AGTE-2: owned-ticket reply checks now stream ticket and comment JSON to

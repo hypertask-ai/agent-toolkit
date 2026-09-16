@@ -414,7 +414,7 @@ print(json.dumps({
 _ht_owned_row() {
   local token_file="$1" task_id="$2" row="$3" board_id="$4" agent_id="$5" comments
   comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}" 2>/dev/null)" || return 0
-  if ! printf '%s\n%s' "$row" "$comments" | AID="$agent_id" python3 -c '
+  if ! printf '%s\n%s' "$row" "$comments" | AID="$agent_id" ANAME="${AGENT_NAME:-}" OWNED_REPLY_ADDRESSED="${OWNED_REPLY_ADDRESSED:-}" python3 -c '
 import json, os, sys
 row = json.loads(sys.stdin.readline())
 doc = json.load(sys.stdin)
@@ -438,6 +438,15 @@ for c in reversed(comments[:-1]):
 claimed = bool(last_agent) and str(last_agent.get("id") or "") == aid
 if not (assigned or claimed):
     sys.exit(0)
+# OWNED_REPLY_ADDRESSED=yes: on a board where humans talk to each other under a
+# ticket the agent once commented on, only a reply that addresses the agent
+# (its name, or a "fix:" correction) is work for it. Assigned tickets always are.
+if os.environ.get("OWNED_REPLY_ADDRESSED", "").lower() == "yes" and not assigned:
+    import re
+    text = re.sub(r"<[^>]+>", " ", newest.get("html") or newest.get("text") or "")
+    name = os.environ.get("ANAME", "").strip().casefold()
+    if not (name and name in text.casefold()) and not re.match(r"\s*fix\s*:", text, re.I):
+        sys.exit(0)
 row["trigger"] = "new_comment"
 print(json.dumps(row))
 '; then
