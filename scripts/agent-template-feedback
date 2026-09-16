@@ -128,7 +128,7 @@ wanted = os.environ["WANTED"].casefold()
 doc = json.load(sys.stdin)
 rows = doc.get("sections", doc) if isinstance(doc, dict) else doc
 for row in rows or []:
-    name = row.get("name", "") if isinstance(row, dict) else str(row)
+    name = (row.get("name") or row.get("section_title") or "") if isinstance(row, dict) else str(row)
     if name.casefold() == wanted:
         print(name); break
 ' <<< "$SECTIONS_JSON"

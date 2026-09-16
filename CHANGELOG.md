@@ -1,3 +1,6 @@
+## 3.18.4
+- agent-template-feedback: read section names from the CLI field section_title (name is absent), so the board lookup no longer fails. ACTION: none.
+
 ## 3.18.2
 - agent-template-feedback: accept a "Fixed" section as the shipped column (board 5500 uses Inbox, Accepted, Fixed, Rejected). ACTION: none.
 
