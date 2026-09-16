@@ -156,7 +156,8 @@ core
   scripts/agent-chat          shared host daemon: poll, answer, deduplicate
   scripts/agent-template      feedback: file a correction where it can be replayed;
                                update: pull, reinstall, convert old-schema confs
-  scripts/agent-template-weekly  turn a week of corrections into one pull request
+  scripts/agent-template-feedback  judge and close feedback every four hours
+  scripts/agent-template-weekly    compatibility alias for agent-template-feedback
   scripts/lib/core.sh         slug, conf files, secrets, adapter loading, poll units
 adapters/
   hypertask/adapter.sh        everything that talks to a Hypertask board
@@ -244,8 +245,8 @@ open between ticks for no reason. The timer's schedule is also readable with
 
 When a human corrects your output, whether they edit your comment, fail your
 QA, reject your pull request or simply say that is wrong, stop and run
-`agent-template feedback --what "<one sentence>" --got <the bad output>
---expected "<what should have happened>"` before you carry on with the work. A
+`agent-template feedback --kind bug --what "<one sentence>" --got <the bad
+output> --expected "<what should have happened>"` before you carry on with the work. A
 correction that lives only in a conversation is gone tomorrow; filed, it
 becomes a stored check that replays on every change to this template, so the
 next agent cannot make the same mistake. Set `FEEDBACK_OPT_OUT=yes` in the conf
@@ -267,16 +268,25 @@ rule — always or never do X — goes into the skill file. If it is unclear
 which: would it still be true for a different customer? Yes means rule, no
 means fact.
 
-**Feedback:** change requests and ideas go to the Agent Template board,
-project 5500 (https://app.hypertask.ai/detail/project-5500, prefix AGTE), via
-`agent-template feedback`. A correction (above) is one shape of that same
-command; a change request or an idea is the other: `agent-template feedback
---kind change --title "<short title>" --body "<html>"` or `--kind idea` for
-the same. Both post as this agent's own identity to the board's Inbox
-section, labelled with the kind when the board carries that label, and print
-the filed ticket's URL. Run `agent-template feedback` with no arguments for
-the board link and the three kinds. `--dry-run` renders the ticket and sends
-nothing.
+## Feedback
+
+A bot or an interactive session files a bug, change request, or idea with one
+interface:
+
+```
+agent-template feedback --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"
+```
+
+It lands in the Agent Template Inbox on project 5500
+(https://app.hypertask.ai/detail/project-5500, prefix AGTE) as the bot's own
+identity, never the owner's. `agent-template-feedback` reads urgent tickets
+first and checks the Inbox every four hours on the maintainer host. It replies
+to every ticket with accepted, need info plus one question, or declined.
+Accepted work gets one auto-merge fix pull request and moves to Accepted. When
+a merged release changelog names the AGTE ticket, the same bot replies
+`Shipped in <version>: <one line>` and moves it to Done. Daily updates on the
+filing host print `feedback waiting: AGTE-n` until that ticket closes.
+`--dry-run` renders a filing without sending it.
 
 ## Evals
 
@@ -284,13 +294,15 @@ nothing.
 been right, and the name of the predicate that has to hold for it. `evals/run-evals.sh`
 replays every line and exits non-zero with the failing ids. The predicates are
 an allowlist inside that script, never shell from the case file, because the
-case file is appended to by an automated weekly run and executed in CI.
+case file can be appended to by the automated feedback run and executed in CI.
 
-`agent-template-weekly` reads the feedback board once a week, asks a model to
-judge each ticket, appends a case per accepted one, and opens a single pull
-request with auto-merge off. It may only touch `evals/cases.jsonl` and
-`evals/PENDING-FIXES.md`: never `install.sh`, never an adapter's auth code, and
-it never deletes or rewrites an existing case.
+`agent-template-feedback` checks every four hours and handles urgent tickets
+first. The model returns an accept, need-info, or decline verdict. Accepted
+work is implemented and evaluated in an isolated worktree, then opened as one
+auto-merge pull request per ticket. `agent-template-weekly` remains only as a
+compatibility alias. Changelog reconciliation is independently idempotent, so
+a merged ticket receives one shipped comment even if its AGTE reference appears
+more than once.
 
 ## The conf decides the provider
 

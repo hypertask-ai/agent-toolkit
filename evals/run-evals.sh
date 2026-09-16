@@ -21,7 +21,7 @@
 #   added    YYYY-MM-DD
 #
 # Predicates are an allowlist, not shell. A case file is appended to by an
-# automated weekly run, and a file that CI executes must never be able to
+# automated feedback run, and a file that CI executes must never be able to
 # carry arbitrary commands. Adding a predicate is a deliberate edit here.
 #
 #   starts_with_block_tag   the text opens with an HTML block tag
@@ -229,4 +229,9 @@ if [ -z "$ONLY" ] && [ -x "$HERE/agent-template-update.test.sh" ]; then
   echo ""
   echo "-- agent-template update behavioural checks --"
   bash "$HERE/agent-template-update.test.sh"
+fi
+if [ -z "$ONLY" ] && [ -x "$HERE/feedback-loop.test.sh" ]; then
+  echo ""
+  echo "-- feedback loop behavioural checks --"
+  bash "$HERE/feedback-loop.test.sh"
 fi

@@ -108,6 +108,7 @@ render() {
   local rel="$1"
   case "$rel" in
     .claude/skills/INDEX.md) render_index ;;
+    AGENTS.md)               sed "s/__TEMPLATE_VERSION__/$VERSION/g" "$TEMPLATE_DIR/$rel" ;;
     board.yml)               render_board ;;
     *)                       cat "$TEMPLATE_DIR/$rel" ;;
   esac

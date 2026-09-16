@@ -27,7 +27,7 @@ board, project 5500 (https://app.hypertask.ai/detail/project-5500, prefix
 AGTE), with:
 
 ```
-agent-template feedback --kind bug|change|idea --title "<short title>" --body "<html>"
+agent-template feedback --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"
 ```
 
 Posted as the bot's own identity, never in the owner's name. Run the command

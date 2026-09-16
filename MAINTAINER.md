@@ -29,8 +29,11 @@ until you do it.
 - **Advisor** — when `RESEARCH_CLI` is configured, `agent-advisor "<question>"`
   gives a stuck agent two read-only research calls per run. Without it, there
   is no research step.
-- **Weekly report** — `agent-template-weekly`, turns a week of corrections
-  into checks; `agent-template report` prints this week's scorecard.
+- **Feedback timer** — `agent-template-feedback.timer`, runs every four hours
+  on the writable vstack maintainer host only. It judges Inbox tickets, opens
+  one auto-merge fix pull request per accepted ticket, and closes shipped work.
+  `agent-template-weekly` is a compatibility alias. `agent-template report`
+  prints the local filing scorecard.
 
 ## The conf decides the provider
 
@@ -170,14 +173,21 @@ Two packs, always in this order:
 
 ## Feedback
 
-Change requests and improvement ideas for the template go to the Agent
-Template board, project 5500 (https://app.hypertask.ai/detail/project-5500,
-prefix AGTE), via `agent-template feedback --kind change|idea --title "<short
-title>" --body "<html>"`. It posts as this bot's own identity to the board's
-Inbox section and prints the filed ticket's URL; run it with no arguments for
-a reminder of the board link and the three kinds (`bug`, `change`, `idea`).
-The paste-it-yourself fallback only shows when no token is configured for
-this agent.
+A bot or an interactive session files template feedback with:
+
+```
+agent-template feedback --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"
+```
+
+It posts as that bot's own identity to the Agent Template Inbox, project 5500
+(https://app.hypertask.ai/detail/project-5500, prefix AGTE), and prints the
+filed URL. The maintainer host reads urgent first every four hours. Every
+ticket gets an accepted, need-info, or declined reply; need-info contains one
+question. Accepted tickets get one auto-merge fix pull request and move to
+Accepted. A merged changelog line naming the ticket triggers one `Shipped in
+<version>: <one line>` reply and moves it to Done. The filing host's daily
+update prints `feedback waiting: AGTE-n` while the ticket remains open. The
+paste-it-yourself fallback appears only when no bot token is configured.
 
 ## Running it by hand
 

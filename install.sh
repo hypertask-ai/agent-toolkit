@@ -6,7 +6,7 @@
 # run this again. Re-running is safe and overwrites the installed copy.
 #
 # Usage:
-#   ./install.sh [--dest DIR] [--bin DIR] [--unit-dir DIR] [--dry-run] [-h|--help]
+#   ./install.sh [--dest DIR] [--bin DIR] [--unit-dir DIR] [--dry-run] [--no-host-notes] [-h|--help]
 #
 # Examples:
 #   ./install.sh --dry-run          # show what would be copied where
@@ -40,6 +40,7 @@ SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-}"
 UNIT_DIR_EXPLICIT="no"
 [ -n "$SYSTEMD_USER_DIR" ] && UNIT_DIR_EXPLICIT="yes"
 DRY_RUN="no"
+NO_HOST_NOTES="no"
 
 fail() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
 
@@ -119,6 +120,7 @@ while [ $# -gt 0 ]; do
     --bin) BIN="$2"; shift 2 ;;
     --unit-dir) SYSTEMD_USER_DIR="$2"; UNIT_DIR_EXPLICIT="yes"; shift 2 ;;
     --dry-run) DRY_RUN="yes"; shift ;;
+    --no-host-notes) NO_HOST_NOTES="yes"; shift ;;
     -h|--help) sed -n '2,16p' "$SELF" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) fail "unknown argument $1" "run ./install.sh --help" ;;
   esac
@@ -128,6 +130,9 @@ for item in SKILL.md MAINTAINER.md CONF.md VERSION CHANGELOG.md scripts adapters
   [ -e "$SRC/$item" ] || fail "$SRC/$item is missing" \
     "run install.sh from inside the template folder in the repo"
 done
+
+# shellcheck disable=SC1091
+. "$SRC/scripts/lib/feedback.sh"
 
 # Decide, once, whether this run is allowed to touch the live systemd unit
 # dir. Real install (default --dest and --bin) or an explicit --unit-dir:
@@ -148,13 +153,15 @@ echo "docs:   $DEST/MAINTAINER.md + $DEST/CONF.md"
 echo "bin:    $BIN/agent-board-poll -> $DEST/scripts/agent-board-poll"
 echo "bin:    $BIN/agent-chat -> $DEST/scripts/agent-chat"
 echo "bin:    $BIN/agent-template -> $DEST/scripts/agent-template"
-echo "bin:    $BIN/agent-template-weekly -> $DEST/scripts/agent-template-weekly"
+echo "bin:    $BIN/agent-template-feedback -> $DEST/scripts/agent-template-feedback"
+echo "bin:    $BIN/agent-template-weekly -> compatibility alias"
 echo "bin:    $BIN/agent-advisor -> $DEST/scripts/agent-advisor"
 echo "version: $(cat "$SRC/VERSION")"
 
 if [ "$DRY_RUN" = "yes" ]; then
   echo "company pack: would sync $COMPANY_SKILLS_REPO -> $COMPANY_SKILLS_DIR"
   echo "(dry run: nothing copied)"
+  feedback_print_discovery
   exit 0
 fi
 
@@ -193,7 +200,8 @@ done
 rm -rf "$DEST/core"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-chat" \
-          "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-weekly" \
+          "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-feedback" \
+          "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/triage.sh" \
           "$DEST/scripts/sync-project.sh" "$DEST/scripts/migrate-provider-policy.py" \
           "$DEST/evals/run-evals.sh" \
@@ -205,6 +213,7 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
 ln -sfn "$DEST/scripts/agent-board-poll" "$BIN/agent-board-poll"
 ln -sfn "$DEST/scripts/agent-chat" "$BIN/agent-chat"
 ln -sfn "$DEST/scripts/agent-template" "$BIN/agent-template"
+ln -sfn "$DEST/scripts/agent-template-feedback" "$BIN/agent-template-feedback"
 ln -sfn "$DEST/scripts/agent-template-weekly" "$BIN/agent-template-weekly"
 # agent-advisor is on PATH because a run calls it by name from inside a model
 # CLI, where nothing knows where the template is installed.
@@ -221,6 +230,9 @@ bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
           "check python3 is present and the symlink resolves"
 "$BIN/agent-template" --help >/dev/null \
   || fail "the installed agent-template does not run" \
+          "check that $BIN is on PATH and the symlink resolves"
+"$BIN/agent-template-feedback" --help >/dev/null \
+  || fail "the installed agent-template-feedback does not run" \
           "check that $BIN is on PATH and the symlink resolves"
 "$BIN/agent-advisor" --help >/dev/null \
   || fail "the installed agent-advisor does not run" \
@@ -301,10 +313,66 @@ Unit=agent-template-update.service
 [Install]
 WantedBy=timers.target
 EOF
+
+  # Only the maintainer checkout processes the shared feedback board. The old
+  # weekly timer is disabled everywhere so bot hosts never start a second copy.
+  systemctl --user disable --now agent-template-weekly.timer >/dev/null 2>&1 || true
+  rm -f "$SYSTEMD_USER_DIR/agent-template-weekly.service" \
+        "$SYSTEMD_USER_DIR/agent-template-weekly.timer"
+  FEEDBACK_MAINTAINER=no
+  SOURCE_REPO="$(git -C "$SRC" rev-parse --show-toplevel 2>/dev/null || true)"
+  SOURCE_REMOTE="$(git -C "$SOURCE_REPO" remote get-url origin 2>/dev/null || true)"
+  case "$SOURCE_REMOTE" in
+    *github.com[:/]valentinyeo/vstack|*github.com[:/]valentinyeo/vstack.git)
+      if command -v gh >/dev/null 2>&1 && [ -x "$BIN/htbot" ]; then
+        permission="$(gh repo view valentinyeo/vstack --json viewerPermission --jq .viewerPermission 2>/dev/null || true)"
+        case "$permission" in ADMIN|MAINTAIN|WRITE) FEEDBACK_MAINTAINER=yes ;; esac
+      fi
+      ;;
+  esac
+  if [ "$FEEDBACK_MAINTAINER" = yes ]; then
+    cat > "$SYSTEMD_USER_DIR/agent-template-feedback.service" <<EOF
+[Unit]
+Description=Judge and close Agent Template feedback
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=AGENT_TEMPLATE_REPO=$SOURCE_REPO
+Environment=AGENT_TEMPLATE_BOARD_CLI=$BIN/htbot
+ExecStart=$BIN/agent-template-feedback
+EOF
+    cat > "$SYSTEMD_USER_DIR/agent-template-feedback.timer" <<EOF
+[Unit]
+Description=Check Agent Template feedback every four hours
+
+[Timer]
+OnCalendar=*-*-* 00/4:00:00
+Persistent=true
+AccuracySec=1m
+Unit=agent-template-feedback.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  else
+    systemctl --user disable --now agent-template-feedback.timer >/dev/null 2>&1 || true
+    rm -f "$SYSTEMD_USER_DIR/agent-template-feedback.service" \
+          "$SYSTEMD_USER_DIR/agent-template-feedback.timer"
+  fi
+
   systemctl --user daemon-reload
   systemctl --user enable agent-chat.service
   systemctl --user restart agent-chat.service
   systemctl --user enable --now agent-template-update.timer
+  if [ "$FEEDBACK_MAINTAINER" = yes ]; then
+    systemctl --user enable --now agent-template-feedback.timer
+    echo "feedback timer: agent-template-feedback.timer, every 4 hours ($(systemctl --user list-timers agent-template-feedback.timer --no-pager 2>/dev/null | sed -n '2p'))"
+  else
+    echo "feedback timer: skipped (this is not a writable vstack maintainer checkout with the bot wrapper)"
+  fi
   echo "poll units: $SYSTEMD_USER_DIR/agent-board-poll@.service + .timer (refreshed, daemon-reload done)"
   echo "chat service: agent-chat.service (enabled and restarted)"
   echo "update timer: agent-template-update.timer, daily 06:30 local ($(systemctl --user list-timers agent-template-update.timer --no-pager 2>/dev/null | sed -n '2p'))"
@@ -313,6 +381,7 @@ else
 fi
 
 sync_company_skills
+feedback_update_host_notes "$(cat "$SRC/VERSION")" "$NO_HOST_NOTES"
 
 echo "installed. Next: run create-agent.sh --help, or agent-board-poll --once --dry-run <slug>"
-echo "corrections: agent-template feedback --what ... --got ... --expected ..."
+feedback_print_discovery

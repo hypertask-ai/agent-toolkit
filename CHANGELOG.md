@@ -5,6 +5,20 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.18.0 - 2026-09-16
+
+- Feedback uses one documented `--kind/--what/--got/--expected` interface, and
+  its help names the Agent Template board with a complete example.
+- Install and update print the feedback route and maintain bounded notes in
+  Claude, Codex when present, and synced project instructions without changing
+  content outside the markers.
+- The maintainer host checks urgent feedback first every four hours. Every
+  ticket gets a verdict, accepted work gets one auto-merge fix pull request,
+  and merged changelog references get one bot-authenticated shipped reply
+  before moving to Done.
+- Filing hosts report their still-open AGTE tickets during the daily update.
+- ACTION: run agent-template update on the vstack maintainer host and verify agent-template-feedback.timer is active
+
 ## 3.17.1 - 2026-09-16
 
 - AGTE-6: `agent-template update` now converts an old-schema conf without an
@@ -29,9 +43,9 @@ session to read and act on.
 
 ## 3.16.0 - 2026-09-16
 
-- The agent conf is now the only provider and harness policy. `MODEL_CLI` is
-  normal work; optional `LADDER`, `RESEARCH_CLI`, `TRIAGE_HARD_CLI`, and
-  `CHAT_CLI` choose every alternative command.
+- AGTE-3 shipped in this release: the agent conf is now the only provider and
+  harness policy. `MODEL_CLI` is normal work; optional `LADDER`, `RESEARCH_CLI`,
+  `TRIAGE_HARD_CLI`, and `CHAT_CLI` choose every alternative command.
 - Core no longer has provider allow-lists, model rewriting, or a built-in
   ladder. Ticket override files now contain one complete command.
 - `create-agent.sh --provider pi` writes a GLM 5.3 Flash pi command, while

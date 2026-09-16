@@ -70,21 +70,18 @@ it.
 
 ## Feedback to the template
 
-Change requests, bugs and ideas about the agent setup go to the Agent Template
-board, project 5500 (https://app.hypertask.ai/detail/project-5500, prefix
-AGTE), with:
+<!-- agent-template:begin -->
+Agent template version: __TEMPLATE_VERSION__
+Feedback command: `agent-template feedback --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"`
+Feedback board: https://app.hypertask.ai/detail/project-5500
+Updates: run `agent-template update` to get the latest.
+<!-- agent-template:end -->
 
-```
-agent-template feedback --kind bug|change|idea --title "<short title>" --body "<html>"
-```
+This posts to the Agent Template Inbox as the bot's own identity, never in the
+owner's name. The board uses project 5500 and prefix AGTE. A correction that
+lives only in one run's log is gone when that process exits, so file it in the
+same run.
 
-Posted as the bot's own identity, never in the owner's name. Run the command
-with no arguments for the board link and what each kind means.
-
-This is for the setup itself: the runner, the skills layout, this file, the
-checks. A fact about the product goes in a doc or on the ticket, and a rule
-about how to work a ticket goes in the skill it belongs to. Neither belongs
-here.
-
-A correction that lives only in one run's log is gone the moment that process
-exits, so it goes on the board the same run it happens.
+This route is for the setup itself: the runner, the skills layout, this file,
+and the checks. A fact about the product goes in a doc or on the ticket. A rule
+about how to work a ticket goes in the skill it belongs to.
