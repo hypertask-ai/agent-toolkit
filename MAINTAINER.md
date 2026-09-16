@@ -35,6 +35,14 @@ until you do it.
   `agent-template-weekly` is a compatibility alias. `agent-template report`
   prints the local filing scorecard.
 
+## Identity
+
+An agent run can only ever write as itself. Ticket, triage, chat, and advisor
+provider processes receive a per-agent command shim first on `PATH`; bare
+`hypertask`, `ht`, and `htbot` calls enter through that agent's token-bearing
+wrapper. A missing token ends the run with `no agent token for <slug>` before a
+board write, rather than falling back to the login in the owner's home config.
+
 ## Channels
 
 The host config is `~/.config/agent-template/config`. Ordinary hosts default to

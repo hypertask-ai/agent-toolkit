@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Create fail-closed CLI aliases for one agent process tree."""
+
+import os
+from pathlib import Path
+import shlex
+import shutil
+import sys
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def main() -> None:
+    if len(sys.argv) != 4:
+        fail("usage: agent-identity-shim <slug> <token-file> <board-cli>")
+    slug, token_name, board_name = sys.argv[1:]
+    if not slug or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in slug):
+        fail(f"invalid agent slug {slug!r}")
+
+    token_file = Path(token_name).expanduser().resolve()
+    board_cli = Path(board_name).expanduser().resolve()
+    try:
+        has_token = bool(token_file.read_text(encoding="utf-8").strip())
+    except OSError:
+        has_token = False
+    if not has_token:
+        fail(f"no agent token for {slug}")
+    if not os.access(board_cli, os.X_OK):
+        fail(f"agent board wrapper is not executable for {slug}: {board_cli}")
+
+    original_path = os.environ.get("AGENT_ORIGINAL_PATH") or os.environ.get("PATH", "")
+    state_root = Path(
+        os.environ.get("AGENT_IDENTITY_SHIM_DIR")
+        or Path(os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+        / "agent-identity-shims"
+    )
+    shim_dir = state_root / slug
+    shim_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    shim_dir.chmod(0o700)
+
+    names = ["hypertask"]
+    names.extend(name for name in ("ht", "htbot") if shutil.which(name, path=original_path))
+    script = """#!/usr/bin/env bash
+set -euo pipefail
+TOKEN_FILE={token_file}
+[ -r "$TOKEN_FILE" ] && grep -q '[^[:space:]]' "$TOKEN_FILE" || {{ echo {error} >&2; exit 1; }}
+export PATH={original_path}
+exec {board_cli} "$@"
+""".format(
+        token_file=shlex.quote(str(token_file)),
+        error=shlex.quote(f"no agent token for {slug}"),
+        original_path=shlex.quote(original_path),
+        board_cli=shlex.quote(str(board_cli)),
+    )
+    for name in names:
+        target = shim_dir / name
+        temporary = shim_dir / f".{name}.new"
+        temporary.write_text(script, encoding="utf-8")
+        temporary.chmod(0o700)
+        temporary.replace(target)
+    for stale in {"hypertask", "ht", "htbot"} - set(names):
+        (shim_dir / stale).unlink(missing_ok=True)
+
+    print(shim_dir)
+
+
+if __name__ == "__main__":
+    main()

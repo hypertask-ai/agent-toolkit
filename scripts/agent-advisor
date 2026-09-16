@@ -63,6 +63,10 @@ fi
 # ---------- what the advisor gets to see ----------
 TICKET_BLOCK="(no ticket context was passed to this run)"
 COMMENTS_BLOCK="(no comments available)"
+token_file=""
+adapter_name=""
+identity_slug=""
+board_cli=""
 if [ -n "$CONTEXT_FILE" ] && [ -r "$CONTEXT_FILE" ]; then
   TICKET_BLOCK="$(CF="$CONTEXT_FILE" python3 -c '
 import json, os, re
@@ -90,6 +94,12 @@ print(json.load(open(os.environ["CF"], encoding="utf-8")).get("task_id") or "")'
   board="$(CF="$CONTEXT_FILE" python3 -c '
 import json, os
 print(json.load(open(os.environ["CF"], encoding="utf-8")).get("board") or "")')"
+  identity_slug="$(CF="$CONTEXT_FILE" python3 -c '
+import json, os
+print(json.load(open(os.environ["CF"], encoding="utf-8")).get("slug") or "")')"
+  board_cli="$(CF="$CONTEXT_FILE" python3 -c '
+import json, os
+print(json.load(open(os.environ["CF"], encoding="utf-8")).get("board_cli") or "")')"
 
   if [ -n "$token_file" ] && [ -n "$adapter_name" ] && [ -n "$task_id" ]; then
     # In a subshell on purpose: core.sh and the adapter define their own die()
@@ -120,6 +130,15 @@ for raw in comments[-10:]:
   fi
 fi
 [ -n "$COMMENTS_BLOCK" ] || COMMENTS_BLOCK="(no comments on this ticket yet)"
+
+if [ "$adapter_name" = "hypertask" ] && [ -n "$identity_slug" ] && [ -n "$board_cli" ]; then
+  AGENT_ORIGINAL_PATH="${AGENT_ORIGINAL_PATH:-$PATH}"
+  SHIM_DIR="$("$CORE_ROOT/scripts/agent-identity-shim" "$identity_slug" "$token_file" "$board_cli")" || exit 1
+  PATH="$SHIM_DIR:$AGENT_ORIGINAL_PATH"
+  AGENT_SLUG="$identity_slug"
+  HYPERTASK_TOKEN_FILE="$token_file"
+  export AGENT_ORIGINAL_PATH PATH AGENT_SLUG HYPERTASK_TOKEN_FILE
+fi
 
 # The diff is the half of the story the board does not have: what this run has
 # actually changed so far. Capped, because a whole feature branch is not a

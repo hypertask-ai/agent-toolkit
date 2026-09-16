@@ -126,6 +126,7 @@ class Agent:
     mission: str
     repo: str
     token_file: Path
+    board_cli: Path
     model_cli: str
     skills: tuple[str, ...]
     api_url: str
@@ -136,7 +137,7 @@ class Agent:
         values = parse_conf(path)
         if values.get("CHAT") != "on":
             return None
-        required = ("AGENT_SLUG", "AGENT_NAME", "AGENT_ID", "TOKEN_FILE", "MODEL_CLI")
+        required = ("AGENT_SLUG", "AGENT_NAME", "AGENT_ID", "TOKEN_FILE", "BOARD_CLI", "MODEL_CLI")
         if any(not values.get(key) for key in required):
             return None
         indexes: list[str] = []
@@ -166,6 +167,7 @@ class Agent:
             mission=values.get("AGENT_MISSION", ""),
             repo=repo,
             token_file=Path(values["TOKEN_FILE"]).expanduser(),
+            board_cli=Path(values["BOARD_CLI"]).expanduser(),
             model_cli=values.get("CHAT_CLI") or values["MODEL_CLI"],
             skills=tuple(indexes),
             api_url=api_base(values),
@@ -479,6 +481,31 @@ New message from {message.get('userName') or 'the user'}:
 Return only the concise reply that should appear in Agent Chat. Do not include tool traces or preamble."""
 
 
+def agent_process_env(agent: Agent) -> dict[str, str]:
+    environment = dict(os.environ)
+    original_path = environment.get("PATH", "")
+    environment["AGENT_ORIGINAL_PATH"] = original_path
+    prepared = subprocess.run(
+        [str(Path(__file__).resolve().with_name("agent-identity-shim")), agent.slug,
+         str(agent.token_file), str(agent.board_cli)],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if prepared.returncode != 0:
+        raise RuntimeError(prepared.stderr.strip() or f"identity shim failed for {agent.slug}")
+    shim_dir = prepared.stdout.strip()
+    environment.update({
+        "AGENT_NAME": agent.name,
+        "AGENT_ID": agent.agent_id,
+        "AGENT_SLUG": agent.slug,
+        "HYPERTASK_TOKEN_FILE": str(agent.token_file),
+        "PATH": f"{shim_dir}:{original_path}",
+    })
+    return environment
+
+
 def run_provider(agent: Agent, prompt: str, timeout: int = 90) -> str:
     argv = shlex.split(agent.model_cli)
     if not argv:
@@ -488,7 +515,7 @@ def run_provider(agent: Agent, prompt: str, timeout: int = 90) -> str:
     result = subprocess.run(
         [*argv, prompt],
         cwd=scratch,
-        env={**os.environ, "AGENT_NAME": agent.name, "AGENT_ID": agent.agent_id},
+        env=agent_process_env(agent),
         text=True,
         capture_output=True,
         timeout=timeout,

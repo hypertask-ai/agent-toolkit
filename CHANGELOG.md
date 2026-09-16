@@ -1,3 +1,14 @@
+## 3.21.0 - 2026-09-16
+
+- Agent ticket, triage, chat, and advisor provider processes now put a
+  per-agent board-command shim first on `PATH`, so bare `hypertask`, `ht`, and
+  `htbot` calls use the agent wrapper and cannot inherit the owner's login.
+- The identity boundary checks the agent token before launch and exits non-zero
+  with `no agent token for <slug>` before any board write when it is missing.
+- Offline coverage verifies shim resolution, agent-token injection over an
+  owner home config, and the fail-closed missing-token path.
+- ACTION: run `agent-template update` on every bot host, then verify the next run starts normally; a host with a missing agent token will now stop and name the affected slug.
+
 ## 3.20.0 - 2026-09-16
 
 - `agent-chat.service` now publishes each configured agent's runtime snapshot

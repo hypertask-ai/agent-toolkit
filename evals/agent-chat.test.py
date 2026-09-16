@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory() as temporary:
     temporary = Path(temporary)
     common = (
         'CHAT="on"\nAGENT_SLUG="chat"\nAGENT_NAME="Chat"\nAGENT_ID="id-chat"\n'
-        f'TOKEN_FILE="{temporary}/token"\nMODEL_CLI="model-command --normal"\n'
+        f'TOKEN_FILE="{temporary}/token"\nBOARD_CLI="{temporary}/board"\nMODEL_CLI="model-command --normal"\n'
     )
     fallback = temporary / "fallback.conf"
     fallback.write_text(common)
@@ -33,6 +33,7 @@ def agent(slug):
         mission="Answer clearly.",
         repo="",
         token_file=Path("/unused"),
+        board_cli=Path("/unused-board"),
         model_cli="fake-provider",
         skills=("/company/INDEX.md", f"/{slug}/INDEX.md"),
         api_url="https://example.invalid/api",

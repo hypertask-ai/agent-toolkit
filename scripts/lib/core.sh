@@ -154,6 +154,23 @@ core_read_conf() {
   . "$path"
 }
 
+# core_enable_agent_identity <slug> <token-file> <board-cli>
+# Every child process gets aliases which enter through the agent's wrapper.
+# The original PATH is restored inside each alias so the wrapper can reach the
+# native CLI without resolving back to the alias.
+core_enable_agent_identity() {
+  local slug="$1" token_file="$2" board_cli="$3" shim_dir
+  if [ -z "${AGENT_ORIGINAL_PATH+x}" ]; then
+    AGENT_ORIGINAL_PATH="$PATH"
+    export AGENT_ORIGINAL_PATH
+  fi
+  shim_dir="$("$CORE_ROOT/scripts/agent-identity-shim" "$slug" "$token_file" "$board_cli")" || return 1
+  AGENT_SLUG="$slug"
+  HYPERTASK_TOKEN_FILE="$token_file"
+  AGENT_IDENTITY_PATH="$shim_dir:$AGENT_ORIGINAL_PATH"
+  export AGENT_SLUG HYPERTASK_TOKEN_FILE AGENT_IDENTITY_PATH
+}
+
 # ---------- command ladder ----------
 # Commands are opaque policy owned by the conf. Core only selects an ordered
 # rung; it never identifies, validates or rewrites a provider, model or harness.

@@ -223,6 +223,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/command-policy.test.sh" ]; then
   echo "-- command policy behavioural checks --"
   bash "$HERE/command-policy.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/identity-shim.test.sh" ]; then
+  echo ""
+  echo "-- identity shim behavioural checks --"
+  bash "$HERE/identity-shim.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/hypertask-adapter.test.sh" ]; then
   echo ""
   echo "-- hypertask adapter behavioural checks --"

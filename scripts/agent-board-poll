@@ -179,6 +179,10 @@ CORE_STATE_NAME="agent-board-poll"
 STATE_DIR="$(core_state_dir)"
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/$SLUG.log"
+if [ "$BOARD_ADAPTER" = "hypertask" ]; then
+  core_enable_agent_identity "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" \
+    2> >(tee -a "$LOG" >&2) || exit 1
+fi
 SEEN="$STATE_DIR/$SLUG.seen"
 # Comment ids this agent posted this run, one "<ref> <id>" line per comment,
 # written by the board CLI wrapper (adapter_install_board_cli) and read back
@@ -424,8 +428,8 @@ print(json.dumps({"ref": os.environ["REF"], "title": os.environ["TITLE"],
   # not to be billed for it.
   local rules_flag=""
   [ "$DRY_RUN" = "yes" ] && rules_flag="--rules-only"
-  verdict="$(printf '%s' "$input" | TRIAGE_MODEL_CLI="$TRIAGE_MODEL_CLI" \
-               bash "$TRIAGE_SH" $rules_flag 2>>"$LOG")" || verdict=""
+  verdict="$(printf '%s' "$input" | PATH="${AGENT_IDENTITY_PATH:-$PATH}" \
+               TRIAGE_MODEL_CLI="$TRIAGE_MODEL_CLI" bash "$TRIAGE_SH" $rules_flag 2>>"$LOG")" || verdict=""
   if [ -z "$verdict" ]; then
     printf 'easy|new|the scorer did not answer, so this stays on the default model\n'
     return 0
@@ -1035,23 +1039,24 @@ print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
   ADVISOR_CONTEXT="$ADVISOR_DIR/$SLUG-$ref.json"
   ADVISOR_COUNTER="$ADVISOR_DIR/$SLUG-$ref.count"
   REF="$ref" URL="$url" TITLE="$title" DESCRIPTION="$description" TASK_ID="$task_id" \
-  BOARD="$board" TOKEN_FILE="$TOKEN_FILE" ADAPTER="$BOARD_ADAPTER" python3 -c '
+  BOARD="$board" TOKEN_FILE="$TOKEN_FILE" BOARD_CLI="$BOARD_CLI" SLUG="$SLUG" \
+  ADAPTER="$BOARD_ADAPTER" python3 -c '
 import json, os
 print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
                   "title": os.environ["TITLE"], "description": os.environ["DESCRIPTION"],
                   "task_id": os.environ["TASK_ID"], "board": os.environ["BOARD"],
-                  "token_file": os.environ["TOKEN_FILE"],
-                  "adapter": os.environ["ADAPTER"]}))' > "$ADVISOR_CONTEXT"
+                  "token_file": os.environ["TOKEN_FILE"], "board_cli": os.environ["BOARD_CLI"],
+                  "slug": os.environ["SLUG"], "adapter": os.environ["ADAPTER"]}))' > "$ADVISOR_CONTEXT"
   printf '0\n' > "$ADVISOR_COUNTER"
 
   (
     # The run happens where the agent's work lives, so the model CLI sees the
     # repo it is meant to change and nothing else.
     if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
+    PATH="${AGENT_IDENTITY_PATH:-$PATH}" \
     AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
     AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER" \
     AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI" \
-    PATH="$(dirname "$BOARD_CLI"):$PATH" \
       "${MODEL_ARGV[@]}" "$PROMPT"
   ) >> "$LOG" 2>"$ERRFILE"
   rc=$?
