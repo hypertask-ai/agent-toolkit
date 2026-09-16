@@ -108,7 +108,7 @@ if [[ "$url" == *'/mcp/tasks?'* ]]; then
   emergency_labels='[{"name":"emergency"}]'
   [ "${BOARD_TEST_SCENARIO:-}" != "no-emergency" ] || emergency_labels='[]'
   cat <<JSON
-{"tasks":[{"id":"task-1","ticketNumber":"HTPR-1","section":"Bugs","title":"PR ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1}]}
+{"tasks":[{"id":"task-1","ticketNumber":"HTPR-1","section":"Bugs","title":"PR ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0}]}
 JSON
 elif [[ "$url" == *'task_id=task-3'* ]]; then
   printf '{"comments":[{"agent":{"id":"agent-1","displayName":"Dev One"},"text":"<p>Claimed.</p>"}]}\n'
@@ -131,19 +131,26 @@ die() { printf 'die: %s %s\n' "$*" >&2; return 1; }
 cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<'EOF'
 AGENT_SLUG="dev-1"
 AGENT_KIND="dev"
+BOARD_ADAPTER="hypertask"
 PR_REPO="example/repo"
 GITHUB_LOGIN="dev-one"
 EOF
 cat > "$TMP/home/.config/hypertask-agents/qa-1.conf" <<'EOF'
 AGENT_SLUG="qa-1"
 AGENT_KIND="qa"
+BOARD_ADAPTER="hypertask"
 PR_REPO="example/repo"
 EOF
 cat > "$TMP/home/.config/hypertask-agents/dev-2.conf" <<'EOF'
 AGENT_SLUG="dev-2"
 AGENT_KIND="dev"
+BOARD_ADAPTER="hypertask"
 PR_REPO="example/repo"
 PR_BRANCH_PREFIX="cursor-dev-2/"
+EOF
+cat > "$TMP/home/.config/hypertask-agents/legacy-worker.conf" <<'EOF'
+PR_REPO="example/repo"
+LEGACY_PROMPT="unterminated
 EOF
 
 run_gate() {
@@ -153,6 +160,13 @@ run_gate() {
     adapter_pr_gate "$TMP/token" 15 agent-1 "$name" "$slug" "$cache" \
       "$TMP/home/.config/hypertask-agents"
 }
+
+legacy_log="$TMP/legacy.log"
+run_gate pending >/dev/null 2>"$legacy_log"
+[[ "$(grep -cF 'skipping legacy agent conf legacy-worker.conf: no BOARD_ADAPTER schema marker' "$legacy_log")" = 1 ]]
+! grep -qF 'unexpected EOF' "$legacy_log"
+rm "$TMP/home/.config/hypertask-agents/legacy-worker.conf"
+echo 'PASS legacy conf without schema marker is logged once and never sourced'
 
 red="$(run_gate red)"
 [[ "$red" == *'"action": "fix"'* ]]
@@ -237,7 +251,9 @@ echo 'PASS merged but undeployed PR claims no new ticket'
 rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
 deployed_run="$(PR_TEST_SCENARIO=deployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$deployed_run" == *'would pick up HTPR-1'* ]]
-echo 'PASS deployed PR releases the next ticket'
+[[ "$deployed_run" == *'skip  HTPR-3: unassigned, but this agent does not claim unassigned tickets'* ]]
+[[ "$deployed_run" == *'skip  HTPR-4: assigned to another owner and neither assigned nor mentioned to this agent'* ]]
+echo 'PASS deployed PR releases the next ticket and explains every ineligible candidate'
 
 # Six recent failures for the synthetic PR key do not stop the PR-fix path.
 state="$TMP/home/.local/state/agent-board-poll"
@@ -250,4 +266,4 @@ red_run="$(PR_TEST_SCENARIO=red HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_S
 [[ "$red_run" == *'no ticket attempts, cooldown, triage, or escalation'* ]]
 echo 'PASS red PR still runs after many attempts with no cooldown or escalation'
 
-echo '15 one-ticket-until-live checks passed'
+echo '16 one-ticket-until-live checks passed'

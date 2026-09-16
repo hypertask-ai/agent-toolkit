@@ -717,6 +717,11 @@ PYEOF
   if [ -n "$config_dir" ] && [ -d "$config_dir" ]; then
     for owner_conf in "$config_dir"/*.conf; do
       [ -f "$owner_conf" ] || continue
+      if ! grep -qE '^BOARD_ADAPTER=' "$owner_conf"; then
+        printf 'skipping legacy agent conf %s: no BOARD_ADAPTER schema marker\n' \
+          "$(basename "$owner_conf")" >&2
+        continue
+      fi
       (
         unset AGENT_SLUG PR_BRANCH_PREFIX GITHUB_LOGIN PR_REPO
         # shellcheck disable=SC1090

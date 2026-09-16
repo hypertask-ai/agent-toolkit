@@ -1,3 +1,14 @@
+## 3.21.3 - 2026-09-16
+
+- Poll explanations now report why every listed ticket is ineligible, including
+  tickets assigned to another owner and unassigned tickets an agent cannot claim.
+- Pull request ownership discovery skips legacy agent confs without the
+  `BOARD_ADAPTER` schema marker before sourcing them, with one diagnostic line.
+- Focused coverage verifies complete ineligibility explanations and safe handling
+  of a malformed legacy conf.
+- ACTION: run `agent-template update` on bot hosts so polling ignores legacy confs
+  and explains every board candidate.
+
 ## 3.21.2 - 2026-09-16
 
 - The one-ticket-until-live gate now assigns PR debt only by the agent's

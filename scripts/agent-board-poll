@@ -711,6 +711,9 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
           log "emergency waiting, all devs busy: $ref has no free dev yet"
           ;;
       esac
+      explain "skip  $ref: unassigned, but this agent does not claim unassigned tickets"
+    else
+      explain "skip  $ref: assigned to another owner and neither assigned nor mentioned to this agent"
     fi
     continue
   fi
