@@ -154,161 +154,25 @@ core_read_conf() {
   . "$path"
 }
 
-# ---------- model policy ----------
-# One shipped file defines the ladder for this runner and the supervisor.
-CORE_POLICY_ROOT="$(dirname "$(dirname "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")")")"
-MODEL_POLICY_FILE="${MODEL_POLICY_FILE:-$CORE_POLICY_ROOT/core/model-policy.conf}"
-[ -r "$MODEL_POLICY_FILE" ] || die "model policy is missing at $MODEL_POLICY_FILE" \
-  "install the complete create-agent template, including core/model-policy.conf"
-# shellcheck disable=SC1090
-. "$MODEL_POLICY_FILE"
-[ -z "${MODEL_POLICY_CODEX_BIN_OVERRIDE:-}" ] || MODEL_POLICY_CODEX_BIN="$MODEL_POLICY_CODEX_BIN_OVERRIDE"
-
-core_model_provider() {
-  local argv=()
-  read -r -a argv <<< "$1"
-  case "$(basename "${argv[0]:-}")" in
-    cursor-agent) printf 'cursor-agent' ;;
-    hax|codex) printf 'codex' ;;
-    claude) printf 'claude' ;;
-    *) printf '' ;;
-  esac
+# ---------- command ladder ----------
+# Commands are opaque policy owned by the conf. Core only selects an ordered
+# rung; it never identifies, validates or rewrites a provider, model or harness.
+core_ladder_count() {
+  [ -n "${1:-}" ] || { printf '0'; return 0; }
+  LADDER_VALUE="$1" python3 -c 'import os; print(len(os.environ["LADDER_VALUE"].split("|")))'
 }
 
-core_model_option() {
-  local cli="$1" option="$2" argv=() i
-  read -r -a argv <<< "$cli"
-  for i in "${!argv[@]}"; do
-    case "${argv[$i]}" in
-      "$option") printf '%s' "${argv[$((i + 1))]:-}"; return 0 ;;
-      "$option="*) printf '%s' "${argv[$i]#*=}"; return 0 ;;
-    esac
-  done
-  printf ''
-}
-
-core_model_count() {
-  local argv=() item count=0
-  read -r -a argv <<< "$1"
-  for item in "${argv[@]}"; do
-    case "$item" in --model|--model=*) count=$((count + 1)) ;; esac
-  done
-  printf '%s' "$count"
-}
-
-core_list_has() {
-  case ",$1," in *",$2,"*) return 0 ;; *) return 1 ;; esac
-}
-
-core_model_allowed() {
-  case "$1" in
-    cursor-agent) core_list_has "$MODEL_POLICY_CURSOR_AGENT_MODELS" "$2" ;;
-    codex) core_list_has "$MODEL_POLICY_CODEX_MODELS" "$2" ;;
-    claude) core_list_has "$MODEL_POLICY_CLAUDE_MODELS" "$2" ;;
-    *) return 1 ;;
-  esac
-}
-
-core_effort_allowed() {
-  case "$1:$2" in
-    cursor-agent:|claude:|claude:high|codex:high|codex:xhigh) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-core_model_default() {
-  case "$1" in
-    cursor-agent) printf '%s' "$MODEL_POLICY_CURSOR_AGENT_DEFAULT" ;;
-    codex) printf '%s' "$MODEL_POLICY_CODEX_DEFAULT" ;;
-    claude) printf '%s' "$MODEL_POLICY_CLAUDE_DEFAULT" ;;
-  esac
-}
-
-core_effort_default() {
-  case "$1" in
-    codex|claude) printf 'high' ;;
-    *) printf '' ;;
-  esac
-}
-
-core_model_cli() {
-  local provider="$1" model="$2" effort="${3:-}"
-  [ -n "$effort" ] || effort="$(core_effort_default "$provider")"
-  case "$provider" in
-    cursor-agent)
-      printf 'cursor-agent -p --output-format text --model %s -f --trust' "$model"
-      ;;
-    codex)
-      printf '%s --provider=codex --model=%s --effort=%s --no-session' \
-        "$MODEL_POLICY_CODEX_BIN" "$model" "$effort"
-      [ "$effort" = "xhigh" ] && printf ' --raw'
-      printf ' -p'
-      ;;
-    claude)
-      printf 'claude -p --model %s --effort %s' "$model" "$effort"
-      ;;
-  esac
-}
-
-# core_model_resolve <conf-cli> <provider:model[:effort]|bare-model|empty> <source>
-# Sets CORE_MODEL_{CLI,PROVIDER,MODEL,EFFORT,NOTICE}. Invalid input falls back
-# to the validated conf default and is reported by the caller as one line.
-core_model_resolve() {
-  local conf_cli="$1" selection="$2" source="$3"
-  local conf_provider conf_model conf_effort provider model effort fallback_model fallback_effort rest
-  CORE_MODEL_CLI="$conf_cli"
-  CORE_MODEL_PROVIDER="$(core_model_provider "$conf_cli")"
-  CORE_MODEL_MODEL="$(core_model_option "$conf_cli" --model)"
-  CORE_MODEL_EFFORT="$(core_model_option "$conf_cli" --effort)"
-  CORE_MODEL_NOTICE=""
-
-  conf_provider="$CORE_MODEL_PROVIDER"
-  conf_model="$CORE_MODEL_MODEL"
-  conf_effort="$CORE_MODEL_EFFORT"
-  if [ -z "$conf_provider" ]; then
-    conf_provider="cursor-agent"
-    conf_model="$(core_model_default "$conf_provider")"
-    conf_effort=""
-    CORE_MODEL_NOTICE="model policy rejected 'unknown:${CORE_MODEL_MODEL:-<empty>}' from $source; falling back to '$conf_provider:$conf_model'."
-    CORE_MODEL_CLI="$(core_model_cli "$conf_provider" "$conf_model" "$conf_effort")"
-    CORE_MODEL_PROVIDER="$conf_provider"
-    CORE_MODEL_MODEL="$conf_model"
-    CORE_MODEL_EFFORT="$conf_effort"
-  elif [ "$(core_model_count "$conf_cli")" -ne 1 ] \
-       || ! core_model_allowed "$conf_provider" "$conf_model" \
-       || ! core_effort_allowed "$conf_provider" "$conf_effort"; then
-    fallback_model="$(core_model_default "$conf_provider")"
-    fallback_effort="$(core_effort_default "$conf_provider")"
-    CORE_MODEL_NOTICE="model policy rejected '$conf_provider:${conf_model:-<empty>}' from $source; falling back to '$conf_provider:$fallback_model'."
-    CORE_MODEL_CLI="$(core_model_cli "$conf_provider" "$fallback_model" "$fallback_effort")"
-    CORE_MODEL_MODEL="$fallback_model"
-    CORE_MODEL_EFFORT="$fallback_effort"
-    conf_model="$fallback_model"
-    conf_effort="$fallback_effort"
-  fi
-
-  [ -n "$selection" ] || return 0
-  case "$selection" in
-    *:*)
-      provider="${selection%%:*}"
-      rest="${selection#*:}"
-      model="${rest%%:*}"
-      if [ "$rest" = "$model" ]; then effort="$(core_effort_default "$provider")"; else effort="${rest#*:}"; fi
-      case "$effort" in *:*) provider="" ;; esac
-      ;;
-    *) provider="$conf_provider"; model="$selection"; effort="$conf_effort" ;;
-  esac
-  if [ -z "$provider" ] || ! core_model_allowed "$provider" "$model" \
-     || ! core_effort_allowed "$provider" "$effort"; then
-    CORE_MODEL_NOTICE="model policy rejected '${provider:-unknown}:${model:-<empty>}' from $source; falling back to '$conf_provider:$conf_model'."
-    return 0
-  fi
-
-  CORE_MODEL_PROVIDER="$provider"
-  CORE_MODEL_MODEL="$model"
-  CORE_MODEL_EFFORT="$effort"
-  CORE_MODEL_CLI="$(core_model_cli "$provider" "$model" "$effort")"
-  CORE_MODEL_NOTICE=""
+# core_ladder_command <ladder> <one-based-rung> : print one full command.
+core_ladder_command() {
+  LADDER_VALUE="$1" LADDER_RUNG="$2" python3 <<'PYEOF'
+import os
+commands = os.environ["LADDER_VALUE"].split("|") if os.environ["LADDER_VALUE"] else []
+try:
+    rung = int(os.environ["LADDER_RUNG"])
+except ValueError:
+    rung = 0
+print(commands[rung - 1].strip() if 0 < rung <= len(commands) else "", end="")
+PYEOF
 }
 
 # ---------- secrets ----------

@@ -53,7 +53,9 @@ COMPANY_SKILLS_INDEX="${COMPANY_SKILLS_INDEX:-$HOME/projects/company-skills/INDE
 MISSION_FILE=""
 WIRING="poll"
 SECTIONS=""
-MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
+PROVIDER="cursor"
+MODEL_CLI=""
+MODEL_CLI_SET="no"
 MAX_CONCURRENT_RUNS="1"
 CHAT_PAGE="yes"
 ROLE="write"
@@ -83,7 +85,8 @@ Options:
   --mission-file PATH      plain-text mission, used verbatim
   --wiring poll|fleet|none how work reaches the agent               (default poll)
   --sections "A,B"         board columns the poll watches
-  --model-cli "CMD"        model command template  (default: cursor-agent with Grok 4.6 only)
+  --provider cursor|pi     starter command to write                     (default cursor)
+  --model-cli "CMD"        full command; overrides --provider
   --max-concurrent N       runs started per tick                    (default 1)
   --chat-page yes|no       enable the host chat lane               (default yes)
   --role ROLE              identity role on the board               (default write)
@@ -110,7 +113,8 @@ while [ $# -gt 0 ]; do
     --mission-file) MISSION_FILE="$2"; shift 2 ;;
     --wiring) WIRING="$2"; shift 2 ;;
     --sections) SECTIONS="$2"; shift 2 ;;
-    --model-cli) MODEL_CLI="$2"; shift 2 ;;
+    --provider) PROVIDER="$2"; shift 2 ;;
+    --model-cli) MODEL_CLI="$2"; MODEL_CLI_SET="yes"; shift 2 ;;
     --max-concurrent) MAX_CONCURRENT_RUNS="$2"; shift 2 ;;
     --chat-page) CHAT_PAGE="$2"; shift 2 ;;
     --role) ROLE="$2"; shift 2 ;;
@@ -122,11 +126,16 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-core_model_resolve "$MODEL_CLI" "" "--model-cli"
-MODEL_CLI="$CORE_MODEL_CLI"
-if [ -n "$CORE_MODEL_NOTICE" ]; then
-  printf 'ERROR: %s\n' "$CORE_MODEL_NOTICE" >&2
+if [ "$MODEL_CLI_SET" = "no" ]; then
+  case "$PROVIDER" in
+    cursor) MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust" ;;
+    pi) MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash" ;;
+    *) die "--provider must be cursor or pi, got '$PROVIDER'" \
+         "pick one of those choices, or pass the complete command with --model-cli" ;;
+  esac
 fi
+[ -n "$MODEL_CLI" ] || die "the model command is empty" \
+  "pass --provider cursor|pi or --model-cli '<full command>'"
 
 [ -n "$NAME" ] || die "--name is missing" "pass --name \"<Display Name>\""
 case "$KIND" in dev|qa|worker|cli) ;; *) die "--kind must be dev, qa, worker or cli, got '$KIND'" "pick one of those four" ;; esac

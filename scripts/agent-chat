@@ -101,7 +101,7 @@ class Agent:
             mission=values.get("AGENT_MISSION", ""),
             repo=repo,
             token_file=Path(values["TOKEN_FILE"]).expanduser(),
-            model_cli=values["MODEL_CLI"],
+            model_cli=values.get("CHAT_CLI") or values["MODEL_CLI"],
             skills=tuple(indexes),
             api_url=api_base(values),
             webhook_secret_file=Path(secret).expanduser() if secret else None,
@@ -247,11 +247,6 @@ def run_provider(agent: Agent, prompt: str, timeout: int = 90) -> str:
     argv = shlex.split(agent.model_cli)
     if not argv:
         raise RuntimeError("MODEL_CLI is empty")
-    executable = Path(argv[0]).name
-    if executable == "claude" and "--effort" not in argv:
-        argv.extend(["--effort", "low"])
-    if executable == "cursor-agent" and "--mode" not in argv and "--plan" not in argv:
-        argv.extend(["--mode", "ask"])
     scratch = Path(os.environ.get("AGENT_CHAT_STATE_DIR", str(Path.home() / ".local/state/agent-chat"))) / "scratch" / agent.slug
     scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
     result = subprocess.run(

@@ -124,7 +124,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for item in SKILL.md MAINTAINER.md VERSION CHANGELOG.md scripts adapters evals repo-skeleton project-template; do
+for item in SKILL.md MAINTAINER.md CONF.md VERSION CHANGELOG.md scripts adapters evals repo-skeleton project-template; do
   [ -e "$SRC/$item" ] || fail "$SRC/$item is missing" \
     "run install.sh from inside the template folder in the repo"
 done
@@ -144,7 +144,7 @@ fi
 
 echo "source: $SRC"
 echo "skill:  $DEST"
-echo "docs:   $DEST/MAINTAINER.md"
+echo "docs:   $DEST/MAINTAINER.md + $DEST/CONF.md"
 echo "bin:    $BIN/agent-board-poll -> $DEST/scripts/agent-board-poll"
 echo "bin:    $BIN/agent-chat -> $DEST/scripts/agent-chat"
 echo "bin:    $BIN/agent-template -> $DEST/scripts/agent-template"
@@ -161,6 +161,7 @@ fi
 mkdir -p "$DEST" "$BIN"
 cp -a "$SRC/SKILL.md" "$DEST/SKILL.md"
 cp -a "$SRC/MAINTAINER.md" "$DEST/MAINTAINER.md"
+cp -a "$SRC/CONF.md" "$DEST/CONF.md"
 # The version travels with the installed copy, because that is what
 # `agent-template feedback` reports and what a bug report has to name.
 cp -a "$SRC/VERSION" "$DEST/VERSION"
@@ -174,7 +175,7 @@ cp -a "$SRC/CHANGELOG.md" "$DEST/CHANGELOG.md"
 # far, not a real error. Stage the new tree next to DEST, then swap each
 # directory in with a rename: a path lookup during the swap either finds the
 # whole old directory or the whole new one, never a partially written file.
-for dir in scripts adapters core evals repo-skeleton project-template; do
+for dir in scripts adapters evals repo-skeleton project-template; do
   stage="$(mktemp -d "$DEST/.$dir.XXXXXX")"
   cp -a "$SRC/$dir/." "$stage/"
   if [ -d "$DEST/$dir" ]; then
@@ -187,11 +188,14 @@ for dir in scripts adapters core evals repo-skeleton project-template; do
     mv -T "$stage" "$DEST/$dir"
   fi
 done
+# 3.16 moved command policy into each agent conf. Remove the obsolete shared
+# policy directory from upgrades as well as omitting it from fresh installs.
+rm -rf "$DEST/core"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-chat" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/triage.sh" \
-          "$DEST/scripts/sync-project.sh" \
+          "$DEST/scripts/sync-project.sh" "$DEST/scripts/migrate-provider-policy.py" \
           "$DEST/evals/run-evals.sh" \
           "$DEST/project-template/.claude/skills/evals/run-evals.sh" \
           "$DEST/project-template/.claude/hooks/board-write-guard.sh"

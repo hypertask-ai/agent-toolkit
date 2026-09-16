@@ -39,7 +39,7 @@ usage() { sed -n '2,32p' "$SELF" | sed 's/^# \{0,1\}//'; }
 
 RULES_ONLY="no"
 # The cheap model, not the good one. This call decides a label, not a fix.
-TRIAGE_MODEL_CLI="${TRIAGE_MODEL_CLI:-claude -p --model haiku}"
+TRIAGE_MODEL_CLI="${TRIAGE_MODEL_CLI:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -227,6 +227,10 @@ if [ "$RULES_ONLY" = "yes" ]; then
 fi
 
 read -r -a TRIAGE_ARGV <<< "$TRIAGE_MODEL_CLI"
+if [ "${#TRIAGE_ARGV[@]}" -eq 0 ]; then
+  printf '{"score": "easy", "by": "default", "reason": "no rule fired and no TRIAGE_MODEL_CLI is configured"}\n'
+  exit 0
+fi
 if ! command -v "${TRIAGE_ARGV[0]}" >/dev/null 2>&1; then
   printf '{"score": "easy", "by": "default", "reason": "no rule fired and %s is not installed here"}\n' "${TRIAGE_ARGV[0]}"
   exit 0

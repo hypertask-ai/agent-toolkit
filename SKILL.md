@@ -92,7 +92,7 @@ index first, then the agent's own indexes, and a short brief from the conf and
 the latest `agent-board-poll` log. Chat prompts forbid board writes and
 worktrees.
 
-Replies use the conf's `MODEL_CLI`, low effort for Claude, and a 90-second
+Replies use `CHAT_CLI` from the conf, falling back to `MODEL_CLI`, with a 90-second
 timeout. The MCP reply uses the human message id as its idempotency key, and
 `~/.local/state/agent-chat/handled.jsonl` records it after the reply lands, so
 a restart cannot duplicate it. Provider errors are logged and answered with a
@@ -113,9 +113,9 @@ agent log. Never send that test with the owner's CLI token.
 ## Where the agent runs
 
 Put this agent on a plain Linux host with systemd: a laptop, a VPS, a
-container. It needs a shell, a git checkout on disk, a model CLI it can spawn
-as a child process (claude, cursor-agent, codex), a token file at 0600, and a
-poll tick that runs for minutes.
+container. It needs a shell, a git checkout on disk, a non-interactive model command it
+can spawn as a child process, a token file at 0600, and a poll tick that runs
+for minutes.
 
 This agent probably should not live on Cloudflare Workers or Pages Functions:
 no shell, no subprocess, no disk, no git, CPU time capped per request, cron
@@ -255,23 +255,45 @@ request with auto-merge off. It may only touch `evals/cases.jsonl` and
 `evals/PENDING-FIXES.md`: never `install.sh`, never an adapter's auth code, and
 it never deletes or rewrites an existing case.
 
-## Model policy
+## The conf decides the provider
 
-Cursor spends only on Grok. `cursor-agent` may run only
-`cursor-grok-4.6-high-fast`, never Claude ids, Auto, or Composer. Codex on the
-ChatGPT subscription is the first escalation. Claude is reserved for meta work
-and is the last machine rung.
+The conf is the only command policy. Core treats every command as opaque: it
+has no provider allow-list and no built-in ladder.
 
-The shared ladder lives in `core/model-policy.conf`: the agent conf is the
-default; hard triage or three failed attempts uses
-`codex:gpt-5.6-sol:high`; research and `agent-advisor` use
-`codex:gpt-5.6-sol:xhigh`; two failed Codex attempts unlock
-`claude:opus:high`; after that the ticket returns to Valentin. The runner uses
-`hax` for Codex in the ticket worktree with the normal prompt and tools.
+- `MODEL_CLI` is normal ticket work and rung 1.
+- `LADDER` is an optional `|`-separated list of full commands. After three
+  failed attempts, each later attempt takes the next command. Empty or absent
+  means no escalation.
+- `RESEARCH_CLI` is optional for `agent-advisor` and supervisor research.
+  Empty or absent means no research step.
+- `TRIAGE_HARD_CLI` is optional for tickets labelled `hard`; absent means
+  `MODEL_CLI`.
+- `CHAT_CLI` is optional for Agent Chat; absent means `MODEL_CLI`.
 
-Every provider has an allow-list. Invalid conf or override values print one
-error and fall back to the conf default. Research may write only `Retry with:
-codex:gpt-5.6-sol:high`, `Retry with: claude:opus:high`, or `Retry with: same`.
+Each value is a complete non-interactive command, including model, tool,
+permission and print flags. The runner splits it into arguments without shell
+evaluation and appends the prompt as the final argument, which is the existing
+`MODEL_CLI` contract. Put `-p`, `--print`, or the harness equivalent before the
+prompt. A literal `|` cannot be part of a ladder command because it separates
+rungs.
+
+A pi-only conf needs no other policy:
+
+```sh
+MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash"
+```
+
+A Cursor-first conf can explicitly choose the former ladder:
+
+```sh
+MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
+LADDER="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|claude -p --model opus --effort high"
+RESEARCH_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session --raw -p"
+TRIAGE_HARD_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+CHAT_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust --mode ask"
+```
+
+See `CONF.md` for the complete schema.
 
 ## The conf
 
@@ -287,22 +309,24 @@ codex:gpt-5.6-sol:high`, `Retry with: claude:opus:high`, or `Retry with: same`.
 | `BOARD_CLI` | the wrapper that runs board writes as this agent |
 | `WATCH_SECTIONS` | comma-separated columns to watch |
 | `SKILLS_INDEX` | the indexes the agent reads first, comma separated, **company pack first, bot pack last** |
-| `MODEL_CLI` | command template, default `claude -p --model sonnet` |
+| `MODEL_CLI` | required full command for normal ticket work |
+| `LADDER` | optional `\|`-separated escalation commands, one per failure after three |
+| `RESEARCH_CLI` | optional advisor and research command; absent disables research |
+| `TRIAGE_HARD_CLI` | optional hard-ticket command; absent uses `MODEL_CLI` |
+| `CHAT_CLI` | optional chat command; absent uses `MODEL_CLI` |
 | `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
 | `CHAT` | `on` to answer through the host chat daemon, default `on` for non-CLI board agents |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
 | `EXCLUDE_LABELS` | labels that make a ticket off limits, comma separated |
 | `WORKDIR_MODE` | `repo` (default) runs in `AGENT_REPO`; `per-run` gives each ticket its own checkout |
 | `WORKDIR_ROOT` | where `per-run` checkouts go, required when `WORKDIR_MODE=per-run` |
-| `RETRY_LIMIT` | goes a failing ticket gets per window, default 2 |
+| `RETRY_LIMIT` | total failed attempts allowed per window; default three plus the number of ladder commands |
 | `RETRY_WINDOW_SECONDS` | length of that window, default 21600 (six hours) |
 | `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
 | `PR_REPO` | **required.** the repository whose pull requests say whether a ticket is finished; `agent-board-poll` refuses to tick without it. Set it with `create-agent.sh --resume --pr-repo <org/name>` |
 | `TRIAGE` | `yes` to score a ticket before pickup; defaults to `yes` for `AGENT_KIND=dev` and `no` for everything else |
-| `TRIAGE_HARD_OVERRIDE` | hard-ticket route, default `codex:gpt-5.6-sol:high` from `core/model-policy.conf` |
-| `TRIAGE_MODEL_CLI` | the cheap model that breaks a tie the rules could not, default `claude -p --model haiku` |
+| `TRIAGE_MODEL_CLI` | optional command that breaks a tie the rules could not; default `MODEL_CLI` |
 | `ADVISOR_MAX` | `agent-advisor` calls allowed per run, default 2 |
-| `ADVISOR_OVERRIDE` | research route for `agent-advisor`, default `codex:gpt-5.6-sol:xhigh` from `core/model-policy.conf` |
 
 ## How hard is this ticket
 
@@ -321,15 +345,15 @@ design:
 5. Only if none of those fire, one cheap model call decides.
 
 The score is written on the ticket as a label, so a human can see it and
-overrule it by changing it. A `hard` ticket runs on a stronger model and has to
-post a numbered plan (root cause, files, how it will verify) as its first
+overrule it by changing it. A `hard` ticket runs on `TRIAGE_HARD_CLI` when
+configured, otherwise `MODEL_CLI`, and has to post a numbered plan (root cause, files, how it will verify) as its first
 comment, which counts toward its three. An `easy` ticket changes nothing. QA
 agents are never scored: they verify somebody else's work.
 
-When an agent is stuck mid-run, `agent-advisor "<one precise question>"` gets a
-second opinion from a stronger model, given the ticket, its last ten comments
-and the run's current diff. Twice per run; the third call refuses. It reads the
-board and never writes to it.
+When `RESEARCH_CLI` exists, an agent stuck mid-run can use `agent-advisor
+"<one precise question>"`. It receives the ticket, last ten comments and current
+diff. Twice per run; the third call refuses. It reads the board and never writes
+to it. Without `RESEARCH_CLI`, the prompt does not offer this step.
 
 ## Company pack + bot pack
 
@@ -361,9 +385,9 @@ pack's `supervise-board/scripts/board_config.py`.
 `BOARD_ID` takes more than one board, comma separated. `WATCH_SECTIONS` takes
 `*` for every column, which is what an agent answering @mentions needs.
 
-Set `MODEL_CLI` to a complete allowed command, including the model and any
-headless permission flags. The runner preserves a valid conf command, but every
-provider/model selection still has to pass the model policy above.
+Set `MODEL_CLI` to the complete non-interactive command. `create-agent.sh
+--provider pi` writes the pi example above; `--model-cli` accepts any other
+command without interpreting its provider or harness.
 
 ## Tokens
 

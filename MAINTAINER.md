@@ -24,31 +24,32 @@ until you do it.
   so the same checks run on any board.
 - **Triage** — `scripts/triage.sh`, run by the runner before it starts a
   ticket that carries neither `easy` nor `hard`. Rules first; one cheap model
-  call only when no rule fires. A `hard` ticket runs on a stronger model and
-  must post a numbered plan as its first comment. QA agents are not scored.
-- **Advisor** — `agent-advisor "<question>"`, for an agent mid-run that has
-  already tried two approaches. Two calls per run, reads the board, never
-  writes to it.
+  call only when no rule fires. A `hard` ticket uses `TRIAGE_HARD_CLI` when
+  configured and must post a numbered plan first. QA agents are not scored.
+- **Advisor** — when `RESEARCH_CLI` is configured, `agent-advisor "<question>"`
+  gives a stuck agent two read-only research calls per run. Without it, there
+  is no research step.
 - **Weekly report** — `agent-template-weekly`, turns a week of corrections
   into checks; `agent-template report` prints this week's scorecard.
 
-## Model policy
+## The conf decides the provider
 
-Cursor spends only on Grok. `cursor-agent` may run only
-`cursor-grok-4.6-high-fast`, never Claude ids, Auto, or Composer. Codex on the
-ChatGPT subscription is the first escalation. Claude is reserved for meta work
-and is the last machine rung.
+The conf is the only command policy. Core treats commands as opaque strings
+and neither allows nor rejects providers, models or harnesses.
 
-The shared ladder lives in `core/model-policy.conf`: the agent conf is the
-default; hard triage or three failed attempts uses
-`codex:gpt-5.6-sol:high`; research and `agent-advisor` use
-`codex:gpt-5.6-sol:xhigh`; two failed Codex attempts unlock
-`claude:opus:high`; after that the ticket returns to Valentin. The runner uses
-`hax` for Codex in the ticket worktree with the normal prompt and tools.
+- `MODEL_CLI` is normal ticket work.
+- `LADDER` optionally lists full commands separated by `|`. Three failed
+  attempts stay on `MODEL_CLI`; each later attempt takes the next rung. No
+  value means no escalation.
+- `RESEARCH_CLI` optionally powers advisor and supervisor research. No value
+  means no research step.
+- `TRIAGE_HARD_CLI` optionally handles `hard`; absent means `MODEL_CLI`.
+- `CHAT_CLI` optionally handles chat; absent means `MODEL_CLI`.
 
-Every provider has an allow-list. Invalid conf or override values print one
-error and fall back to the conf default. Research may write only `Retry with:
-codex:gpt-5.6-sol:high`, `Retry with: claude:opus:high`, or `Retry with: same`.
+Commands include every model, permission, tool and non-interactive flag. The
+runner splits a command into arguments without shell evaluation and appends the
+prompt as the final argument. Put the harness's `-p` or `--print` before it.
+See `CONF.md` for the complete schema and pi and Cursor examples.
 
 ## Its own repo
 
@@ -118,12 +119,9 @@ Two packs, always in this order:
   and its reason is also in `~/.local/state/agent-board-poll/triage.jsonl`. If
   the board refused the label, the score sits in
   `~/.local/state/agent-board-poll/triage/<REF>` and the log says so.
-- Per-ticket model overrides: `~/.local/state/agent-board-poll/model-override/<REF>`,
-  one line, `provider:model` such as `claude:opus`. Written by triage for a hard
-  ticket and by the supervisor for a ticket that has failed three times. A
-  legacy bare model id stays on the agent's provider and is checked against
-  that provider's allow-list. Delete the file to put the ticket back on the
-  agent's usual model.
+- Per-ticket command overrides: `~/.local/state/agent-board-poll/model-override/<REF>`,
+  one full command on one line. It wins over hard triage and `LADDER`. Delete
+  the file to return the ticket to the policy in its conf.
 
 ## Five daily checks
 

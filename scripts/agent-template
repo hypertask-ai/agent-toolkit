@@ -41,8 +41,8 @@
 #      the slug's old worker unit (hypertask-agent-worker@<slug>) is
 #      masked (retired); the file already has BOARD_ADAPTER= (already has
 #      a template twin); or HT_PROVIDER has no known MODEL_CLI mapping
-#      (cursor, codex and claude are known). A disallowed old cursor/claude
-#      model is replaced by that provider's safe default with one clear error.
+#      (cursor, codex, claude and pi are known). Models are copied as data;
+#      this compatibility conversion does not enforce a provider policy.
 #   4. removes now-redundant agent-board-poll@<slug>.service.d/path.conf
 #      drop-ins (backed up first) now that the shared unit sets PATH
 #      itself, then systemctl --user daemon-reload, and restarts (never
@@ -323,20 +323,20 @@ def esc(v):
 provider = fields.get("HT_PROVIDER", "")
 model = fields.get("HT_MODEL", "")
 if provider == "cursor":
-    if model != "cursor-grok-4.6-high-fast":
-        print("ERROR: model policy rejected 'cursor-agent:%s' from %s; Cursor spends only on Grok; Codex is the first escalation; Claude is the last machine rung. Falling back to 'cursor-agent:cursor-grok-4.6-high-fast'." % (model or "<empty>", path), file=sys.stderr)
-        model = "cursor-grok-4.6-high-fast"
+    if not model or model == "auto":
+        print("SKIP HT_PROVIDER=cursor but HT_MODEL is '%s': no concrete command can be written" % (model or "<empty>"))
+        sys.exit(0)
     model_cli = "cursor-agent -p --output-format text --model %s -f --trust" % model
 elif provider == "codex":
-    if model not in ("gpt-5.6-sol", "gpt-5.6-luna"):
-        print("ERROR: model policy rejected 'codex:%s' from %s; falling back to 'codex:gpt-5.6-sol'." % (model or "<empty>", path), file=sys.stderr)
-        model = "gpt-5.6-sol"
-    model_cli = "/home/valentin/.local/bin/hax --provider=codex --model=%s --effort=high --no-session -p" % model
+    model_cli = "codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"
+    if model and model != "auto":
+        model_cli += " --model %s" % model
 elif provider == "claude":
-    if model not in ("opus", "sonnet", "haiku"):
-        print("ERROR: model policy rejected 'claude:%s' from %s; Cursor spends only on Grok; Codex is the first escalation; Claude is the last machine rung. Falling back to 'claude:sonnet'." % (model or "<empty>", path), file=sys.stderr)
-        model = "sonnet"
-    model_cli = "claude -p --model %s" % model
+    model_cli = "claude -p --model %s" % (model or "sonnet")
+elif provider == "pi":
+    model_cli = "pi --print --tools read,bash,edit,write --no-extensions --no-skills"
+    if model and model != "auto":
+        model_cli += " --model %s" % model
 else:
     print("SKIP HT_PROVIDER='%s' has no known MODEL_CLI mapping -- add one to agent-template before converting this slug" % provider)
     sys.exit(0)
@@ -395,7 +395,18 @@ PYEOF
     echo "  no config dir at $CONFIG_DIR, nothing to scan"
   fi
 
-  echo "== 3b. chat lane for template-wired agents =="
+  echo "== 3b. explicit command policy for 3.14 confs =="
+  MIGRATE_POLICY="$TEMPLATE_DIR/scripts/migrate-provider-policy.py"
+  mapfile -t CONF_DIRS < <(core_conf_dirs)
+  if [ "${#CONF_DIRS[@]}" -eq 0 ]; then
+    echo "  no agent config directories on this host"
+  else
+    MIGRATE_ARGS=(--version "$TEMPLATE_VERSION")
+    [ "$DRY_RUN" = "yes" ] && MIGRATE_ARGS+=(--dry-run)
+    python3 "$MIGRATE_POLICY" "${MIGRATE_ARGS[@]}" "${CONF_DIRS[@]}"
+  fi
+
+  echo "== 3c. chat lane for template-wired agents =="
   CHAT_ENABLED=0
   if [ -d "$CONFIG_DIR" ]; then
     for f in "$CONFIG_DIR"/*.conf; do

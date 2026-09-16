@@ -5,6 +5,19 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.16.0 - 2026-09-16
+
+- The agent conf is now the only provider and harness policy. `MODEL_CLI` is
+  normal work; optional `LADDER`, `RESEARCH_CLI`, `TRIAGE_HARD_CLI`, and
+  `CHAT_CLI` choose every alternative command.
+- Core no longer has provider allow-lists, model rewriting, or a built-in
+  ladder. Ticket override files now contain one complete command.
+- `create-agent.sh --provider pi` writes a GLM 5.3 Flash pi command, while
+  `--model-cli` remains available for any full command.
+- `agent-template update` backs up and rewrites only confs that used the 3.14
+  policy. Custom commands such as pi or GLM stay byte-for-byte unchanged.
+- ACTION: run agent-template update; confs get explicit ladder lines; other teams keep their MODEL_CLI
+
 ## 3.15.0 - 2026-09-16
 
 - Agent Chat phase A is verified against the current template release. The host

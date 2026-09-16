@@ -10,6 +10,21 @@ ChatDaemon = module["ChatDaemon"]
 ERROR_REPLY = module["ERROR_REPLY"]
 
 
+with tempfile.TemporaryDirectory() as temporary:
+    temporary = Path(temporary)
+    common = (
+        'CHAT="on"\nAGENT_SLUG="chat"\nAGENT_NAME="Chat"\nAGENT_ID="id-chat"\n'
+        f'TOKEN_FILE="{temporary}/token"\nMODEL_CLI="model-command --normal"\n'
+    )
+    fallback = temporary / "fallback.conf"
+    fallback.write_text(common)
+    explicit = temporary / "explicit.conf"
+    explicit.write_text(common + 'CHAT_CLI="chat-command --brief"\n')
+    assert Agent.from_conf(fallback).model_cli == "model-command --normal"
+    assert Agent.from_conf(explicit).model_cli == "chat-command --brief"
+    print("PASS agent-chat-command-from-conf")
+
+
 def agent(slug):
     return Agent(
         slug=slug,

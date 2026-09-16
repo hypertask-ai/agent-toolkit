@@ -907,14 +907,9 @@ supervisor's pr-hygiene check looks for; it merges those by hand. Then move
 the ticket to the review lane the lifecycle skill names. Do not leave commits
 unpushed: this working directory is thrown away when the process exits.
 
-When you are stuck, and you have already tried two different approaches, run
-\`agent-advisor "<one precise question>"\` and read the answer before you try a
-third. It sees this ticket, its last comments and your current diff, and it
-answers in plain text. Two calls for this whole run; it refuses the third. It
-writes nothing on the board, so whatever it tells you still has to reach the
-ticket in your own result comment.
+${AGENT_ADVISOR_GUIDANCE:+$AGENT_ADVISOR_GUIDANCE
 
-THREE COMMENTS, MAXIMUM, for this whole run. A ticket a human has to scroll is
+}THREE COMMENTS, MAXIMUM, for this whole run. A ticket a human has to scroll is
 a ticket nobody reads.
 
 1. One claim comment, which is also the only place you list the skills you are
