@@ -180,17 +180,54 @@ our own message rather than "command not found" three layers down.
 
 1. Read the agent's conf and load its adapter.
 2. Take a non-blocking lock; if a tick is already running, exit.
-3. List the board's tickets in the watched columns.
-4. Keep the ones **assigned to this agent id**, or whose **newest comment
+3. List every open PR with the agent's branch prefix, plus PRs that name a
+   ticket this agent claimed, and stop normal pickup on the oldest one that is
+   not LIVE.
+4. List the board's tickets in the watched columns.
+5. Keep the ones **assigned to this agent id**, or whose **newest comment
    @mentions it**.
-5. Drop anything already handled. The state key is `<task id>:<newest comment
+6. Drop anything already handled. The state key is `<task id>:<newest comment
    id>`, so a fresh reply on an old ticket counts as new work and a re-read of
    the same one does not.
-6. For each remaining ticket, up to `MAX_CONCURRENT_RUNS`, start **one
+7. For each remaining ticket, up to `MAX_CONCURRENT_RUNS`, start **one
    short-lived process**: the prompt tells it to read the skills index first,
    gives it the ticket and the latest comment, and tells it to post its reply
    with the agent's own board CLI and move the ticket per the skills index.
-7. Log to `~/.local/state/agent-board-poll/<slug>.log` and exit.
+8. Log to `~/.local/state/agent-board-poll/<slug>.log` and exit.
+
+## One ticket until live
+
+An agent that has an attributed PR which is not LIVE does not claim another
+normal ticket. Attribution means the PR branch starts with `PR_BRANCH_PREFIX`
+(default `agent/<slug>-`), or its title, body, ticket link, or branch names a
+ticket assigned to or claimed by that agent. Multiple debts are handled oldest
+first. The `emergency` label is the only interrupt; `urgent` is not.
+
+**LIVE has one exact definition:** the PR is merged, its merge commit is
+contained in its base branch, and the newest GitHub deployment for that base in
+the `Production` environment was created after the merge, has status `success`,
+and deploys a commit containing the merge. The answer is cached per PR for 60
+seconds. If the repository has no GitHub deployment records at all, LIVE falls
+back to merged plus base-contains-merge, and the runner logs that fallback.
+
+An open red PR gets another fix run with the exact failed check names, failed
+run logs, and verbatim `CONCERNS` or changes-requested review text. `ci-tests`,
+`revert-guard`, `pr-title`, and AI review feedback are work, not reasons to move
+on. Pending checks consume the tick and log `waiting on PR #<n>: checks
+pending`. A merged but undeployed PR also consumes the tick. Neither path
+claims a ticket.
+
+The PR path never reads the attempts file, applies a retry limit or cooldown,
+uses the model escalation ladder, or hands work to a manager. Every tick keeps
+fixing or waiting for the same PR until it is LIVE. Attempt windows apply only
+to ticket runs that have not produced a PR. QA escalation applies only when a
+ticket is rejected after its PR was live.
+
+The runner writes one JSON line to
+`~/.local/state/agent-board-poll/<slug>.blocked`: `{ "pr": <number>, "state":
+"<state>", "since": "<timestamp>" }`. This is what the owner-facing agents
+feed can show as “waiting on PR n”. A supervisor may flag a PR older than 24
+hours for a human look, but that does not release the agent to take new work.
 
 Nothing survives the process except the board, the repo and that log. This is
 the one-process-per-ticket design: the board is the state, so there is no
@@ -320,10 +357,11 @@ See `CONF.md` for the complete schema.
 | `EXCLUDE_LABELS` | labels that make a ticket off limits, comma separated |
 | `WORKDIR_MODE` | `repo` (default) runs in `AGENT_REPO`; `per-run` gives each ticket its own checkout |
 | `WORKDIR_ROOT` | where `per-run` checkouts go, required when `WORKDIR_MODE=per-run` |
-| `RETRY_LIMIT` | total failed attempts allowed per window; default three plus the number of ladder commands |
-| `RETRY_WINDOW_SECONDS` | length of that window, default 21600 (six hours) |
+| `RETRY_LIMIT` | failed attempts a ticket with no PR gets per window; default three plus the number of ladder commands; never used for an owed PR |
+| `RETRY_WINDOW_SECONDS` | length of that pre-PR window, default 21600 (six hours); never used for an owed PR |
 | `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
 | `PR_REPO` | **required.** the repository whose pull requests say whether a ticket is finished; `agent-board-poll` refuses to tick without it. Set it with `create-agent.sh --resume --pr-repo <org/name>` |
+| `PR_BRANCH_PREFIX` | branch prefix that attributes a PR to this agent, default `agent/<slug>-` |
 | `TRIAGE` | `yes` to score a ticket before pickup; defaults to `yes` for `AGENT_KIND=dev` and `no` for everything else |
 | `TRIAGE_MODEL_CLI` | optional command that breaks a tie the rules could not; default `MODEL_CLI` |
 | `ADVISOR_MAX` | `agent-advisor` calls allowed per run, default 2 |

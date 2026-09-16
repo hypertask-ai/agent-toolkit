@@ -69,6 +69,42 @@ not broken. `create-agent.sh` logs it and moves on; a run leaves its PR open
 and moves the ticket to the review lane anyway, and the supervisor's
 pr-hygiene check merges a green PR that could not get auto-merge.
 
+## One ticket until live
+
+Before any normal pickup, the runner lists every open PR whose branch starts
+with `PR_BRANCH_PREFIX` (default `agent/<slug>-`) and every PR that names a
+ticket assigned to or claimed by this agent. If one is not LIVE, the oldest is
+the agent's only work. An `emergency` ticket may interrupt it; an `urgent`
+ticket may not.
+
+LIVE means all of the following:
+
+1. The PR is merged.
+2. The merge commit is contained in the PR's base branch.
+3. The newest GitHub deployment for that base in environment `Production` was
+   created after the merge, has status `success`, and its deployed commit
+   contains the merge.
+
+The result is cached for 60 seconds per PR. If the repository has no GitHub
+deployment records, the logged fallback is merged plus base-contains-merge.
+A repository that has deployment records but no qualifying Production success
+is not LIVE.
+
+A red PR starts another fix run with exact failed check names, failed-run logs,
+and verbatim reviewer `CONCERNS`. Pending checks log `waiting on PR #<n>:
+checks pending` and start nothing. A merged but undeployed PR also starts
+nothing. The attempts file, retry limit, six-hour cooldown, model escalation,
+and manager hand-off do not apply anywhere on this PR path. They apply only to
+a ticket run which has not produced a PR; QA escalation starts only after live
+work is rejected. The agent continues even if a supervisor flags a PR older
+than 24 hours for a human look.
+
+The owner-facing state is one JSON line at
+`~/.local/state/agent-board-poll/<slug>.blocked`, with `pr`, `state`, and
+`since`. The agents page can render that as “waiting on PR n”. The file is
+removed only after all attributed PRs are LIVE. This is the first place to
+look when an agent appears idle while its board still has work.
+
 ## What wakes it
 
 Assigned to it, @mentioned, or a human comment on a ticket it already owns

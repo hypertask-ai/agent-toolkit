@@ -656,6 +656,281 @@ print(",".join(ids))')" || {
   "$board_cli" task update "$ref" --labels "$ids" >/dev/null 2>&1 || return 1
 }
 
+# ---------- one ticket until live ----------
+# adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir>
+# Prints one JSON object for the oldest pull request this agent still owes, or
+# nothing when every attributed pull request is live. Attribution is the
+# configured branch prefix (default agent/<slug>-) plus ticket references in a
+# PR title/body/branch that name a ticket assigned to or claimed by this agent.
+#
+# LIVE is merged + the base contains the merge commit + the newest Production
+# deployment created after the merge succeeded and contains that commit. Repos
+# with no deployment records use merged + contained as the documented fallback.
+adapter_pr_gate() (
+  local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
+  local repo="${PR_REPO:-}" prefix="${PR_BRANCH_PREFIX:-agent/$slug-}"
+  local tmp prs tasks one rows ref task_id assigned comments claimed_refs candidates pr number live
+  [ -n "$repo" ] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+  mkdir -p "$cache_dir"
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+
+  if ! gh pr list --repo "$repo" --state open --limit 1000 \
+      --json number,state,url,title,body,headRefName,createdAt > "$tmp/open.json" \
+     || ! gh pr list --repo "$repo" --state merged --limit 100 \
+      --json number,state,url,title,body,headRefName,createdAt > "$tmp/merged.json"; then
+    printf 'ERROR: cannot list pull requests in %s for the one-ticket-until-live gate\n' "$repo" >&2
+    return 1
+  fi
+  python3 - "$tmp/open.json" "$tmp/merged.json" <<'PYEOF' > "$tmp/prs.json"
+import json, sys
+seen, rows = set(), []
+for path in sys.argv[1:]:
+    for row in json.load(open(path)):
+        if row.get("number") in seen:
+            continue
+        seen.add(row.get("number"))
+        rows.append(row)
+print(json.dumps(rows))
+PYEOF
+
+  : > "$tmp/tasks.jsonl"
+  for one in $(printf '%s' "$board_ids" | tr ',' ' '); do
+    [ -n "$one" ] || continue
+    tasks="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&limit=100")" || return 1
+    printf '%s' "$tasks" | BOARD="$one" AID="$agent_id" python3 -c '
+import json, os, sys
+for task in json.load(sys.stdin).get("tasks") or []:
+    ref = str(task.get("ticketNumber") or "")
+    if not ref:
+        continue
+    aids = []
+    for who in task.get("assignees") or []:
+        agent = who.get("agent") if isinstance(who, dict) else None
+        if isinstance(agent, dict) and agent.get("id"):
+            aids.append(str(agent["id"]))
+    print(json.dumps({"ref": ref, "id": task.get("id"), "board": os.environ["BOARD"],
+                      "assigned": os.environ["AID"] in aids}))
+' >> "$tmp/tasks.jsonl"
+  done
+
+  # Assigned tickets are claims. For ticket references appearing on a possible
+  # PR but not currently assigned, use the same evidence as adapter_pick_rank:
+  # this agent authored a comment containing "claim".
+  awk 'NF' "$tmp/tasks.jsonl" | while IFS= read -r rows; do
+    ref="$(ROW="$rows" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["ref"])')"
+    if ! REFS="$ref" PRS="$(cat "$tmp/prs.json")" python3 -c '
+import json, os, re, sys
+ref = os.environ["REFS"]
+pattern = re.compile(r"(?<![0-9A-Za-z])" + re.escape(ref) + r"(?![0-9A-Za-z])", re.I)
+for pr in json.loads(os.environ["PRS"]):
+    if str(pr.get("state") or "").upper() not in ("OPEN", "MERGED"):
+        continue
+    if pattern.search(" ".join(str(pr.get(k) or "") for k in ("title", "body", "headRefName"))):
+        sys.exit(0)
+sys.exit(1)
+'; then
+      continue
+    fi
+    assigned="$(ROW="$rows" python3 -c 'import json,os;print("yes" if json.loads(os.environ["ROW"])["assigned"] else "no")')"
+    if [ "$assigned" = "yes" ]; then
+      printf '%s\n' "$ref" >> "$tmp/claimed"
+      continue
+    fi
+    task_id="$(ROW="$rows" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["id"])')"
+    one="$(ROW="$rows" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["board"])')"
+    comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${one}")" || continue
+    if printf '%s' "$comments" | AID="$agent_id" ANAME="$agent_name" python3 -c '
+import json, os, re, sys
+want_id, want_name = os.environ["AID"], os.environ["ANAME"].strip().casefold()
+for comment in json.load(sys.stdin).get("comments") or []:
+    agent = comment.get("agent") if isinstance(comment.get("agent"), dict) else None
+    author = agent or comment.get("user") or comment.get("author") or {}
+    if isinstance(author, dict):
+        mine = str(author.get("id") or "") == want_id or str(author.get("displayName") or author.get("display_name") or author.get("name") or "").strip().casefold() == want_name
+    else:
+        mine = str(author).strip().casefold() == want_name
+    text = comment.get("text") or comment.get("comment") or comment.get("commentText") or comment.get("html") or ""
+    if mine and re.search(r"\bclaim", re.sub(r"<[^>]+>", " ", text), re.I):
+        sys.exit(0)
+sys.exit(1)
+'; then
+      printf '%s\n' "$ref" >> "$tmp/claimed"
+    fi
+  done
+  claimed_refs="$(sort -u "$tmp/claimed" 2>/dev/null | paste -sd, - || true)"
+
+  CLAIMED="$claimed_refs" PREFIX="$prefix" python3 - "$tmp/prs.json" <<'PYEOF' > "$tmp/candidates.jsonl"
+import json, os, re, sys
+claimed = {x.casefold() for x in os.environ.get("CLAIMED", "").split(",") if x}
+prefix = os.environ["PREFIX"].casefold()
+with open(sys.argv[1]) as handle:
+    prs = json.load(handle)
+for pr in sorted(prs, key=lambda row: row.get("createdAt") or ""):
+    if str(pr.get("state") or "").upper() not in ("OPEN", "MERGED"):
+        continue
+    haystack = " ".join(str(pr.get(k) or "") for k in ("title", "body", "headRefName"))
+    refs = re.findall(r"(?<![0-9A-Za-z])([A-Z][A-Z0-9]{1,10}-[0-9]+)(?![0-9A-Za-z])", haystack, re.I)
+    if str(pr.get("headRefName") or "").casefold().startswith(prefix) or any(r.casefold() in claimed for r in refs):
+        pr["ticket"] = refs[0].upper() if refs else "PR-%s" % pr["number"]
+        print(json.dumps(pr))
+PYEOF
+
+  while IFS= read -r pr; do
+    [ -n "$pr" ] || continue
+    number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
+    live="$(_ht_pr_live_state "$repo" "$number" "$cache_dir")" || return 1
+    if LIVE="$live" python3 -c 'import json,os,sys;sys.exit(0 if json.loads(os.environ["LIVE"])["live"] else 1)'; then
+      continue
+    fi
+    _ht_pr_work_state "$repo" "$pr" "$live"
+    return 0
+  done < "$tmp/candidates.jsonl"
+)
+
+# _ht_pr_live_state <repo> <number> <cache-dir>: one JSON answer, cached 60s.
+_ht_pr_live_state() {
+  local repo="$1" number="$2" cache_dir="$3" cache
+  local now mtime view state base merge merged_at compare deployments deployment dep_id dep_sha dep_at statuses dep_state deploy_contains base_contains_deploy
+  mkdir -p "$cache_dir"
+  cache="$cache_dir/$number.json"
+  now="$(date +%s)"
+  if [ -f "$cache" ]; then
+    mtime="$(stat -c %Y "$cache" 2>/dev/null || printf 0)"
+    if [ "$((now - mtime))" -lt 60 ]; then cat "$cache"; return 0; fi
+  fi
+  view="$(gh pr view "$number" --repo "$repo" --json state,baseRefName,mergedAt,mergeCommit 2>/dev/null)" || return 1
+  state="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state") or "")')"
+  if [ "$state" != "MERGED" ]; then
+    printf '{"live":false,"state":"open","definition":"GitHub Production deployments"}\n' | tee "$cache"
+    return 0
+  fi
+  base="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("baseRefName") or "")')"
+  merge="$(printf '%s' "$view" | python3 -c 'import json,sys;d=json.load(sys.stdin);print((d.get("mergeCommit") or {}).get("oid") or "")')"
+  merged_at="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("mergedAt") or "")')"
+  [ -n "$base" ] && [ -n "$merge" ] && [ -n "$merged_at" ] || return 1
+  compare="$(gh api "repos/$repo/compare/$merge...$base" 2>/dev/null)" || return 1
+  if ! printf '%s' "$compare" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d.get("status") in ("ahead","identical") else 1)'; then
+    printf '{"live":false,"state":"merged-base-missing","definition":"GitHub Production deployments"}\n' | tee "$cache"
+    return 0
+  fi
+
+  deployments="$(gh api "repos/$repo/deployments?per_page=100" 2>/dev/null)" || return 1
+  if [ "$(printf '%s' "$deployments" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = "0" ]; then
+    printf '{"live":true,"state":"live","definition":"fallback: merged and base contains merge commit (no deployment records)"}\n' | tee "$cache"
+    return 0
+  fi
+  deployment="$(printf '%s' "$deployments" | MERGED_AT="$merged_at" python3 -c '
+import json, os, sys
+rows = [r for r in json.load(sys.stdin) if str(r.get("environment") or "").casefold() == "production"]
+rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+print(json.dumps(rows[0]) if rows else "")
+')"
+  if [ -z "$deployment" ]; then
+    printf '{"live":false,"state":"merged-undeployed","definition":"GitHub Production deployments"}\n' | tee "$cache"
+    return 0
+  fi
+  dep_id="$(printf '%s' "$deployment" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id") or "")')"
+  dep_sha="$(printf '%s' "$deployment" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("sha") or d.get("ref") or "")')"
+  dep_at="$(printf '%s' "$deployment" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("created_at") or "")')"
+  statuses="$(gh api "repos/$repo/deployments/$dep_id/statuses?per_page=1" 2>/dev/null)" || return 1
+  dep_state="$(printf '%s' "$statuses" | python3 -c 'import json,sys;d=json.load(sys.stdin);print((d[0] if d else {}).get("state") or "")')"
+  deploy_contains="no"
+  base_contains_deploy="no"
+  if [ -n "$dep_sha" ]; then
+    compare="$(gh api "repos/$repo/compare/$merge...$dep_sha" 2>/dev/null)" || return 1
+    if printf '%s' "$compare" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d.get("status") in ("ahead","identical") else 1)'; then
+      deploy_contains="yes"
+    fi
+    compare="$(gh api "repos/$repo/compare/$dep_sha...$base" 2>/dev/null)" || return 1
+    if printf '%s' "$compare" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d.get("status") in ("ahead","identical") else 1)'; then
+      base_contains_deploy="yes"
+    fi
+  fi
+  if MERGED_AT="$merged_at" DEP_AT="$dep_at" DEP_STATE="$dep_state" CONTAINS="$deploy_contains" ON_BASE="$base_contains_deploy" python3 -c '
+import datetime, os, sys
+def stamp(value): return datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+sys.exit(0 if os.environ["DEP_STATE"] == "success" and os.environ["CONTAINS"] == "yes" and os.environ["ON_BASE"] == "yes" and stamp(os.environ["DEP_AT"]) > stamp(os.environ["MERGED_AT"]) else 1)
+'; then
+    printf '{"live":true,"state":"live","definition":"merged, base contains merge commit, newest Production deployment on that base after merge succeeded and contains merge commit"}\n' | tee "$cache"
+  else
+    printf '{"live":false,"state":"merged-undeployed","definition":"GitHub Production deployments"}\n' | tee "$cache"
+  fi
+}
+
+# Add current checks, failed-run logs, and review feedback to an owed PR.
+_ht_pr_work_state() {
+  local repo="$1" pr="$2" live="$3" number view checks reviews inline feedback action wait_state head run_ids run_id logs
+  number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
+  view="$(gh pr view "$number" --repo "$repo" --json state,url,title,body,headRefName,headRefOid,baseRefName,createdAt,statusCheckRollup,reviews,comments 2>/dev/null)" || return 1
+  state="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state") or "")')"
+  if [ "$state" = "MERGED" ]; then
+    PR="$pr" LIVE="$live" python3 -c '
+import json, os
+pr, live = json.loads(os.environ["PR"]), json.loads(os.environ["LIVE"])
+print(json.dumps({"action":"wait", "state":live["state"], "definition":live["definition"],
+                  "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
+                  "title":pr["title"], "branch":pr["headRefName"], "since":pr["createdAt"]}))
+'
+    return 0
+  fi
+  inline="$(gh api "repos/$repo/pulls/$number/comments?per_page=100" 2>/dev/null || printf '[]')"
+  feedback="$(VIEW="$view" INLINE="$inline" python3 -c '
+import json, os
+view, inline = json.loads(os.environ["VIEW"]), json.loads(os.environ["INLINE"])
+failed, pending, review = [], [], []
+for check in view.get("statusCheckRollup") or []:
+    name = check.get("name") or check.get("context") or "unnamed check"
+    status = str(check.get("status") or "").upper()
+    conclusion = str(check.get("conclusion") or "").upper()
+    if status != "COMPLETED" or not conclusion:
+        pending.append(name)
+    elif conclusion not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+        failed.append({"name": name, "conclusion": conclusion, "url": check.get("detailsUrl") or ""})
+for item in (view.get("reviews") or []) + (view.get("comments") or []) + inline:
+    body = str(item.get("body") or "").strip()
+    state = str(item.get("state") or "")
+    author = item.get("author") or item.get("user") or {}
+    if isinstance(author, dict): author = author.get("login") or author.get("name") or "reviewer"
+    if body and ("CONCERNS" in body.upper() or state.upper() == "CHANGES_REQUESTED"):
+        review.append({"author": str(author), "state": state, "body": body})
+print(json.dumps({"failed": failed, "pending": pending, "review": review}))
+')"
+  head="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("headRefOid") or "")')"
+  run_ids="$(printf '%s' "$feedback" | python3 -c '
+import json, re, sys
+for check in json.load(sys.stdin)["failed"]:
+    match = re.search(r"/actions/runs/([0-9]+)", check.get("url") or "")
+    if match: print(match.group(1))
+' | sort -u)"
+  logs=""
+  for run_id in $run_ids; do
+    logs="$logs$(gh run view "$run_id" --repo "$repo" --log-failed 2>&1 | tail -c 12000 || true)"
+  done
+  action="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("fix" if d["failed"] or d["review"] else "wait")')"
+  wait_state="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("checks-pending" if d["pending"] else "awaiting-merge")')"
+  PR="$pr" VIEW="$view" LIVE="$live" FEEDBACK="$feedback" LOGS="$logs" ACTION="$action" WAIT_STATE="$wait_state" python3 -c '
+import json, os
+pr, view = json.loads(os.environ["PR"]), json.loads(os.environ["VIEW"])
+live, feedback = json.loads(os.environ["LIVE"]), json.loads(os.environ["FEEDBACK"])
+parts = []
+if feedback["failed"]:
+    parts.append("Failing checks (exact names):\n" + "\n".join("- %s [%s] %s" % (c["name"], c["conclusion"], c["url"]) for c in feedback["failed"]))
+if feedback["review"]:
+    parts.append("Review feedback (verbatim):\n" + "\n\n".join("[%s %s]\n%s" % (r["author"], r["state"], r["body"]) for r in feedback["review"]))
+if os.environ["LOGS"].strip():
+    parts.append("Failing check logs:\n" + os.environ["LOGS"].strip())
+print(json.dumps({"action":os.environ["ACTION"],
+                  "state":"red" if os.environ["ACTION"] == "fix" else os.environ["WAIT_STATE"],
+                  "definition":live["definition"], "number":pr["number"], "url":pr["url"],
+                  "ticket":pr["ticket"], "title":view.get("title") or pr["title"],
+                  "branch":view.get("headRefName") or pr["headRefName"],
+                  "base":view.get("baseRefName") or "main", "since":pr["createdAt"],
+                  "feedback":"\n\n".join(parts), "pending":feedback["pending"]}))
+'
+}
+
 # ---------- which ticket comes next ----------
 # An agent that starts a second ticket while its first one is still open leaves
 # the first one half done and nobody watching it. The board already knows which

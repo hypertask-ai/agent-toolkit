@@ -5,6 +5,23 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.17.0 - 2026-09-16
+
+- One ticket now stays with its agent until its pull request is merged,
+  contained in the base branch, and followed by a successful Production
+  deployment. Repositories without deployment records use the logged
+  merged-and-contained fallback.
+- The oldest owed PR is a hard pickup gate. Red checks and reviewer concerns
+  produce another fix run with exact feedback; pending checks and undeployed
+  merges wait without claiming. Only an `emergency` ticket can interrupt.
+- PR fixes have no retry limit, cooldown, model escalation, or manager hand-off.
+  The pre-PR attempt window and post-live QA escalation remain separate.
+- `<slug>.blocked` exposes the PR number, state, and start time to the agents
+  feed. Behavioral evals cover red, pending, undeployed, deployed, fallback,
+  attribution, oldest-first, emergency, and unlimited retry paths.
+- ACTION: run `agent-template update` on every bot host, then verify each dev's
+  agents-page state names its oldest open PR before the next board pickup.
+
 ## 3.16.0 - 2026-09-16
 
 - The agent conf is now the only provider and harness policy. `MODEL_CLI` is

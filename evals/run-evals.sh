@@ -220,3 +220,8 @@ if [ -z "$ONLY" ] && [ -x "$HERE/command-policy.test.sh" ]; then
   echo "-- command policy behavioural checks --"
   bash "$HERE/command-policy.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/one-ticket-live.test.sh" ]; then
+  echo ""
+  echo "-- one ticket until live behavioural checks --"
+  bash "$HERE/one-ticket-live.test.sh"
+fi

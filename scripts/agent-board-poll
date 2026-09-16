@@ -189,6 +189,10 @@ SEEN="$STATE_DIR/$SLUG.seen"
 # which becomes this agent's own reply's id the moment the run finishes.
 POSTED="$STATE_DIR/$SLUG.posted-comments"
 LOCK="$STATE_DIR/$SLUG.lock"
+# The agents feed can read this one-line JSON reason directly. It remains while
+# a pull request blocks pickup and disappears only after every owed PR is LIVE.
+BLOCKED="$STATE_DIR/$SLUG.blocked"
+PR_LIVE_CACHE="$STATE_DIR/pr-live-cache"
 # Failed attempts are append-only: "task timestamp command-rung failed". The
 # rung is diagnostic only; ladder selection depends on the total failure count.
 ATTEMPTS="$STATE_DIR/$SLUG.attempts"
@@ -468,7 +472,7 @@ rank_order() {
 }
 
 # Candidates that passed every gate, waiting to be ranked against each other.
-ELIGIBLE=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=(); E_REASON=()
+ELIGIBLE=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=(); E_REASON=(); E_PR_FIX=()
 
 # ---------- one tick at a time ----------
 # The systemd unit is Type=oneshot, so systemd already refuses a second run
@@ -489,6 +493,46 @@ log "$SKILLS_LINE"
 if [ "$DRY_RUN" = "yes" ]; then
   echo "agent $AGENT_NAME ($AGENT_ID) on board $BOARD_ID, sections: $WATCH_SECTIONS"
   echo "$SKILLS_LINE"
+fi
+
+# Pull-request debt is a hard pickup gate, not a ranking hint. The adapter
+# attributes PRs, proves LIVE, and returns only the oldest debt. Core records
+# the reason for the agents feed and later permits only this fix or an emergency.
+PR_GATE=""
+PR_GATE_ACTION=""
+PR_GATE_NUMBER=""
+PR_GATE_STATE=""
+if declare -F adapter_pr_gate >/dev/null 2>&1; then
+  PR_GATE="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
+              "$SLUG" "$PR_LIVE_CACHE" 2>>"$LOG")" || die \
+    "cannot determine whether $SLUG has a pull request that is not live" \
+    "read $LOG and restore GitHub or board access; no ticket was claimed"
+fi
+if [ -n "$PR_GATE" ]; then
+  PR_GATE_ACTION="$(row_field "$PR_GATE" action)"
+  PR_GATE_NUMBER="$(row_field "$PR_GATE" number)"
+  PR_GATE_STATE="$(row_field "$PR_GATE" state)"
+  prior_since=""
+  if [ -r "$BLOCKED" ]; then
+    prior_since="$(PR="$PR_GATE_NUMBER" python3 - "$BLOCKED" <<'PYEOF' 2>/dev/null || true
+import json, os, sys
+try:
+    row = json.load(open(sys.argv[1]))
+    if str(row.get("pr")) == os.environ["PR"]:
+        print(row.get("since") or "")
+except Exception:
+    pass
+PYEOF
+)"
+  fi
+  blocked_since="${prior_since:-$(row_field "$PR_GATE" since)}"
+  PR="$PR_GATE_NUMBER" STATE="$PR_GATE_STATE" SINCE="$blocked_since" python3 -c '
+import json, os
+print(json.dumps({"pr": int(os.environ["PR"]), "state": os.environ["STATE"], "since": os.environ["SINCE"]}))
+' > "$BLOCKED"
+  log "blocked on PR #$PR_GATE_NUMBER: $PR_GATE_STATE (one ticket until live)"
+else
+  rm -f "$BLOCKED"
 fi
 
 # A third source of candidates, alongside the board's own list: tickets this
@@ -520,6 +564,22 @@ for line in sys.stdin:
     print(line)
 ')"
 fi
+# A red owed PR is represented as a candidate so it uses the normal isolated
+# workdir and model launch. It is never a board claim and never enters the
+# ticket retry/cooldown ladder.
+if [ "$PR_GATE_ACTION" = "fix" ]; then
+  pr_row="$(GATE="$PR_GATE" AID="$AGENT_ID" BOARD="${BOARD_ID%%,*}" python3 -c '
+import json, os
+p = json.loads(os.environ["GATE"])
+print(json.dumps({"id":"pr-%s" % p["number"], "ref":p["ticket"], "section":"Pull request",
+                  "title":p["title"], "description":p.get("feedback") or "",
+                  "agent_ids":[os.environ["AID"]], "assignee_count":1, "labels":[],
+                  "comment_count":0, "board":os.environ["BOARD"], "url":p["url"],
+                  "trigger":"pr_fix", "pr_number":p["number"], "pr_branch":p["branch"],
+                  "pr_feedback":p.get("feedback") or ""}))
+')"
+  CANDIDATES="$(printf '%s\n%s\n' "$CANDIDATES" "$pr_row")"
+fi
 
 started=0
 picked=0
@@ -546,6 +606,15 @@ print(",".join(sorted(set(row.get("labels") or []) & excluded)))')"
     explain "skip  $(row_field "$row" ref): carries the label $hit, which this agent stays away from"
     continue
   fi
+  trigger="$(row_field "$row" trigger)"
+  is_pr_fix="no"
+  [ "$trigger" = "pr_fix" ] && is_pr_fix="yes"
+  if [ -n "$PR_GATE" ] && [ "$is_pr_fix" = "no" ]; then
+    case ",$(row_labels "$row")," in
+      *,emergency,*) : ;;
+      *) explain "skip  $ref: PR #$PR_GATE_NUMBER is not live, so only that PR or an emergency may run"; continue ;;
+    esac
+  fi
   # A ticket is free only if nobody at all is on it: a name on a ticket, human
   # or agent, means it already belongs to somebody.
   unclaimed="$(ROW="$row" python3 -c '
@@ -559,10 +628,15 @@ print("yes" if json.loads(os.environ["ROW"]).get("assignee_count", 1) == 0 else 
 
   # The newest comment decides two things: whether an @mention addressed this
   # agent, and the state key, so a reply on an old ticket counts as new work.
-  comment_json="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$board")"
   comment_id=0
   comment_text=""
   mentioned="no"
+  if [ "$is_pr_fix" = "yes" ]; then
+    comment_json=""
+    comment_text="$(row_field "$row" pr_feedback)"
+  else
+    comment_json="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$board")"
+  fi
   if [ -n "$comment_json" ]; then
     comment_id="$(CJ="$comment_json" python3 -c 'import json,os;print(json.loads(os.environ["CJ"]).get("id") or 0)')"
     comment_text="$(CJ="$comment_json" python3 -c '
@@ -611,7 +685,10 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
   # whether QA sent it back, and whether its pull request merged.
   rank=3
   why="$ref is new work ($reason)"
-  if declare -F adapter_pick_rank >/dev/null 2>&1; then
+  if [ "$is_pr_fix" = "yes" ]; then
+    rank=-1
+    why="$ref owns PR #$PR_GATE_NUMBER and its current feedback requires a fix"
+  elif declare -F adapter_pick_rank >/dev/null 2>&1; then
     verdict="$(adapter_pick_rank "$TOKEN_FILE" "$board" "$AGENT_ID" "$AGENT_NAME" \
                  "$ref" "$task_id" "$section" "$reason" 2>>"$LOG")" || verdict=""
     if [ -n "$verdict" ]; then
@@ -653,16 +730,19 @@ sys.exit(0 if author and author == os.environ["NAME"].strip().casefold() else 1)
   fi
 
   key="$task_id:$comment_id"
-  if grep -qxF "$key" "$SEEN"; then
+  if [ "$is_pr_fix" = "no" ] && grep -qxF "$key" "$SEEN"; then
     explain "skip  $ref: already handled at this point in its history ($key)"
     continue
   fi
 
-  tries="$(attempts_recent "$task_id")"
-  if [ "$tries" -ge "$RETRY_LIMIT" ]; then
-    explain "skip  $ref: $tries attempts already in the last $RETRY_WINDOW_SECONDS seconds"
-    log "skipping $ref: $tries attempts already in the last $RETRY_WINDOW_SECONDS seconds"
-    continue
+  tries=0
+  if [ "$is_pr_fix" = "no" ]; then
+    tries="$(attempts_recent "$task_id")"
+    if [ "$tries" -ge "$RETRY_LIMIT" ]; then
+      explain "skip  $ref: $tries attempts already in the last $RETRY_WINDOW_SECONDS seconds"
+      log "skipping $ref: $tries attempts already in the last $RETRY_WINDOW_SECONDS seconds"
+      continue
+    fi
   fi
   picked=$((picked + 1))
   explain "rank $rank $ref: $why"
@@ -675,7 +755,21 @@ sys.exit(0 if author and author == os.environ["NAME"].strip().casefold() else 1)
   E_WHY+=("$why")
   E_TRIES+=("$tries")
   E_REASON+=("$reason")
+  E_PR_FIX+=("$is_pr_fix")
 done <<< "$CANDIDATES"
+
+# Pending checks and merged-but-not-deployed PRs deliberately consume the tick.
+# An emergency above is the one exception and remains eligible.
+if [ -n "$PR_GATE" ] && [ "$PR_GATE_ACTION" = "wait" ] && [ "$picked" -eq 0 ]; then
+  case "$PR_GATE_STATE" in
+    checks-pending) log "waiting on PR #$PR_GATE_NUMBER: checks pending" ;;
+    merged-undeployed) log "waiting on PR #$PR_GATE_NUMBER: merged but not deployed" ;;
+    merged-base-missing) log "waiting on PR #$PR_GATE_NUMBER: merge commit is not contained in its base branch" ;;
+    *) log "waiting on PR #$PR_GATE_NUMBER: $PR_GATE_STATE" ;;
+  esac
+  [ "$DRY_RUN" = "no" ] || echo "waiting on PR #$PR_GATE_NUMBER: $PR_GATE_STATE; nothing was claimed."
+  exit 0
+fi
 
 if [ "$DRY_RUN" = "yes" ]; then
   order="$(rank_order)"
@@ -694,7 +788,9 @@ if [ "$DRY_RUN" = "yes" ]; then
     # candidate means a comments read and a gh query each, dozens of API calls
     # for an answer about tickets this tick was never going to touch, and the
     # board's host starts answering with a bot challenge.
-    if [ "$TRIAGE" = "yes" ] && [ "$shown" -le "$MAX_CONCURRENT_RUNS" ]; then
+    if [ "${E_PR_FIX[$i]}" = "yes" ]; then
+      echo "    pull-request fix: no ticket attempts, cooldown, triage, or escalation"
+    elif [ "$TRIAGE" = "yes" ] && [ "$shown" -le "$MAX_CONCURRENT_RUNS" ]; then
       row_board="$(row_field "$row" board)"; [ -n "$row_board" ] || row_board="${BOARD_ID%%,*}"
       triage_verdict="$(triage_score "$(row_field "$row" ref)" "$(row_field "$row" id)" \
         "$row_board" "$(row_field "$row" title)" "$(row_field "$row" description)" \
@@ -728,14 +824,18 @@ for i in $(rank_order); do
   tries="${E_TRIES[$i]}"
   why="${E_WHY[$i]}"
   reason="${E_REASON[$i]}"
+  is_pr_fix="${E_PR_FIX[$i]}"
   task_id="$(row_field "$row" id)"
   ref="$(row_field "$row" ref)"
   title="$(row_field "$row" title)"
   url="$(row_field "$row" url)"
   description="$(row_field "$row" description)"
+  board="$(row_field "$row" board)"; [ -n "$board" ] || board="${BOARD_ID%%,*}"
   comment_id=0
   comment_text=""
-  if [ -n "$comment_json" ]; then
+  if [ "$is_pr_fix" = "yes" ]; then
+    comment_text="$(row_field "$row" pr_feedback)"
+  elif [ -n "$comment_json" ]; then
     comment_id="$(CJ="$comment_json" python3 -c 'import json,os;print(json.loads(os.environ["CJ"]).get("id") or 0)')"
     comment_text="$(CJ="$comment_json" python3 -c '
 import html, json, os, re
@@ -757,7 +857,7 @@ print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:120
   # model, and whether the agent has to plan first) have to be settled before
   # the first token is spent.
   TRIAGE_THIS="easy"
-  if [ "$TRIAGE" = "yes" ]; then
+  if [ "$TRIAGE" = "yes" ] && [ "$is_pr_fix" = "no" ]; then
     triage_verdict="$(triage_score "$ref" "$task_id" "$board" "$title" "$description" \
                         "$(row_labels "$row")")"
     IFS='|' read -r TRIAGE_THIS triage_origin triage_reason <<< "$triage_verdict"
@@ -817,6 +917,21 @@ never do X) goes into the skill file. If you are unsure which: would it still
 be true for a different customer? Yes is a rule, no is a fact."
   fi
 
+  if [ "$is_pr_fix" = "yes" ]; then
+    pr_branch="$(row_field "$row" pr_branch)"
+    PROMPT="Read $SKILLS_INDEX_SENTENCE first, in that order, then fix the existing pull request $url for $ref.
+
+This is the only work you may do this tick. Continue on branch $pr_branch. Do not claim or start another ticket, do not hand this PR to a manager, and do not stop because an attempts or cooldown file says to stop. Push a focused fix to this same PR, then re-read its checks and review feedback if time permits.
+
+Current failing feedback follows. Check names and reviewer text are exact; use the attached failed-run logs to find the root cause.
+
+$comment_text
+
+$AGENT_ADVISOR_GUIDANCE
+
+Keep fixing this PR until it merges and is live."
+  fi
+
   # A hard ticket gets two things the default path does not: a stronger model,
   # and an instruction to say what it is about to do before it does it. The
   # plan is the cheapest place to catch a wrong root cause, and it is a comment
@@ -841,7 +956,9 @@ $PROMPT"
   if [ "$WORKDIR_MODE" = "per-run" ]; then
     RUN_DIR="$(core_workdir_create "${AGENT_REPO:-}" "$WORKDIR_ROOT" "$SLUG-$ref" 2>>"$LOG")" || {
       log "run FAILED $ref: could not make a working directory under $WORKDIR_ROOT"
-      printf '%s %s model failed\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
+      if [ "$is_pr_fix" = "no" ]; then
+        printf '%s %s model failed\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
+      fi
       if declare -F adapter_failure_comment >/dev/null 2>&1 \
          && failure_is_new "$task_id" "workdir:$WORKDIR_ROOT"; then
         adapter_failure_comment "$BOARD_CLI" "$ref" \
@@ -856,7 +973,11 @@ $PROMPT"
   # comments, and only this run's own posts belong to what gets read back
   # below once it finishes.
   : > "$POSTED"
-  log "run start $ref key=$key dir=${RUN_DIR:-.} attempt=$((tries + 1)): $why"
+  if [ "$is_pr_fix" = "yes" ]; then
+    log "run start $ref key=$key dir=${RUN_DIR:-.} PR-fix-unlimited: $why"
+  else
+    log "run start $ref key=$key dir=${RUN_DIR:-.} attempt=$((tries + 1)): $why"
+  fi
   # Which skills this run is about to read, by version. A bot behaving oddly is
   # usually a bot reading an old pack, and this is the line that shows it.
   log "$SKILLS_LINE"
@@ -865,9 +986,14 @@ $PROMPT"
   # One short-lived process per ticket. Nothing survives it except the board,
   # the repo, and this log. The agent's token is never in the prompt or the
   # command line: the board CLI wrapper reads it from its own 0600 file.
-  # Resolve once, immediately before launch. The selected command is verbatim
-  # from MODEL_CLI, TRIAGE_HARD_CLI, LADDER or the ticket override file.
-  resolve_ticket_command "$ref" "$TRIAGE_THIS" "$tries"
+  # Resolve once, immediately before launch. PR debt deliberately bypasses the
+  # attempt-backed ladder and uses the agent's configured command verbatim.
+  if [ "$is_pr_fix" = "yes" ]; then
+    RUN_MODEL_CLI="$MODEL_CLI"
+    RUN_MODEL_RUNG="pr-fix"
+  else
+    resolve_ticket_command "$ref" "$TRIAGE_THIS" "$tries"
+  fi
   log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI)"
   read -r -a MODEL_ARGV <<< "$RUN_MODEL_CLI"
   # What agent-advisor needs to answer a question about this ticket, and the
@@ -908,7 +1034,9 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
   # newest-comment key as untouched and reprocessed a ticket this agent had
   # already answered, over and over until the attempt budget stopped it.
   if [ "$rc" -ne 0 ]; then
-    printf '%s %s %s failed\n' "$task_id" "$(date +%s)" "$RUN_MODEL_RUNG" >> "$ATTEMPTS"
+    if [ "$is_pr_fix" = "no" ]; then
+      printf '%s %s %s failed\n' "$task_id" "$(date +%s)" "$RUN_MODEL_RUNG" >> "$ATTEMPTS"
+    fi
     # A failure is written where a human already looks. The ticket does not
     # move: where it sits is the record of how far this got. The state key is
     # not recorded either, so the next tick may try once more, up to the
@@ -925,8 +1053,13 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         log "failure on $ref is the same one already written there, not repeating it"
       fi
     fi
-    printf 'ERROR: the run for %s exited %s. Do this next: read %s, fix the cause; it has %s of %s attempts left in this window\n' \
-      "$ref" "$rc" "$LOG" "$((RETRY_LIMIT - tries - 1))" "$RETRY_LIMIT" >&2
+    if [ "$is_pr_fix" = "yes" ]; then
+      printf 'ERROR: the PR-fix run for %s exited %s. Do this next: read %s; the next tick retries this PR with no limit or cooldown\n' \
+        "$ref" "$rc" "$LOG" >&2
+    else
+      printf 'ERROR: the run for %s exited %s. Do this next: read %s, fix the cause; it has %s of %s attempts left in this window\n' \
+        "$ref" "$rc" "$LOG" "$((RETRY_LIMIT - tries - 1))" "$RETRY_LIMIT" >&2
+    fi
   else
     printf '%s\n' "$key" >> "$SEEN"
     # Every comment this run posted on this ticket is also this agent's own
