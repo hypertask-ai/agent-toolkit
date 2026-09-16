@@ -247,8 +247,8 @@ our own message rather than "command not found" three layers down.
 
 1. Read the agent's conf and load its adapter.
 2. Take a non-blocking lock; if a tick is already running, exit.
-3. List PRs authored through the agent's configured branch prefix or GitHub
-   login, and stop normal pickup on the oldest one that is not LIVE.
+3. List PRs owned through the agent's branch prefix, current ticket assignment,
+   or recorded run state, and stop normal pickup on the oldest one not LIVE.
 4. List the board's tickets in the watched columns.
 5. Keep the ones **assigned to this agent id**, or whose **newest comment
    @mentions it**.
@@ -263,15 +263,18 @@ our own message rather than "command not found" three layers down.
 
 ## One ticket until live
 
-An agent that has an authored PR which is not LIVE does not claim another
-normal ticket. Authorship means the PR branch starts with that agent's
-`PR_BRANCH_PREFIX` (default `agent/<slug>-`), or the PR author matches its
-optional `GITHUB_LOGIN`. Ticket assignments, claims, and comments do not create
-ownership. Multiple debts are handled oldest first. The `emergency` label is
-the only interrupt; `urgent` is not.
+An agent that owns a PR which is not LIVE does not claim another normal ticket.
+A PR is owned when its branch starts with the agent's `PR_BRANCH_PREFIX`
+(default `agent/<slug>-`), when the ticket in its title is currently assigned
+to that agent and the branch has no other agent prefix, or when
+`<slug>.opened-prs` records that the runner first saw it during that agent's
+run. Shared GitHub authorship and comments do not transfer ownership.
 
-An open PR that matches no living agent conf blocks nobody. The first tick each
-UTC day logs `orphaned PR #<n> (<branch>) has no owning agent` for supervisor
+Multiple debts are ranked oldest first and written together to the blocked
+state. With more than one debt, even an `emergency` does not start new work.
+An open PR whose ticket is unassigned or assigned to no active agent blocks
+nobody unless branch or run state identifies an owner. The first tick each UTC
+day logs `orphaned PR #<n> (<branch>) has no owning agent` for supervisor
 follow-up.
 
 **LIVE has one exact definition:** the PR is merged, its merge commit is
@@ -295,10 +298,12 @@ to ticket runs that have not produced a PR. QA escalation applies only when a
 ticket is rejected after its PR was live.
 
 The runner writes one JSON line to
-`~/.local/state/agent-board-poll/<slug>.blocked`: `{ "pr": <number>, "state":
-"<state>", "since": "<timestamp>" }`. This is what the owner-facing agents
-feed can show as “waiting on PR n”. A supervisor may flag a PR older than 24
-hours for a human look, but that does not release the agent to take new work.
+`~/.local/state/agent-board-poll/<slug>.blocked`. Its top-level `pr`, `state`,
+`since`, and `ticket` identify the oldest debt for existing consumers, and its
+`prs` array lists every owned non-live PR in rank order. This is what the
+owner-facing agents feed can show as “waiting on PR n”. A supervisor may flag
+a PR older than 24 hours for a human look, but that does not release the agent
+to take new work.
 
 Nothing survives the process except the board, the repo and that log. This is
 the one-process-per-ticket design: the board is the state, so there is no
@@ -443,8 +448,7 @@ See `CONF.md` for the complete schema.
 | `RETRY_WINDOW_SECONDS` | length of that pre-PR window, default 21600 (six hours); never used for an owed PR |
 | `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
 | `PR_REPO` | **required.** the repository whose pull requests say whether a ticket is finished; `agent-board-poll` refuses to tick without it. Set it with `create-agent.sh --resume --pr-repo <org/name>` |
-| `PR_BRANCH_PREFIX` | branch prefix that proves this agent authored a PR, default `agent/<slug>-` |
-| `GITHUB_LOGIN` | optional GitHub login that proves this agent authored a PR when the branch prefix differs |
+| `PR_BRANCH_PREFIX` | branch prefix that proves this agent owns a PR, default `agent/<slug>-` |
 | `TRIAGE` | `yes` to score a ticket before pickup; defaults to `yes` for `AGENT_KIND=dev` and `no` for everything else |
 | `TRIAGE_MODEL_CLI` | optional command that breaks a tie the rules could not; default `MODEL_CLI` |
 | `ADVISOR_MAX` | `agent-advisor` calls allowed per run, default 2 |

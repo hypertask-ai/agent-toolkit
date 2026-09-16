@@ -125,16 +125,18 @@ pr-hygiene check merges a green PR that could not get auto-merge.
 
 ## One ticket until live
 
-Before any normal pickup, the runner lists PRs authored by this agent. A PR is
-authored when its branch starts with this agent's `PR_BRANCH_PREFIX` (default
-`agent/<slug>-`), or its author matches this agent's optional `GITHUB_LOGIN`.
-Ticket assignments, claims, and comments never transfer PR ownership. If an
-authored PR is not LIVE, the oldest is the agent's only work. An `emergency`
-ticket may interrupt it; an `urgent` ticket may not.
+Before normal pickup, the runner lists PRs owned by this agent. Ownership is
+proved by its `PR_BRANCH_PREFIX` (default `agent/<slug>-`), by a current board
+assignment for the ticket in the PR title when no other agent prefix is on the
+branch, or by `<slug>.opened-prs` recording that the runner first saw the PR
+during this agent's run. Shared GitHub authorship and comments do not transfer
+ownership.
 
-An open PR that matches no living agent conf is ignored by every gate. Once per
-UTC day, a tick logs `orphaned PR #<n> (<branch>) has no owning agent` so the
-supervisor can decide who should take it.
+Every non-live owned PR is ranked oldest first. The oldest is the only PR work,
+and more than one debt blocks every new claim, including an `emergency`. An
+open PR with no active owner is ignored by every gate. Once per UTC day, a tick
+logs `orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can
+decide who should take it.
 
 LIVE means all of the following:
 
@@ -159,10 +161,11 @@ work is rejected. The agent continues even if a supervisor flags a PR older
 than 24 hours for a human look.
 
 The owner-facing state is one JSON line at
-`~/.local/state/agent-board-poll/<slug>.blocked`, with `pr`, `state`, `since`,
-and `ticket`. The agents page can render that as “waiting on PR n”. The file is
-removed only after all authored PRs are LIVE. This is the first place to
-look when an agent appears idle while its board still has work.
+`~/.local/state/agent-board-poll/<slug>.blocked`. Its top-level fields describe
+the oldest debt, and `prs` lists every owned non-live PR in rank order. The
+agents page can render the oldest as “waiting on PR n”. The file is removed
+only after all owned PRs are LIVE. This is the first place to look when an
+agent appears idle while its board still has work.
 
 ## What wakes it
 

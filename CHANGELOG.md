@@ -1,3 +1,15 @@
+## 3.21.4 - 2026-09-16
+
+- The one-ticket-until-live gate now owns a PR by agent branch prefix, current
+  ticket assignment without another agent prefix, or the runner's persisted
+  record that the agent opened it; shared GitHub authorship owns nothing.
+- Every owned non-live PR is ranked oldest first, logged together, and stored in
+  the blocked state; multiple debts block all new claims, including emergencies.
+- Focused coverage verifies prefix, assignment, persisted-state, orphan,
+  oldest-first, complete blocked-state, and runner persistence behavior.
+- ACTION: run `agent-template update` on bot hosts so legacy branches are tied
+  to their assigned agents and every owned non-live PR blocks new pickup.
+
 ## 3.21.3 - 2026-09-16
 
 - Poll explanations now report why every listed ticket is ineligible, including

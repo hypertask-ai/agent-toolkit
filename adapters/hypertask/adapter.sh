@@ -669,11 +669,12 @@ print(",".join(ids))')" || {
 }
 
 # ---------- one ticket until live ----------
-# adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir>
-# Prints one JSON object for the oldest pull request this agent still owes, or
-# nothing when every authored pull request is live. Authorship is the agent's
-# configured branch prefix (default agent/<slug>-) or its configured GitHub
-# login. Ticket assignments and comments never attribute a pull request.
+# adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
+# Prints one JSON object per non-live pull request owned by this agent, oldest
+# first. Ownership comes from the agent's branch prefix, a current assignment
+# of the title's ticket when no other agent prefix is present, or the runner's
+# record that this agent opened the PR. Comments and shared GitHub authorship
+# do not transfer ownership.
 #
 # An open PR with no owner among the living conf files is ignored and logged
 # once per UTC day through stderr, which core appends to the tick log.
@@ -683,11 +684,12 @@ print(",".join(ids))')" || {
 # with no deployment records use merged + contained as the documented fallback.
 adapter_pr_gate() (
   local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
-  local config_dir="${7:-}" repo="${PR_REPO:-}" prefix="${PR_BRANCH_PREFIX:-agent/$slug-}"
-  local tmp pr number live branch marker today owner_conf owner_slug
+  local config_dir="${7:-}" opened_prs="${8:-}" repo="${PR_REPO:-}" prefix="${PR_BRANCH_PREFIX:-agent/$slug-}"
+  local state_dir tmp pr number live branch marker today owner_conf owner_slug one board_json
   [ -n "$repo" ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
   mkdir -p "$cache_dir"
+  state_dir="$(dirname "${opened_prs:-$cache_dir/none}")"
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
 
@@ -710,10 +712,9 @@ for path in sys.argv[1:]:
 print(json.dumps(rows))
 PYEOF
 
-  # One row per living conf in this repository. A removed conf deliberately
-  # stops owning its old branch, which makes an abandoned open PR visible as
-  # orphaned instead of assigning it to whichever agent touched its ticket.
-  printf '%s\t%s\n' "$prefix" "${GITHUB_LOGIN:-}" > "$tmp/owners.tsv"
+  # Keep the active identity and branch prefix together. Assignment ownership
+  # is only valid for an identity represented by a current schema conf.
+  printf '%s\t%s\t%s\t%s\n' "$slug" "$prefix" "$agent_id" "$opened_prs" > "$tmp/owners.tsv"
   if [ -n "$config_dir" ] && [ -d "$config_dir" ]; then
     for owner_conf in "$config_dir"/*.conf; do
       [ -f "$owner_conf" ] || continue
@@ -723,54 +724,146 @@ PYEOF
         continue
       fi
       (
-        unset AGENT_SLUG PR_BRANCH_PREFIX GITHUB_LOGIN PR_REPO
+        unset AGENT_SLUG AGENT_ID PR_BRANCH_PREFIX PR_REPO
         # shellcheck disable=SC1090
         . "$owner_conf"
         [ "${PR_REPO:-}" = "$repo" ] || exit 0
         owner_slug="${AGENT_SLUG:-$(basename "$owner_conf" .conf)}"
-        printf '%s\t%s\n' "${PR_BRANCH_PREFIX:-agent/$owner_slug-}" "${GITHUB_LOGIN:-}"
+        printf '%s\t%s\t%s\t%s\n' "$owner_slug" \
+          "${PR_BRANCH_PREFIX:-agent/$owner_slug-}" "${AGENT_ID:-}" \
+          "$state_dir/$owner_slug.opened-prs"
       ) >> "$tmp/owners.tsv"
     done
   fi
 
-  PREFIX="$prefix" LOGIN="${GITHUB_LOGIN:-}" python3 - "$tmp/prs.json" <<'PYEOF' > "$tmp/candidates.jsonl"
+  : > "$tmp/tasks.jsonl"
+  for one in $(printf '%s' "$board_ids" | tr ',' ' '); do
+    [ -n "$one" ] || continue
+    if ! board_json="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&limit=100")"; then
+      printf 'ERROR: cannot list board %s assignments for the one-ticket-until-live gate\n' "$one" >&2
+      return 1
+    fi
+    printf '%s\n' "$board_json" >> "$tmp/tasks.jsonl"
+  done
+
+  PREFIX="$prefix" SLUG="$slug" AGENT_ID="$agent_id" REPO="$repo" OPENED_PRS="$opened_prs" \
+    python3 - "$tmp/prs.json" "$tmp/owners.tsv" "$tmp/tasks.jsonl" <<'PYEOF' > "$tmp/candidates.jsonl"
 import json, os, re, sys
+prs_path, owners_path, tasks_path = sys.argv[1:]
+slug = os.environ["SLUG"]
 prefix = os.environ["PREFIX"].casefold()
-login = os.environ.get("LOGIN", "").casefold()
-with open(sys.argv[1]) as handle:
+agent_id = os.environ["AGENT_ID"]
+repo = os.environ["REPO"]
+owners = []
+with open(owners_path, encoding="utf-8") as handle:
+    for line in handle:
+        owner_slug, owner_prefix, owner_id, state_path = line.rstrip("\n").split("\t", 3)
+        row = (owner_slug, owner_prefix.casefold(), owner_id, state_path)
+        if row not in owners:
+            owners.append(row)
+assigned = {}
+with open(tasks_path, encoding="utf-8") as handle:
+    for line in handle:
+        for task in (json.loads(line).get("tasks") or []):
+            ref = str(task.get("ticketNumber") or "").upper()
+            ids = assigned.setdefault(ref, set())
+            for who in task.get("assignees") or []:
+                agent = who.get("agent") if isinstance(who, dict) else None
+                if isinstance(agent, dict) and agent.get("id"):
+                    ids.add(str(agent["id"]))
+opened = set()
+path = os.environ.get("OPENED_PRS") or ""
+try:
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) >= 2 and fields[0] == repo:
+                opened.add(fields[1])
+except OSError:
+    pass
+ticket_pattern = re.compile(r"(?<![0-9A-Za-z])([A-Z][A-Z0-9]{1,10}-[0-9]+)(?![0-9A-Za-z])", re.I)
+def title_ticket(pr):
+    match = ticket_pattern.search(str(pr.get("title") or ""))
+    return match.group(1).upper() if match else ""
+def display_ticket(pr):
+    ref = title_ticket(pr)
+    if ref:
+        return ref
+    haystack = " ".join(str(pr.get(key) or "") for key in ("body", "headRefName"))
+    match = ticket_pattern.search(haystack)
+    return match.group(1).upper() if match else "PR-%s" % pr["number"]
+def has_other_prefix(branch):
+    folded = branch.casefold()
+    for owner_slug, owner_prefix, _, _ in owners:
+        if owner_slug != slug and owner_prefix and folded.startswith(owner_prefix):
+            return True
+    return folded.startswith("agent/") and not folded.startswith(prefix)
+with open(prs_path, encoding="utf-8") as handle:
     prs = json.load(handle)
 for pr in sorted(prs, key=lambda row: row.get("createdAt") or ""):
     if str(pr.get("state") or "").upper() not in ("OPEN", "MERGED"):
         continue
     branch = str(pr.get("headRefName") or "")
-    author = pr.get("author") if isinstance(pr.get("author"), dict) else {}
-    author_login = str(author.get("login") or "").casefold()
-    if not (branch.casefold().startswith(prefix) or (login and author_login == login)):
+    ref = title_ticket(pr)
+    by_prefix = branch.casefold().startswith(prefix)
+    by_state = str(pr.get("number")) in opened
+    by_assignment = bool(ref and agent_id in assigned.get(ref, set()) and not has_other_prefix(branch))
+    if not (by_prefix or by_state or by_assignment):
         continue
-    haystack = " ".join(str(pr.get(k) or "") for k in ("title", "body", "headRefName"))
-    refs = re.findall(r"(?<![0-9A-Za-z])([A-Z][A-Z0-9]{1,10}-[0-9]+)(?![0-9A-Za-z])", haystack, re.I)
-    pr["ticket"] = refs[0].upper() if refs else "PR-%s" % pr["number"]
+    pr["ticket"] = display_ticket(pr)
     print(json.dumps(pr))
 PYEOF
 
-  # Orphans never become candidates. The atomic marker directory makes the
-  # warning once-daily even when several agent timers inspect the same repo.
+  # Orphans never become candidates. Prefix, assignment, and per-agent state
+  # are checked across all active confs before a warning is emitted.
   today="$(date -u +%F)"
-  python3 - "$tmp/open.json" "$tmp/owners.tsv" <<'PYEOF' > "$tmp/orphans.tsv"
-import json, sys
+  REPO="$repo" python3 - "$tmp/open.json" "$tmp/owners.tsv" "$tmp/tasks.jsonl" <<'PYEOF' > "$tmp/orphans.tsv"
+import json, os, re, sys
+open_path, owners_path, tasks_path = sys.argv[1:]
+repo = os.environ["REPO"]
 owners = []
-with open(sys.argv[2]) as handle:
+active_ids = set()
+with open(owners_path, encoding="utf-8") as handle:
     for line in handle:
-        prefix, _, login = line.rstrip("\n").partition("\t")
-        owners.append((prefix.casefold(), login.casefold()))
-for pr in json.load(open(sys.argv[1])):
+        slug, prefix, agent_id, state_path = line.rstrip("\n").split("\t", 3)
+        row = (slug, prefix.casefold(), agent_id, state_path)
+        if row not in owners:
+            owners.append(row)
+        if agent_id:
+            active_ids.add(agent_id)
+assigned = {}
+with open(tasks_path, encoding="utf-8") as handle:
+    for line in handle:
+        for task in (json.loads(line).get("tasks") or []):
+            ref = str(task.get("ticketNumber") or "").upper()
+            ids = assigned.setdefault(ref, set())
+            for who in task.get("assignees") or []:
+                agent = who.get("agent") if isinstance(who, dict) else None
+                if isinstance(agent, dict) and agent.get("id"):
+                    ids.add(str(agent["id"]))
+opened = set()
+for _, _, _, path in owners:
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) >= 2 and fields[0] == repo:
+                    opened.add(fields[1])
+    except OSError:
+        pass
+pattern = re.compile(r"(?<![0-9A-Za-z])([A-Z][A-Z0-9]{1,10}-[0-9]+)(?![0-9A-Za-z])", re.I)
+for pr in json.load(open(open_path)):
     branch = str(pr.get("headRefName") or "")
-    author = pr.get("author") if isinstance(pr.get("author"), dict) else {}
-    login = str(author.get("login") or "").casefold()
-    if any(branch.casefold().startswith(prefix) or (owner_login and login == owner_login)
-           for prefix, owner_login in owners):
+    folded = branch.casefold()
+    number = str(pr.get("number"))
+    prefix_owner = any(prefix and folded.startswith(prefix) for _, prefix, _, _ in owners)
+    match = pattern.search(str(pr.get("title") or ""))
+    ref = match.group(1).upper() if match else ""
+    another_prefix = folded.startswith("agent/") and not prefix_owner
+    assigned_active = bool(ref and assigned.get(ref, set()) & active_ids and not another_prefix)
+    if prefix_owner or number in opened or assigned_active:
         continue
-    print("%s\t%s" % (pr.get("number"), branch))
+    print("%s\t%s" % (number, branch))
 PYEOF
   while IFS=$'\t' read -r number branch; do
     [ -n "$number" ] || continue
@@ -787,8 +880,7 @@ PYEOF
     if LIVE="$live" python3 -c 'import json,os,sys;sys.exit(0 if json.loads(os.environ["LIVE"])["live"] else 1)'; then
       continue
     fi
-    _ht_pr_work_state "$repo" "$pr" "$live"
-    return 0
+    _ht_pr_work_state "$repo" "$pr" "$live" || return 1
   done < "$tmp/candidates.jsonl"
 )
 
@@ -1044,6 +1136,24 @@ elif claimed and not merged:
     print("1 %s is claimed by this agent and is not finished (%s)" % (ref, detail))
 else:
     print("3 %s is new work (%s)" % (ref, reason))
+'
+}
+
+# adapter_open_pr_numbers <ticket-ref>: exact open PR matches, one number per
+# line. Core compares this before and after a run so a newly opened PR remains
+# attributable even when its branch predates the agent prefix convention.
+adapter_open_pr_numbers() {
+  local ref="$1"
+  [ -n "${PR_REPO:-}" ] || return 0
+  command -v gh >/dev/null 2>&1 || return 0
+  gh pr list --repo "$PR_REPO" --state open --search "$ref" \
+    --json number,title,headRefName --limit 20 2>/dev/null | REF="$ref" python3 -c '
+import json, os, re, sys
+ref = os.environ["REF"]
+pattern = re.compile(r"(?<![0-9A-Za-z])" + re.escape(ref) + r"(?![0-9A-Za-z])", re.I)
+for row in json.load(sys.stdin):
+    if pattern.search("%s %s" % (row.get("title") or "", row.get("headRefName") or "")):
+        print(row["number"])
 '
 }
 

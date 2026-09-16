@@ -196,6 +196,9 @@ LOCK="$STATE_DIR/$SLUG.lock"
 # The agents feed can read this one-line JSON reason directly. It remains while
 # a pull request blocks pickup and disappears only after every owed PR is LIVE.
 BLOCKED="$STATE_DIR/$SLUG.blocked"
+# Pull requests first opened during this agent's runs remain attributable even
+# when an old or manually chosen branch name does not identify the agent.
+OPENED_PRS="$STATE_DIR/$SLUG.opened-prs"
 PR_LIVE_CACHE="$STATE_DIR/pr-live-cache"
 # Failed attempts are append-only: "task timestamp command-rung failed". The
 # rung is diagnostic only; ladder selection depends on the total failure count.
@@ -218,7 +221,7 @@ TRIAGE_STATE_DIR="${TRIAGE_STATE_DIR:-$STATE_DIR/triage}"
 # about this ticket, and the count of how many it has already answered.
 ADVISOR_DIR="${ADVISOR_DIR:-$STATE_DIR/advisor}"
 TRIAGE_SH="$CORE_ROOT/scripts/triage.sh"
-touch "$SEEN" "$ATTEMPTS" "$POSTED"
+touch "$SEEN" "$ATTEMPTS" "$POSTED" "$OPENED_PRS"
 
 # attempts_recent <task-id> : failures in the current window.
 attempts_recent() {
@@ -518,45 +521,55 @@ if [ "$DRY_RUN" = "yes" ]; then
 fi
 
 # Pull-request debt is a hard pickup gate, not a ranking hint. The adapter
-# identifies authored PRs, proves LIVE, and returns only the oldest debt. Core
-# records the reason for the agents feed and later permits only this fix or an
-# emergency.
+# proves LIVE and returns every owned debt oldest first. Core works only the
+# first one, while recording and explaining the full queue.
+PR_GATES=""
 PR_GATE=""
+PR_GATE_COUNT=0
 PR_GATE_ACTION=""
 PR_GATE_NUMBER=""
 PR_GATE_STATE=""
 PR_GATE_TICKET=""
 if declare -F adapter_pr_gate >/dev/null 2>&1; then
-  PR_GATE="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
-              "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" 2>>"$LOG")" || die \
+  PR_GATES="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
+              "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" "$OPENED_PRS" 2>>"$LOG")" || die \
     "cannot determine whether $SLUG has a pull request that is not live" \
     "read $LOG and restore GitHub or board access; no ticket was claimed"
 fi
-if [ -n "$PR_GATE" ]; then
+if [ -n "$PR_GATES" ]; then
+  PR_GATE="$(printf '%s\n' "$PR_GATES" | head -1)"
+  PR_GATE_COUNT="$(printf '%s\n' "$PR_GATES" | grep -c .)"
   PR_GATE_ACTION="$(row_field "$PR_GATE" action)"
   PR_GATE_NUMBER="$(row_field "$PR_GATE" number)"
   PR_GATE_STATE="$(row_field "$PR_GATE" state)"
   PR_GATE_TICKET="$(row_field "$PR_GATE" ticket)"
-  prior_since=""
-  if [ -r "$BLOCKED" ]; then
-    prior_since="$(PR="$PR_GATE_NUMBER" python3 - "$BLOCKED" <<'PYEOF' 2>/dev/null || true
+  gate_rows="$BLOCKED.gates.$$"
+  printf '%s\n' "$PR_GATES" > "$gate_rows"
+  python3 - "$gate_rows" "$BLOCKED" <<'PYEOF'
 import json, os, sys
-try:
-    row = json.load(open(sys.argv[1]))
-    if str(row.get("pr")) == os.environ["PR"]:
-        print(row.get("since") or "")
-except Exception:
-    pass
+source, path = sys.argv[1:]
+with open(source, encoding="utf-8") as handle:
+    rows = [json.loads(line) for line in handle if line.strip()]
+items = [{"pr": row["number"], "state": row["state"], "since": row["since"],
+          "ticket": row["ticket"]} for row in rows]
+oldest = dict(items[0])
+oldest["prs"] = items
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(oldest, handle)
+    handle.write("\n")
+os.replace(temporary, path)
 PYEOF
-)"
-  fi
-  blocked_since="${prior_since:-$(row_field "$PR_GATE" since)}"
-  PR="$PR_GATE_NUMBER" STATE="$PR_GATE_STATE" SINCE="$blocked_since" TICKET="$PR_GATE_TICKET" python3 -c '
-import json, os
-print(json.dumps({"pr": int(os.environ["PR"]), "state": os.environ["STATE"],
-                  "since": os.environ["SINCE"], "ticket": os.environ["TICKET"]}))
-' > "$BLOCKED"
-  log "blocked on PR #$PR_GATE_NUMBER: $PR_GATE_STATE (one ticket until live)"
+  rm -f "$gate_rows"
+  PR_GATE_SUMMARY="$(printf '%s\n' "$PR_GATES" | python3 -c '
+import json, sys
+parts = []
+for rank, line in enumerate(sys.stdin, 1):
+    row = json.loads(line)
+    parts.append("rank %d #%s %s (%s)" % (rank, row["number"], row["ticket"], row["state"]))
+print("owned non-live PRs oldest first: " + ", ".join(parts))
+')"
+  explain "$PR_GATE_SUMMARY"
 else
   rm -f "$BLOCKED"
 fi
@@ -645,6 +658,10 @@ print(",".join(sorted(set(row.get("labels") or []) & excluded)))')"
   is_pr_fix="no"
   [ "$trigger" = "pr_fix" ] && is_pr_fix="yes"
   if [ -n "$PR_GATE" ] && [ "$is_pr_fix" = "no" ]; then
+    if [ "$PR_GATE_COUNT" -gt 1 ]; then
+      explain "skip  $ref: $PR_GATE_COUNT owned PRs are not live, so only oldest PR #$PR_GATE_NUMBER may run"
+      continue
+    fi
     case ",$(row_labels "$row")," in
       *,emergency,*) : ;;
       *) explain "skip  $ref: PR #$PR_GATE_NUMBER is not live, so only that PR or an emergency may run"; continue ;;
@@ -1022,6 +1039,10 @@ print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
   # usually a bot reading an old pack, and this is the line that shows it.
   log "$SKILLS_LINE"
   started=$((started + 1))
+  OPEN_PRS_BEFORE=""
+  if [ "$is_pr_fix" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
+    OPEN_PRS_BEFORE="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
+  fi
   set +e
   # One short-lived process per ticket. Nothing survives it except the board,
   # the repo, and this log. The agent's token is never in the prompt or the
@@ -1066,6 +1087,19 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
   rc=$?
   set -e
   cat "$ERRFILE" >> "$LOG" 2>/dev/null || true
+  if [ "$is_pr_fix" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
+    OPEN_PRS_AFTER="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
+    while IFS= read -r opened_number; do
+      [ -n "$opened_number" ] || continue
+      if printf '%s\n' "$OPEN_PRS_BEFORE" | grep -qxF "$opened_number"; then continue; fi
+      if awk -F '\t' -v repo="$PR_REPO" -v number="$opened_number" \
+          '$1 == repo && $2 == number { found=1 } END { exit !found }' "$OPENED_PRS"; then
+        continue
+      fi
+      printf '%s\t%s\t%s\n' "$PR_REPO" "$opened_number" "$ref" >> "$OPENED_PRS"
+      log "recorded PR #$opened_number as opened by $SLUG during the $ref run"
+    done <<< "$OPEN_PRS_AFTER"
+  fi
   # The seen-key and run-done bookkeeping happen first, before any optional
   # post-run step: push_skill_commits below touches a second git repo (the
   # skills pack) and a broken clone there (no upstream, no origin/HEAD) must

@@ -16,6 +16,7 @@ exit 0
 EOF
 cat > "$TMP/bin/claude" <<'EOF'
 #!/usr/bin/env bash
+[ -z "${MODEL_OPEN_MARKER:-}" ] || touch "$MODEL_OPEN_MARKER"
 exit 0
 EOF
 cat > "$TMP/bin/gh" <<'EOF'
@@ -25,7 +26,11 @@ scenario="${PR_TEST_SCENARIO:-pending}"
 [ -z "${GH_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$GH_CALL_LOG"
 if [ "$1 $2" = "pr list" ]; then
   if printf ' %s ' "$*" | grep -q ' --search '; then
-    printf '[]\n'
+    if [ "$scenario" = "record-open" ] && [ -e "${MODEL_OPEN_MARKER:-/no-marker}" ]; then
+      printf '[{"number":8,"title":"HTPR-1 fix","headRefName":"legacy/fix-1"}]\n'
+    else
+      printf '[]\n'
+    fi
     exit 0
   fi
   if [ "$scenario" = "oldest" ]; then
@@ -38,7 +43,7 @@ JSON
 JSON
   elif [ "$scenario" = "orphan" ]; then
     cat <<JSON
-[{"number":4,"state":"OPEN","url":"https://github.test/pull/4","title":"HTPR-4 fix","body":"","headRefName":"agent/retired-dev-htpr-4","author":{"login":"retired-dev"},"createdAt":"2026-01-01T00:00:00Z"}]
+[{"number":4,"state":"OPEN","url":"https://github.test/pull/4","title":"HTPR-12 fix","body":"","headRefName":"agent/retired-dev-htpr-4","author":{"login":"retired-dev"},"createdAt":"2026-01-01T00:00:00Z"}]
 JSON
   elif [ "$scenario" = "author-owned" ]; then
     cat <<JSON
@@ -48,6 +53,16 @@ JSON
     cat <<JSON
 [{"number":6,"state":"OPEN","url":"https://github.test/pull/6","title":"HTPR-6 fix","body":"","headRefName":"cursor-dev-2/htpr-6","author":{"login":"shared-bot"},"createdAt":"2026-01-01T00:00:00Z"}]
 JSON
+  elif [ "$scenario" = "state-owned" ]; then
+    cat <<JSON
+[{"number":7,"state":"OPEN","url":"https://github.test/pull/7","title":"HTPR-7 fix","body":"","headRefName":"legacy/fix-7","author":{"login":"shared-bot"},"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+  elif [ "$scenario" = "shared-author" ]; then
+    cat <<JSON
+[{"number":11,"state":"OPEN","url":"https://github.test/pull/11","title":"HTPR-11 fix","body":"","headRefName":"legacy/fix-11","author":{"login":"dev-one"},"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
+  elif [ "$scenario" = "record-open" ]; then
+    printf '[]\n'
   else
     state="OPEN"; [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ] || state="OPEN"
     if [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ]; then state="MERGED"; fi
@@ -108,7 +123,7 @@ if [[ "$url" == *'/mcp/tasks?'* ]]; then
   emergency_labels='[{"name":"emergency"}]'
   [ "${BOARD_TEST_SCENARIO:-}" != "no-emergency" ] || emergency_labels='[]'
   cat <<JSON
-{"tasks":[{"id":"task-1","ticketNumber":"HTPR-1","section":"Bugs","title":"PR ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0}]}
+{"tasks":[{"id":"task-1","ticketNumber":"HTPR-1","section":"Bugs","title":"PR ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0},{"id":"task-5","ticketNumber":"HTPR-5","section":"Bugs","title":"Legacy branch ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
 JSON
 elif [[ "$url" == *'task_id=task-3'* ]]; then
   printf '{"comments":[{"agent":{"id":"agent-1","displayName":"Dev One"},"text":"<p>Claimed.</p>"}]}\n'
@@ -130,6 +145,7 @@ die() { printf 'die: %s %s\n' "$*" >&2; return 1; }
 
 cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<'EOF'
 AGENT_SLUG="dev-1"
+AGENT_ID="agent-1"
 AGENT_KIND="dev"
 BOARD_ADAPTER="hypertask"
 PR_REPO="example/repo"
@@ -137,12 +153,14 @@ GITHUB_LOGIN="dev-one"
 EOF
 cat > "$TMP/home/.config/hypertask-agents/qa-1.conf" <<'EOF'
 AGENT_SLUG="qa-1"
+AGENT_ID="agent-qa"
 AGENT_KIND="qa"
 BOARD_ADAPTER="hypertask"
 PR_REPO="example/repo"
 EOF
 cat > "$TMP/home/.config/hypertask-agents/dev-2.conf" <<'EOF'
 AGENT_SLUG="dev-2"
+AGENT_ID="agent-2"
 AGENT_KIND="dev"
 BOARD_ADAPTER="hypertask"
 PR_REPO="example/repo"
@@ -154,11 +172,14 @@ LEGACY_PROMPT="unterminated
 EOF
 
 run_gate() {
-  local scenario="$1" slug="${2:-dev-1}" name="${3:-Dev One}" cache
+  local scenario="$1" slug="${2:-dev-1}" name="${3:-Dev One}" cache opened
   cache="$TMP/cache-$scenario-$slug"
-  PR_TEST_SCENARIO="$scenario" GITHUB_LOGIN="${4:-}" PR_BRANCH_PREFIX="${5:-}" \
+  opened="$TMP/home/.local/state/agent-board-poll/$slug.opened-prs"
+  mkdir -p "$(dirname "$opened")"
+  touch "$opened"
+  PR_TEST_SCENARIO="$scenario" PR_BRANCH_PREFIX="${4:-}" \
     adapter_pr_gate "$TMP/token" 15 agent-1 "$name" "$slug" "$cache" \
-      "$TMP/home/.config/hypertask-agents"
+      "$TMP/home/.config/hypertask-agents" "$opened"
 }
 
 legacy_log="$TMP/legacy.log"
@@ -203,23 +224,33 @@ qa_claim="$(run_gate qa-claim qa-1 'QA One')"
 [[ -z "$qa_claim" ]]
 echo 'PASS QA claim comment does not attribute another agent branch'
 
-author_owned="$(run_gate author-owned dev-1 'Dev One' dev-one)"
-[[ "$author_owned" == *'"number": 5'* ]]
-echo 'PASS configured GitHub login attributes an authored PR'
+assigned_owned="$(run_gate author-owned)"
+[[ "$assigned_owned" == *'"number": 5'* ]]
+echo 'PASS current ticket assignment attributes a legacy branch PR'
 
-custom_prefix="$(run_gate custom-prefix dev-2 'Dev Two' '' 'cursor-dev-2/')"
+custom_prefix="$(run_gate custom-prefix dev-2 'Dev Two' 'cursor-dev-2/')"
 [[ "$custom_prefix" == *'"number": 6'* ]]
-echo 'PASS configured custom branch prefix attributes an authored PR'
+echo 'PASS configured branch prefix attributes an owned PR'
+
+printf 'example/repo\t7\tHTPR-7\n' > "$TMP/home/.local/state/agent-board-poll/dev-1.opened-prs"
+state_owned="$(run_gate state-owned)"
+[[ "$state_owned" == *'"number": 7'* ]]
+echo 'PASS runner state attributes a legacy branch PR'
+
+shared_author="$(run_gate shared-author 2>/dev/null)"
+[[ -z "$shared_author" ]]
+echo 'PASS shared GitHub authorship does not transfer PR ownership'
 
 orphan_log="$TMP/orphan.log"
 run_gate orphan >/dev/null 2>"$orphan_log"
 run_gate orphan >/dev/null 2>>"$orphan_log"
 [[ "$(grep -cF 'orphaned PR #4 (agent/retired-dev-htpr-4) has no owning agent' "$orphan_log")" = 1 ]]
-echo 'PASS orphaned PR blocks nobody and logs once per day'
+echo 'PASS unassigned PR with no active owner blocks nobody and logs once per day'
 
 oldest="$(run_gate oldest)"
-[[ "$oldest" == *'"number": 9'* ]]
-echo 'PASS oldest owed PR is selected first'
+[[ "$(printf '%s\n' "$oldest" | sed -n '1p')" == *'"number": 9'* ]]
+[[ "$(printf '%s\n' "$oldest" | grep -c .)" = 2 ]]
+echo 'PASS every owed PR is returned oldest first'
 
 # Run the real pickup path in dry-run mode. One pending PR blocks ordinary work
 # but the emergency row remains eligible.
@@ -234,9 +265,17 @@ MODEL_CLI="claude -p --model sonnet"
 BOARD_CLI="$TMP/bin/hypertask"
 PR_REPO="example/repo"
 AGENT_REPO="$TMP/repo"
+SKILLS_INDEX=""
 CLAIM_UNASSIGNED="no"
 TRIAGE="no"
 EOF
+multi_run="$(PR_TEST_SCENARIO=oldest HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$multi_run" == *'owned non-live PRs oldest first: rank 1 #9 HTPR-9 (red), rank 2 #10 HTPR-10 (red)'* ]]
+[[ "$multi_run" == *'would pick up HTPR-9'* ]]
+[[ "$multi_run" != *'would pick up HTPR-2'* ]]
+[[ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["prs"]))' "$TMP/home/.local/state/agent-board-poll/dev-1.blocked")" = 2 ]]
+echo 'PASS multiple debts list every PR, work oldest first, and block new claims'
+
 pending_run="$(PR_TEST_SCENARIO=pending HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$pending_run" == *'would pick up HTPR-2'* ]]
 [[ "$pending_run" != *'would pick up HTPR-1'* ]]
@@ -266,4 +305,11 @@ red_run="$(PR_TEST_SCENARIO=red HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_S
 [[ "$red_run" == *'no ticket attempts, cooldown, triage, or escalation'* ]]
 echo 'PASS red PR still runs after many attempts with no cooldown or escalation'
 
-echo '16 one-ticket-until-live checks passed'
+rm -f "$TMP/opened-marker"
+PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency MODEL_OPEN_MARKER="$TMP/opened-marker" \
+  HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" \
+  "$ROOT/scripts/agent-board-poll" --once dev-1 >/dev/null
+[[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "8" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.opened-prs")" = yes ]]
+echo 'PASS runner persists a PR first seen after its ticket run'
+
+echo '20 one-ticket-until-live checks passed'
