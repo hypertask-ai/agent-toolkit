@@ -35,6 +35,49 @@ until you do it.
   `agent-template-weekly` is a compatibility alias. `agent-template report`
   prints the local filing scorecard.
 
+## Channels
+
+The host config is `~/.config/agent-template/config`. Ordinary hosts default to
+`CHANNEL=stable`; their update checks out the `stable` tag and never follows main.
+This maintainer host uses `CHANNEL=latest` and `MAINTAINER=yes`. Only that setting
+allows `agent-template promote`, which moves `stable` to the installed commit after
+24 hours of running and a fresh green eval run. The 06:30 maintainer timer runs
+promotion after update. Set `AUTO_UPDATE=off` to make timer runs print `auto-update
+off, current X, stable Y` and do nothing else.
+
+## What update does before it swaps
+
+The updater fetches and selects the channel, detects local changes against the
+installed manifest, stages the complete target template, and runs the staged eval
+suite. A red suite leaves the installed tree untouched, logs `update to X refused:
+N evals red`, and exits zero so the timer is not reported as crashed. `--force`
+skips the eval gate. A normal install evaluates its source before its first copy as
+well.
+
+## Local patches
+
+The install baseline is `~/.claude/skills/create-agent/.manifest.sha256`. Changed
+files are copied to `local-patches/<installed-version>/<path>` and printed before
+the update refuses. File each change with `agent-template feedback`, apply the
+accepted fix in the repository, then remove the local edit. `--keep-local-patches`
+allows the update after archiving, but it does not reapply the patch to the new
+release.
+
+## Mentions
+
+`agent-kick.service` receives signed Hypertask mention events on localhost and runs
+`systemctl --user start agent-board-poll@<slug>.service`. Put the full public HTTPS
+receiver address in host-config `WEBHOOK_URL`; install and update configure every
+agent through `hypertask agents webhook configure` when available, otherwise through
+`POST /mcp/webhooks`. Signing secrets are 0600 files under
+`~/.config/agent-template/webhooks/`. With no public URL, the installer prints `no
+WEBHOOK_URL, mentions wait for the poll` and leaves the minute timer as fallback.
+
+A failed ticket run writes only its host log and
+`~/.local/state/agent-board-poll/<slug>.status`. It posts nothing on the ticket and
+does not add the mention key to `<slug>.seen`, so the next tick may retry the same
+mention. A later successful run removes the status file.
+
 ## The conf decides the provider
 
 The conf is the only command policy. Core treats commands as opaque strings

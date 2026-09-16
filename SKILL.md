@@ -21,6 +21,50 @@ The canonical copy lives in the `vstack` repo under
 `install.sh`. Fix bugs in the repo and re-run `install.sh`, never the other way
 round.
 
+## Channels
+
+Host release settings live in `~/.config/agent-template/config`. `CHANNEL=stable`
+is the default and makes `agent-template update` fetch and check out the repository's
+`stable` tag. Maintainer hosts set `CHANNEL=latest` and `MAINTAINER=yes`, so updates
+select `origin/main`. `AUTO_UPDATE=off` makes the 06:30 timer report the current and
+stable versions without fetching or changing files; a manual update still works.
+
+Only a maintainer host can run `agent-template promote`. Promotion moves `stable` to
+the exact installed commit only after that version has run for 24 hours and its
+installed eval suite is green at promotion time. The daily maintainer timer tries
+promotion after its own update and prints whether it promoted or refused.
+
+## What update does before it swaps
+
+`agent-template update` selects the configured channel, compares the installed copy
+with its install manifest, copies host edits into `local-patches`, stages the target
+release, and runs the staged `evals/run-evals.sh`. Only then does `install.sh` rename
+the staged directories into place. A red suite prints `update to X refused: N evals
+red`, logs that line, exits successfully, and leaves the old version installed.
+`--force` is the explicit way to skip only the eval gate.
+
+## Local patches
+
+Every install writes `.manifest.sha256`. On update, a changed installed file is
+copied to `~/.claude/skills/create-agent/local-patches/<installed-version>/<path>`
+and listed. The swap then refuses by default. File the change as feedback with
+`agent-template feedback`, move the source-of-truth fix into the repository, and
+use `--keep-local-patches` only when the archived copy is intentional and the
+release should proceed.
+
+## Mentions
+
+`agent-kick.service` is one localhost HTTP receiver per host. When
+`WEBHOOK_URL` is present in the host config, install and update register each agent
+for signed `comment.mention` events. A valid request immediately starts
+`agent-board-poll@<slug>.service`; the unit's existing lock still prevents overlap.
+Without a public URL, installation prints `no WEBHOOK_URL, mentions wait for the
+poll` and the 60-second timer remains the fallback.
+
+A failed run posts no board comment and never writes the triggering comment key to
+`<slug>.seen`, so the mention remains eligible next tick. Its detail goes to
+`<slug>.log` and one-line `<slug>.status` JSON for the agents feed instead.
+
 ## Example dialogue
 
 ```

@@ -17,6 +17,24 @@ cannot do for itself; `agent-template update` prints it and logs it once per
 version to `~/.local/state/agent-template/actions.log` for a maintainer
 session to read and act on.
 
+## 3.19.0 - 2026-09-16
+
+- Hosts now follow an explicit release channel. New hosts default to the `stable`
+  tag; this maintainer host follows `latest`. Promotion requires 24 hours on the
+  installed commit and a fresh green eval run.
+- Updates evaluate a staged release before swapping. Red evals exit successfully
+  without changing the installed version, and `--force` is explicit.
+- An install manifest detects host edits, archives them under `local-patches`, and
+  refuses replacement unless `--keep-local-patches` is passed. Timers also honor
+  `AUTO_UPDATE=off`.
+- Failed ticket runs write the host log and agents-feed status only. They post no
+  failure comment and leave a triggering mention eligible for the next tick.
+- `agent-kick.service` can receive signed mention webhooks and start the matching
+  poll unit immediately. Hosts without `WEBHOOK_URL` keep the minute poll fallback.
+- Fifty-five offline behavioral checks cover the channel, promotion, gate,
+  patch, failure, and kick paths as well as the existing runner contracts.
+- ACTION: Other hosts are now on `stable`; run `agent-template update` once to install the channel config, then leave `CHANNEL=stable` unless this is the maintainer host.
+
 ## 3.18.3 - 2026-09-16
 
 - AGTE-5: when `WATCH_SECTIONS="*"` lists a ticket before its owned-reply row,

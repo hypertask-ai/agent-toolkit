@@ -196,9 +196,9 @@ PR_LIVE_CACHE="$STATE_DIR/pr-live-cache"
 # Failed attempts are append-only: "task timestamp command-rung failed". The
 # rung is diagnostic only; ladder selection depends on the total failure count.
 ATTEMPTS="$STATE_DIR/$SLUG.attempts"
-# The same failure posted on the same ticket twice is noise. One line per
-# ticket, holding a fingerprint of the last failure written on it.
-LASTFAIL="$STATE_DIR/$SLUG.lastfail"
+# One-line JSON consumed by the agents feed. Runtime failures belong here and
+# in the log, never as comments that bury the mention which triggered the run.
+STATUS="$STATE_DIR/$SLUG.status"
 # Per-ticket model overrides hold one full command. The file is optional and
 # wins over automatic triage and ladder selection for that ticket.
 MODEL_OVERRIDE_DIR="${MODEL_OVERRIDE_DIR:-$HOME/.local/state/agent-board-poll/model-override}"
@@ -214,7 +214,7 @@ TRIAGE_STATE_DIR="${TRIAGE_STATE_DIR:-$STATE_DIR/triage}"
 # about this ticket, and the count of how many it has already answered.
 ADVISOR_DIR="${ADVISOR_DIR:-$STATE_DIR/advisor}"
 TRIAGE_SH="$CORE_ROOT/scripts/triage.sh"
-touch "$SEEN" "$ATTEMPTS" "$LASTFAIL" "$POSTED"
+touch "$SEEN" "$ATTEMPTS" "$POSTED"
 
 # attempts_recent <task-id> : failures in the current window.
 attempts_recent() {
@@ -264,15 +264,29 @@ resolve_ticket_command() {
   fi
 }
 
-# failure_is_new <task-id> <detail> : true the first time this failure is seen
-# on this ticket. Repeats are kept out of the ticket and stay in the log.
-failure_is_new() {
-  local task_id="$1" fingerprint prior
-  fingerprint="$(printf '%s' "$2" | sha256sum | cut -c1-16)"
-  prior="$(awk -v t="$task_id" '$1 == t { print $2 }' "$LASTFAIL" | tail -1)"
-  [ "$prior" = "$fingerprint" ] && return 1
-  printf '%s %s\n' "$task_id" "$fingerprint" >> "$LASTFAIL"
-  return 0
+# write_failure_status <ref> <exit-or-kind> <detail>
+write_failure_status() {
+  REF="$1" FAILURE_EXIT="$2" DETAIL="$3" SLUG="$SLUG" python3 - "$STATUS" <<'PYEOF'
+import datetime
+import json
+import os
+import sys
+
+row = {
+    "agent": os.environ["SLUG"],
+    "state": "failed",
+    "ticket": os.environ["REF"],
+    "exit": os.environ["FAILURE_EXIT"],
+    "detail": os.environ["DETAIL"].strip()[-2000:],
+    "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+path = sys.argv[1]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
 }
 
 log() {
@@ -968,11 +982,7 @@ $PROMPT"
       if [ "$is_pr_fix" = "no" ]; then
         printf '%s %s model failed\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
       fi
-      if declare -F adapter_failure_comment >/dev/null 2>&1 \
-         && failure_is_new "$task_id" "workdir:$WORKDIR_ROOT"; then
-        adapter_failure_comment "$BOARD_CLI" "$ref" \
-          "could not create a working directory under $WORKDIR_ROOT" || true
-      fi
+      write_failure_status "$ref" workdir "could not create a working directory under $WORKDIR_ROOT"
       continue
     }
   fi
@@ -1046,22 +1056,12 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     if [ "$is_pr_fix" = "no" ]; then
       printf '%s %s %s failed\n' "$task_id" "$(date +%s)" "$RUN_MODEL_RUNG" >> "$ATTEMPTS"
     fi
-    # A failure is written where a human already looks. The ticket does not
-    # move: where it sits is the record of how far this got. The state key is
-    # not recorded either, so the next tick may try once more, up to the
-    # attempt budget this ticket has left.
+    # A failed run must not alter the ticket or mark its trigger handled. The
+    # next tick sees the same mention key, while the agents feed and host log
+    # carry the failure details.
     log "run FAILED $ref exit=$rc: see the lines above in $LOG"
     detail="$(tail -c 2000 "$ERRFILE" 2>/dev/null)"
-    # The same failure said twice on one ticket is noise, and the retry count
-    # is this runner's business, not the ticket's.
-    if declare -F adapter_failure_comment >/dev/null 2>&1; then
-      if failure_is_new "$task_id" "$detail"; then
-        adapter_failure_comment "$BOARD_CLI" "$ref" "$detail" \
-          || log "could not post the failure comment on $ref"
-      else
-        log "failure on $ref is the same one already written there, not repeating it"
-      fi
-    fi
+    write_failure_status "$ref" "$rc" "$detail"
     if [ "$is_pr_fix" = "yes" ]; then
       printf 'ERROR: the PR-fix run for %s exited %s. Do this next: read %s; the next tick retries this PR with no limit or cooldown\n' \
         "$ref" "$rc" "$LOG" >&2
@@ -1083,6 +1083,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         printf '%s:%s\n' "$task_id" "$posted_id" >> "$SEEN"
       done < "$POSTED"
     fi
+    rm -f "$STATUS"
     log "run done $ref exit=0"
   fi
   # Whether or not this ticket's own run succeeded, a skill edit the agent

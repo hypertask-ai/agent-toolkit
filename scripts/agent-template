@@ -13,6 +13,8 @@
 #
 #   agent-template update [--dry-run] [--no-host-notes]
 #
+#   agent-template promote
+#
 # update is how a bot host stays current without a human explaining the fix
 # to it: pull the template repo, reinstall, and bring every conf that is
 # still on the old HT_* fleet schema forward onto the current one, so a bot
@@ -140,8 +142,48 @@ case "$1" in
   feedback) shift ;;
   report) shift; SUBCOMMAND="report" ;;
   update) shift; SUBCOMMAND="update" ;;
+  promote) shift; SUBCOMMAND="promote" ;;
   *) die "unknown subcommand $1" "run agent-template --help" ;;
 esac
+
+HOST_CONFIG="${AGENT_TEMPLATE_HOST_CONFIG:-$HOME/.config/agent-template/config}"
+host_config_value() {
+  local key="$1" fallback="$2" value
+  value="$(sed -n "s/^${key}=//p" "$HOST_CONFIG" 2>/dev/null | tail -n1 | tr -d '\"' || true)"
+  printf '%s\n' "${value:-$fallback}"
+}
+
+if [ "${SUBCOMMAND:-feedback}" = "promote" ]; then
+  [ $# -eq 0 ] || die "promote takes no options" "run agent-template promote"
+  [ "$(host_config_value MAINTAINER no)" = "yes" ] || {
+    echo "promote skipped: this is not a maintainer host"
+    exit 0
+  }
+  REPO="${AGENT_TEMPLATE_REPO:-$HOME/projects/vstack}"
+  INSTALL_STATE="${AGENT_TEMPLATE_INSTALL_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-template/install-state}"
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "no git checkout at $REPO" "set AGENT_TEMPLATE_REPO to the maintainer checkout"
+  [ -f "$INSTALL_STATE" ] || die "no install state at $INSTALL_STATE" "run agent-template update and wait 24 hours"
+  INSTALLED_VERSION="$(sed -n 's/^version=//p' "$INSTALL_STATE" | tail -n1)"
+  INSTALLED_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_STATE" | tail -n1)"
+  INSTALLED_AT="$(sed -n 's/^installed_at=//p' "$INSTALL_STATE" | tail -n1)"
+  case "$INSTALLED_AT" in ''|*[!0-9]*) die "invalid install time in $INSTALL_STATE" "run agent-template update again" ;; esac
+  age=$(( $(date +%s) - INSTALLED_AT ))
+  if [ "$age" -lt 86400 ]; then
+    echo "promote refused: installed $INSTALLED_VERSION has run for ${age}s, less than 24h"
+    exit 0
+  fi
+  [ -n "$INSTALLED_COMMIT" ] && git -C "$REPO" cat-file -e "$INSTALLED_COMMIT^{commit}" 2>/dev/null \
+    || die "installed commit is unavailable in $REPO" "fetch it, then re-run agent-template promote"
+  echo "promote: running evals for installed $INSTALLED_VERSION"
+  if ! bash "$CORE_ROOT/evals/run-evals.sh"; then
+    echo "promote refused: evals are red for installed $INSTALLED_VERSION"
+    exit 0
+  fi
+  git -C "$REPO" tag -f stable "$INSTALLED_COMMIT"
+  git -C "$REPO" push --force origin refs/tags/stable
+  echo "promoted stable to $INSTALLED_VERSION ($INSTALLED_COMMIT)"
+  exit 0
+fi
 
 if [ "${SUBCOMMAND:-feedback}" = "report" ]; then
   DAYS=7
@@ -186,10 +228,16 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
 
   DRY_RUN="no"
   NO_HOST_NOTES="no"
+  FORCE="no"
+  KEEP_LOCAL_PATCHES="no"
+  TIMER_RUN="no"
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) DRY_RUN="yes"; shift ;;
       --no-host-notes) NO_HOST_NOTES="yes"; shift ;;
+      --force) FORCE="yes"; shift ;;
+      --keep-local-patches) KEEP_LOCAL_PATCHES="yes"; shift ;;
+      --timer) TIMER_RUN="yes"; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown option $1" "run agent-template update --help" ;;
     esac
@@ -198,29 +246,160 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   REPO="${AGENT_TEMPLATE_REPO:-$HOME/projects/vstack}"
   CONFIG_DIR="${AGENT_TEMPLATE_CONFIG_DIR:-$HOME/.config/hypertask-agents}"
   SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
+  INSTALLED_TEMPLATE="${AGENT_TEMPLATE_INSTALL_DIR:-$CORE_ROOT}"
+  CHANNEL="$(host_config_value CHANNEL stable)"
+  AUTO_UPDATE="$(host_config_value AUTO_UPDATE on)"
+  if [ "$TIMER_RUN" = "yes" ] && [ "$AUTO_UPDATE" = "off" ]; then
+    current="$(cat "$INSTALLED_TEMPLATE/VERSION" 2>/dev/null || echo unknown)"
+    stable="$(git -C "$REPO" show stable:templates/agent-skills/create-agent/VERSION 2>/dev/null || echo unknown)"
+    echo "auto-update off, current $current, stable $stable"
+    exit 0
+  fi
+  case "$CHANNEL" in stable|latest) ;; *) die "CHANNEL must be stable or latest, got '$CHANNEL'" "fix $HOST_CONFIG" ;; esac
 
-  [ -d "$REPO/.git" ] || die "no git checkout at $REPO" \
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "no git checkout at $REPO" \
     "set AGENT_TEMPLATE_REPO to the vstack clone, or clone it there"
+
+  echo "== 1. select $CHANNEL release in $REPO =="
+  git -C "$REPO" fetch origin --tags || die "git fetch failed in $REPO" \
+    "restore GitHub access, then re-run"
+  if [ "$CHANNEL" = "stable" ]; then
+    git -C "$REPO" rev-parse -q --verify 'refs/tags/stable^{commit}' >/dev/null \
+      || die "the stable tag is missing" "fetch tags from origin, then re-run"
+    git -C "$REPO" checkout --detach stable \
+      || die "could not check out the stable tag" "clean or save local checkout changes, then re-run"
+  else
+    git -C "$REPO" checkout main \
+      && git -C "$REPO" merge --ff-only origin/main \
+      || die "could not fast-forward main to origin/main" "clean or save local checkout changes, then re-run"
+  fi
   TEMPLATE_DIR="$REPO/templates/agent-skills/create-agent"
   [ -x "$TEMPLATE_DIR/install.sh" ] || die "no install.sh at $TEMPLATE_DIR" \
     "check AGENT_TEMPLATE_REPO points at the vstack checkout"
+  TARGET_VERSION="$(cat "$TEMPLATE_DIR/VERSION")"
+  TARGET_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
+  echo "channel $CHANNEL selected: $TARGET_VERSION ($(git -C "$REPO" rev-parse --short HEAD))"
 
-  echo "== 1. git pull --ff-only in $REPO =="
-  git -C "$REPO" pull --ff-only || die "git pull --ff-only failed in $REPO" \
-    "resolve it by hand (a local change or diverged history), then re-run"
+  echo "== 1b. local changes to the installed release =="
+  LOCAL_PATCHES=""
+  MANIFEST="$INSTALLED_TEMPLATE/.manifest.sha256"
+  BASELINE_MANIFEST=""
+  INSTALLED_VERSION="$(cat "$INSTALLED_TEMPLATE/VERSION" 2>/dev/null || echo unknown)"
+  if [ ! -f "$MANIFEST" ] && [ "$INSTALLED_VERSION" != "unknown" ]; then
+    VERSION_PATH="templates/agent-skills/create-agent/VERSION"
+    RELEASE_COMMIT="$(git -C "$REPO" log --all -S"$INSTALLED_VERSION" --format=%H -- "$VERSION_PATH" 2>/dev/null \
+      | while IFS= read -r candidate; do
+          [ "$(git -C "$REPO" show "$candidate:$VERSION_PATH" 2>/dev/null || true)" = "$INSTALLED_VERSION" ] || continue
+          echo "$candidate"
+          break
+        done)"
+    if [ -n "$RELEASE_COMMIT" ]; then
+      BASELINE_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/agent-template-manifest.XXXXXX")"
+      python3 - "$REPO" "$RELEASE_COMMIT" "$BASELINE_MANIFEST" <<'PYEOF'
+import hashlib
+from pathlib import Path
+import subprocess
+import sys
 
-  echo "== 2. install.sh (also runs the eval suite) =="
-  # Always runs for real, dry-run or not: install.sh only ever copies the
-  # template and refreshes the shared systemd units, both idempotent and
-  # both worth doing whether or not this run also converts a conf. The
-  # conf conversion and the timer restarts below are the parts --dry-run
-  # actually gates. install.sh calls fail() and exits non-zero on its own
-  # if the copy or the eval suite breaks; die here never runs, and nothing
-  # past this point does either, so nothing is converted and nothing is
-  # restarted.
+repo, commit, output = sys.argv[1:]
+prefix = "templates/agent-skills/create-agent/"
+tops = {"SKILL.md", "MAINTAINER.md", "CONF.md", "VERSION", "CHANGELOG.md"}
+dirs = ("scripts/", "adapters/", "evals/", "repo-skeleton/", "project-template/")
+listed = subprocess.check_output(
+    ["git", "-C", repo, "ls-tree", "-r", "--name-only", commit, prefix], text=True
+)
+lines = []
+for tracked in listed.splitlines():
+    relative = tracked.removeprefix(prefix)
+    if relative not in tops and not relative.startswith(dirs):
+        continue
+    content = subprocess.check_output(["git", "-C", repo, "show", f"{commit}:{tracked}"])
+    lines.append(f"{hashlib.sha256(content).hexdigest()}  {relative}")
+Path(output).write_text("\n".join(lines) + "\n", encoding="utf-8")
+PYEOF
+      MANIFEST="$BASELINE_MANIFEST"
+      echo "built the initial manifest from installed release $INSTALLED_VERSION ($RELEASE_COMMIT)"
+    else
+      echo "WARNING: no manifest and release $INSTALLED_VERSION was not found; this update cannot identify older local edits" >&2
+    fi
+  fi
+  if [ -f "$MANIFEST" ]; then
+    LOCAL_PATCHES="$(python3 - "$INSTALLED_TEMPLATE" "$MANIFEST" "$INSTALLED_VERSION" <<'PYEOF'
+import hashlib
+import os
+from pathlib import Path
+import shutil
+import sys
+
+root, manifest, version = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+archive = root / "local-patches" / version
+for line in manifest.read_text(encoding="utf-8").splitlines():
+    digest, marker, relative = line.partition("  ")
+    if not marker or not relative:
+        continue
+    rel = Path(relative)
+    if rel.is_absolute() or ".." in rel.parts:
+        continue
+    source = root / rel
+    if not source.is_file():
+        print(f"deleted: {relative}")
+        continue
+    current = hashlib.sha256(source.read_bytes()).hexdigest()
+    if current == digest:
+        continue
+    target = archive / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    print(relative)
+PYEOF
+)"
+  fi
+  [ -z "$BASELINE_MANIFEST" ] || rm -f "$BASELINE_MANIFEST"
+  if [ -n "$LOCAL_PATCHES" ]; then
+    echo "local patches archived under $INSTALLED_TEMPLATE/local-patches/${INSTALLED_VERSION:-unknown}:"
+    printf '%s\n' "$LOCAL_PATCHES" | sed 's/^/  /'
+    if [ "$KEEP_LOCAL_PATCHES" != "yes" ]; then
+      echo "update refused: local changes would be replaced"
+      echo "file each patch with agent-template feedback, then re-run with --keep-local-patches"
+      exit 0
+    fi
+    echo "continuing because --keep-local-patches was set"
+  else
+    echo "no local patches found"
+  fi
+
+  echo "== 2. stage and evaluate $TARGET_VERSION =="
+  STAGED_TEMPLATE="$(mktemp -d "${TMPDIR:-/tmp}/agent-template-stage.XXXXXX")"
+  EVAL_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/agent-template-evals.XXXXXX")"
+  trap 'rm -f "$AGENT_TEMPLATE_UPDATE_REEXEC" "${EVAL_OUTPUT:-}"; rm -rf "${STAGED_TEMPLATE:-}"' EXIT
+  cp -a "$TEMPLATE_DIR/." "$STAGED_TEMPLATE/"
+  if [ "$FORCE" = "yes" ]; then
+    echo "eval gate skipped (--force)"
+  else
+    set +e
+    bash "$STAGED_TEMPLATE/evals/run-evals.sh" >"$EVAL_OUTPUT" 2>&1
+    EVAL_STATUS=$?
+    set -e
+    cat "$EVAL_OUTPUT"
+    if [ "$EVAL_STATUS" -ne 0 ]; then
+      RED_COUNT="$(grep -c '^FAIL ' "$EVAL_OUTPUT" || true)"
+      [ "$RED_COUNT" -gt 0 ] || RED_COUNT=1
+      REFUSAL="update to $TARGET_VERSION refused: $RED_COUNT evals red"
+      echo "$REFUSAL"
+      mkdir -p "$FEEDBACK_LOG_DIR"
+      printf '%s\n' "$REFUSAL" >> "$FEEDBACK_LOG_DIR/update.log"
+      exit 0
+    fi
+  fi
+
+  echo "== 2b. install staged $TARGET_VERSION =="
+  # The staged suite above is the swap gate. install.sh is told not to repeat
+  # it after files begin moving, so a red release can never partly replace the
+  # installed copy.
   INSTALL_ARGS=()
   [ "$NO_HOST_NOTES" = "yes" ] && INSTALL_ARGS+=(--no-host-notes)
-  bash "$TEMPLATE_DIR/install.sh" "${INSTALL_ARGS[@]}" \
+  SKIP_TEMPLATE_EVALS=yes AGENT_TEMPLATE_INSTALL_COMMIT="$TARGET_COMMIT" \
+    bash "$STAGED_TEMPLATE/install.sh" "${INSTALL_ARGS[@]}" \
     || die "install.sh failed (see its output above)" \
         "fix the failing step and re-run agent-template update; no conf was touched and no timer was restarted"
 

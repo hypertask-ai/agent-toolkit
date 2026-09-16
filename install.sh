@@ -41,6 +41,8 @@ UNIT_DIR_EXPLICIT="no"
 [ -n "$SYSTEMD_USER_DIR" ] && UNIT_DIR_EXPLICIT="yes"
 DRY_RUN="no"
 NO_HOST_NOTES="no"
+HOST_CONFIG="${AGENT_TEMPLATE_HOST_CONFIG:-$HOME/.config/agent-template/config}"
+INSTALL_STATE="${AGENT_TEMPLATE_INSTALL_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-template/install-state}"
 
 fail() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
 
@@ -152,6 +154,7 @@ echo "skill:  $DEST"
 echo "docs:   $DEST/MAINTAINER.md + $DEST/CONF.md"
 echo "bin:    $BIN/agent-board-poll -> $DEST/scripts/agent-board-poll"
 echo "bin:    $BIN/agent-chat -> $DEST/scripts/agent-chat"
+echo "bin:    $BIN/agent-kick -> $DEST/scripts/agent-kick"
 echo "bin:    $BIN/agent-template -> $DEST/scripts/agent-template"
 echo "bin:    $BIN/agent-template-feedback -> $DEST/scripts/agent-template-feedback"
 echo "bin:    $BIN/agent-template-weekly -> compatibility alias"
@@ -165,7 +168,23 @@ if [ "$DRY_RUN" = "yes" ]; then
   exit 0
 fi
 
+# Gate the source before the first installed file changes. agent-template update
+# already evaluated its private staged copy and sets SKIP_TEMPLATE_EVALS=yes.
+if [ "${SKIP_TEMPLATE_EVALS:-no}" != "yes" ]; then
+  bash "$SRC/evals/run-evals.sh" \
+    || fail "the staged eval cases do not pass" \
+            "run $SRC/evals/run-evals.sh and read the failing case ids"
+fi
+
 mkdir -p "$DEST" "$BIN"
+if [ ! -f "$HOST_CONFIG" ]; then
+  mkdir -p "$(dirname "$HOST_CONFIG")"
+  printf 'CHANNEL=stable\nAUTO_UPDATE=on\nMAINTAINER=no\n' > "$HOST_CONFIG"
+  chmod 600 "$HOST_CONFIG"
+  echo "host config: $HOST_CONFIG (CHANNEL=stable)"
+else
+  echo "host config: $HOST_CONFIG"
+fi
 cp -a "$SRC/SKILL.md" "$DEST/SKILL.md"
 cp -a "$SRC/MAINTAINER.md" "$DEST/MAINTAINER.md"
 cp -a "$SRC/CONF.md" "$DEST/CONF.md"
@@ -199,7 +218,7 @@ done
 # policy directory from upgrades as well as omitting it from fresh installs.
 rm -rf "$DEST/core"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
-          "$DEST/scripts/agent-chat" \
+          "$DEST/scripts/agent-chat" "$DEST/scripts/agent-kick" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-feedback" \
           "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/triage.sh" \
@@ -212,9 +231,31 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
 # apart, and so the runner still finds its adapters through readlink -f.
 ln -sfn "$DEST/scripts/agent-board-poll" "$BIN/agent-board-poll"
 ln -sfn "$DEST/scripts/agent-chat" "$BIN/agent-chat"
+ln -sfn "$DEST/scripts/agent-kick" "$BIN/agent-kick"
 ln -sfn "$DEST/scripts/agent-template" "$BIN/agent-template"
 ln -sfn "$DEST/scripts/agent-template-feedback" "$BIN/agent-template-feedback"
 ln -sfn "$DEST/scripts/agent-template-weekly" "$BIN/agent-template-weekly"
+
+# This is the release baseline for the next update. local-patches is omitted on
+# purpose: it belongs to the host and survives every directory swap.
+DEST="$DEST" python3 <<'PYEOF'
+import hashlib
+import os
+from pathlib import Path
+
+root = Path(os.environ["DEST"])
+paths = [root / name for name in ("SKILL.md", "MAINTAINER.md", "CONF.md", "VERSION", "CHANGELOG.md")]
+for name in ("scripts", "adapters", "evals", "repo-skeleton", "project-template"):
+    paths.extend(path for path in (root / name).rglob("*") if path.is_file())
+lines = []
+for path in sorted(paths):
+    relative = path.relative_to(root)
+    lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {relative}")
+temporary = root / ".manifest.sha256.new"
+temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+temporary.replace(root / ".manifest.sha256")
+PYEOF
+
 # agent-advisor is on PATH because a run calls it by name from inside a model
 # CLI, where nothing knows where the template is installed.
 ln -sfn "$DEST/scripts/agent-advisor" "$BIN/agent-advisor"
@@ -227,6 +268,9 @@ bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
           "check that $BIN is on PATH and the symlink resolves"
 "$BIN/agent-chat" --help >/dev/null \
   || fail "the installed agent-chat does not run" \
+          "check python3 is present and the symlink resolves"
+"$BIN/agent-kick" --help >/dev/null \
+  || fail "the installed agent-kick does not run" \
           "check python3 is present and the symlink resolves"
 "$BIN/agent-template" --help >/dev/null \
   || fail "the installed agent-template does not run" \
@@ -241,9 +285,6 @@ printf '{"title":"x","description":"y","comments":[]}' \
   | bash "$DEST/scripts/triage.sh" --rules-only >/dev/null \
   || fail "the installed triage scorer does not run" \
           "run $DEST/scripts/triage.sh --help and check python3 is present"
-bash "$DEST/evals/run-evals.sh" >/dev/null \
-  || fail "the installed eval cases do not pass" \
-          "run $DEST/evals/run-evals.sh and read the failing case ids"
 
 # The shared agent-board-poll@ unit pair is refreshed on every install, not
 # only when a new agent is provisioned, so a fix to the unit (like the
@@ -280,6 +321,22 @@ TimeoutStopSec=100
 [Install]
 WantedBy=default.target
 EOF
+  cat > "$SYSTEMD_USER_DIR/agent-kick.service" <<EOF
+[Unit]
+Description=Start poll agents immediately when Hypertask mentions them
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$BIN/agent-kick serve
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+EOF
 
   # agent-template-update.timer is how a bot host stays in sync with this
   # template on its own, without anyone explaining the fix to it by hand:
@@ -298,7 +355,8 @@ Description=Bring this host's agent confs and units up to date with the template
 Type=oneshot
 Environment=HOME=%h
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=$BIN/agent-template update
+ExecStart=$BIN/agent-template update --timer
+ExecStart=$BIN/agent-template promote
 EOF
   cat > "$SYSTEMD_USER_DIR/agent-template-update.timer" <<EOF
 [Unit]
@@ -366,6 +424,8 @@ EOF
   systemctl --user daemon-reload
   systemctl --user enable agent-chat.service
   systemctl --user restart agent-chat.service
+  systemctl --user enable agent-kick.service
+  systemctl --user restart agent-kick.service
   systemctl --user enable --now agent-template-update.timer
   if [ "$FEEDBACK_MAINTAINER" = yes ]; then
     systemctl --user enable --now agent-template-feedback.timer
@@ -375,13 +435,32 @@ EOF
   fi
   echo "poll units: $SYSTEMD_USER_DIR/agent-board-poll@.service + .timer (refreshed, daemon-reload done)"
   echo "chat service: agent-chat.service (enabled and restarted)"
+  echo "kick service: agent-kick.service (enabled and restarted)"
   echo "update timer: agent-template-update.timer, daily 06:30 local ($(systemctl --user list-timers agent-template-update.timer --no-pager 2>/dev/null | sed -n '2p'))"
 else
   echo "WARNING: no systemd --user session here: skipped refreshing agent-board-poll@.service/.timer and agent-template-update.timer" >&2
 fi
 
+"$BIN/agent-kick" register || echo "WARNING: mention webhook registration failed; mentions still wait for the poll" >&2
+
 sync_company_skills
 feedback_update_host_notes "$(cat "$SRC/VERSION")" "$NO_HOST_NOTES"
+
+# Promotion measures how long this exact release has been installed. Reinstalling
+# the same commit does not restart its 24-hour observation window.
+mkdir -p "$(dirname "$INSTALL_STATE")"
+installed_version="$(cat "$SRC/VERSION")"
+installed_commit="${AGENT_TEMPLATE_INSTALL_COMMIT:-$(git -C "$SRC" rev-parse HEAD 2>/dev/null || true)}"
+prior_version="$(sed -n 's/^version=//p' "$INSTALL_STATE" 2>/dev/null | tail -n1 || true)"
+prior_commit="$(sed -n 's/^commit=//p' "$INSTALL_STATE" 2>/dev/null | tail -n1 || true)"
+prior_time="$(sed -n 's/^installed_at=//p' "$INSTALL_STATE" 2>/dev/null | tail -n1 || true)"
+if [ "$prior_version" = "$installed_version" ] && [ "$prior_commit" = "$installed_commit" ] && [ -n "$prior_time" ]; then
+  installed_at="$prior_time"
+else
+  installed_at="$(date +%s)"
+fi
+printf 'version=%s\ncommit=%s\ninstalled_at=%s\n' \
+  "$installed_version" "$installed_commit" "$installed_at" > "$INSTALL_STATE"
 
 echo "installed. Next: run create-agent.sh --help, or agent-board-poll --once --dry-run <slug>"
 feedback_print_discovery

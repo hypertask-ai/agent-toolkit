@@ -204,6 +204,9 @@ if [ -z "$ONLY" ]; then
   echo ""
   echo "-- agent-chat behavioural checks --"
   python3 "$HERE/agent-chat.test.py"
+  echo ""
+  echo "-- agent-kick behavioural checks --"
+  python3 "$HERE/agent-kick.test.py"
 fi
 
 # The case file replays text corrections. sync-project.sh is about what lands

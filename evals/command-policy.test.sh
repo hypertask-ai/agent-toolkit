@@ -17,6 +17,7 @@ printf 'token\n' > "$TMP/token"
 
 cat > "$TMP/board" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${BOARD_CAPTURE:-/dev/null}"
 exit 0
 EOF
 cat > "$TMP/bin/hypertask" <<'EOF'
@@ -32,7 +33,9 @@ cat > "$TMP/bin/curl" <<'EOF'
 url="${!#}"
 case "$url" in
   *'/mcp/tasks?'*) cat "$BOARD_JSON"; printf '\n200' ;;
-  *'/mcp/comments?'*) printf '%s\n200' '{"comments":[]}' ;;
+  *'/mcp/comments?'*)
+    if [ -n "${COMMENT_JSON:-}" ]; then printf '%s\n200' "$COMMENT_JSON"; else printf '%s\n200' '{"comments":[]}'; fi
+    ;;
   *) printf '%s\n200' '{}' ;;
 esac
 EOF
@@ -42,6 +45,11 @@ for command in model-only rung-one rung-two override-command; do
 printf '%s %s\n' "$(basename "$0")" "$*" >> "$MODEL_CAPTURE"
 EOF
 done
+cat > "$TMP/bin/failing-model" <<'EOF'
+#!/usr/bin/env bash
+echo 'provider unavailable' >&2
+exit 7
+EOF
 chmod +x "$TMP/board" "$TMP/bin/"*
 
 write_board() {
@@ -88,8 +96,9 @@ run_poll() {
   local state="$1" capture="$2"; shift 2
   env HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
     XDG_STATE_HOME="$state" COMPANY_SKILLS_DIR="$TMP/company" \
-    BOARD_JSON="$TMP/board.json" MODEL_CAPTURE="$capture" PATH="$TMP/bin:$PATH" \
-    "$ROOT/scripts/agent-board-poll" "$@" test
+    BOARD_JSON="$TMP/board.json" MODEL_CAPTURE="$capture" \
+    BOARD_CAPTURE="${BOARD_CAPTURE:-$TMP/board-capture}" COMMENT_JSON="${COMMENT_JSON:-}" \
+    PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" "$@" test
 }
 
 # An absent ladder cannot switch away from MODEL_CLI, even past the threshold.
@@ -142,6 +151,28 @@ if grep -q '^override-command --exact value ' "$capture" \
   ok override-full-command "override file is executed as the complete command"
 else
   bad override-full-command "launch=$(cat "$capture" 2>/dev/null || true)"
+fi
+
+# A failed mention writes host status only and remains eligible next tick.
+state="$TMP/state-failure"; capture="$TMP/capture-failure"; board_capture="$TMP/board-failure"
+write_board TEST-4
+write_conf "$state"
+sed -i 's#^MODEL_CLI=.*#MODEL_CLI="failing-model"#' "$TMP/home/.config/agents/test.conf"
+seed_failures "$state" TEST-4 0
+COMMENT_JSON='{"comments":[{"id":99,"createdAt":"2026-09-16T00:00:00Z","text":"<p><span data-label=\"agent-agent-1\">@Test Dev</span> please retry</p>","creator":{"displayName":"Valentin"}}]}'
+BOARD_CAPTURE="$board_capture" COMMENT_JSON="$COMMENT_JSON" \
+  run_poll "$state" "$capture" --once >"$TMP/failure.out" 2>"$TMP/failure.err" || true
+BOARD_CAPTURE="$board_capture" COMMENT_JSON="$COMMENT_JSON" \
+  run_poll "$state" "$capture" --once --dry-run >"$TMP/failure-next.out" 2>>"$TMP/failure.err" || true
+status_file="$state/agent-board-poll/test.status"
+if [ -f "$status_file" ] \
+   && python3 -c 'import json,sys; row=json.load(open(sys.argv[1])); assert row["state"] == "failed" and row["ticket"] == "TEST-4"' "$status_file" \
+   && ! grep -q 'comment add' "$board_capture" 2>/dev/null \
+   && ! grep -q '^task-TEST-4:99$' "$state/agent-board-poll/test.seen" \
+   && grep -q 'would pick up TEST-4' "$TMP/failure-next.out"; then
+  ok failed-mention-remains-eligible "failure posts nothing and the next tick still sees the mention"
+else
+  bad failed-mention-remains-eligible "status=$(cat "$status_file" 2>/dev/null || true) board=$(cat "$board_capture" 2>/dev/null || true) next=$(cat "$TMP/failure-next.out")"
 fi
 
 # Migration preserves the old cursor policy and leaves a custom pi conf alone.

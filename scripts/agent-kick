@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""Receive signed mention webhooks and start the matching poll unit."""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+MAX_BODY = 1024 * 1024
+SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def parse_config(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return values
+    for raw in lines:
+        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", raw.strip())
+        if not match:
+            continue
+        try:
+            parsed = shlex.split(match.group(2), posix=True)
+        except ValueError:
+            continue
+        values[match.group(1)] = parsed[0] if parsed else ""
+    return values
+
+
+def host_config() -> tuple[Path, dict[str, str]]:
+    path = Path(os.environ.get("AGENT_TEMPLATE_HOST_CONFIG", str(Path.home() / ".config/agent-template/config")))
+    return path, parse_config(path)
+
+
+def config_dir() -> Path:
+    return Path(os.environ.get("AGENT_CONFIG_DIR", str(Path.home() / ".config/hypertask-agents")))
+
+
+def secret_dir() -> Path:
+    return Path(os.environ.get("AGENT_KICK_SECRET_DIR", str(Path.home() / ".config/agent-template/webhooks")))
+
+
+def api_base(values: dict[str, str]) -> str:
+    if values.get("BOARD_API_URL"):
+        return values["BOARD_API_URL"].rstrip("/")
+    try:
+        configured = json.loads((Path.home() / ".hypertask/config.json").read_text(encoding="utf-8"))["apiUrl"]
+        return str(configured).rstrip("/")
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return "https://app.hypertask.ai/api"
+
+
+def agents() -> list[tuple[Path, dict[str, str]]]:
+    return [(path, parse_config(path)) for path in sorted(config_dir().glob("*.conf"))]
+
+
+def api_request(values: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
+    token = Path(values["TOKEN_FILE"]).expanduser().read_text(encoding="utf-8").strip()
+    request = urllib.request.Request(
+        api_base(values) + "/mcp/webhooks",
+        data=json.dumps(body).encode(),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "agent-kick/1",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = json.load(response)
+    if not isinstance(payload, dict) or payload.get("success") is False:
+        raise RuntimeError(f"invalid webhook response: {payload!r}")
+    return payload
+
+
+def cli_supports_webhooks() -> bool:
+    try:
+        result = subprocess.run(
+            ["hypertask", "agents", "webhook", "--help"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def cli_configure(values: dict[str, str], url: str, rotate: bool = False) -> dict[str, Any]:
+    token = Path(values["TOKEN_FILE"]).expanduser().read_text(encoding="utf-8").strip()
+    action = "rotate-secret" if rotate else "configure"
+    argv = ["hypertask", "--token", token, "--json", "agents", "webhook", action]
+    if not rotate:
+        argv.extend(["--url", url, "--event", "comment.mention", "--enabled"])
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=30, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"webhook CLI exited {result.returncode}")
+    payload = json.loads(result.stdout)
+    if not isinstance(payload, dict):
+        raise RuntimeError("webhook CLI did not return an object")
+    return payload
+
+
+def register() -> int:
+    config_path, host = host_config()
+    url = host.get("WEBHOOK_URL", "").strip()
+    if not url:
+        print("no WEBHOOK_URL, mentions wait for the poll")
+        return 0
+    use_cli = cli_supports_webhooks()
+    secrets = secret_dir()
+    secrets.mkdir(parents=True, exist_ok=True, mode=0o700)
+    configured = 0
+    for path, values in agents():
+        slug = values.get("AGENT_SLUG") or path.stem
+        if not SLUG_RE.fullmatch(slug) or not values.get("AGENT_ID") or not values.get("TOKEN_FILE"):
+            continue
+        token_file = Path(values["TOKEN_FILE"]).expanduser()
+        if not token_file.is_file():
+            print(f"webhook skipped for {slug}: token file is unavailable")
+            continue
+        secret_file = secrets / f"{slug}.secret"
+        try:
+            if use_cli:
+                result = cli_configure(values, url)
+            else:
+                result = api_request(values, {
+                    "action": "configure",
+                    "agent_id": "self",
+                    "url": url,
+                    "events": ["comment.mention"],
+                    "active": True,
+                })
+            secret = str(result.get("secret") or "")
+            if not secret and not secret_file.is_file():
+                if use_cli:
+                    result = cli_configure(values, url, rotate=True)
+                else:
+                    result = api_request(values, {"action": "rotate", "agent_id": "self"})
+                secret = str(result.get("secret") or "")
+            if secret:
+                secret_file.write_text(secret + "\n", encoding="utf-8")
+                secret_file.chmod(0o600)
+            if not secret_file.is_file():
+                raise RuntimeError("the API did not return a signing secret")
+            print(f"webhook configured for {slug}: {url}")
+            configured += 1
+        except (OSError, ValueError, RuntimeError, urllib.error.URLError, json.JSONDecodeError) as error:
+            print(f"webhook skipped for {slug}: {error}", file=sys.stderr)
+    print(f"{configured} agent webhook(s) configured from {config_path}")
+    return 0
+
+
+def agent_for(agent_id: str) -> tuple[str, Path] | None:
+    for path, values in agents():
+        slug = values.get("AGENT_SLUG") or path.stem
+        if values.get("AGENT_ID") == agent_id and SLUG_RE.fullmatch(slug):
+            return slug, secret_dir() / f"{slug}.secret"
+    return None
+
+
+class KickHandler(BaseHTTPRequestHandler):
+    server_version = "AgentKick/1"
+
+    def log_message(self, format: str, *args: Any) -> None:
+        sys.stderr.write("agent-kick: " + format % args + "\n")
+
+    def reply(self, status: int, message: str) -> None:
+        body = json.dumps({"status": message}).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self) -> None:  # noqa: N802
+        self.reply(200, "ok") if self.path == "/healthz" else self.reply(404, "not found")
+
+    def do_POST(self) -> None:  # noqa: N802
+        if self.path != "/webhook/hypertask":
+            self.reply(404, "not found")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > MAX_BODY:
+            self.reply(413, "invalid body length")
+            return
+        raw = self.rfile.read(length)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            self.reply(400, "invalid json")
+            return
+        if not isinstance(payload, dict):
+            self.reply(400, "invalid payload")
+            return
+        event = str(payload.get("event") or self.headers.get("X-Hypertask-Event", ""))
+        if event not in {"comment.mention", "description.mention"}:
+            self.reply(202, "ignored")
+            return
+        match = agent_for(str(payload.get("agentId") or ""))
+        if not match:
+            self.reply(403, "wrong agent")
+            return
+        slug, secret_file = match
+        timestamp = self.headers.get("X-Hypertask-Timestamp", "")
+        signature = self.headers.get("X-Hypertask-Signature", "")
+        try:
+            secret = secret_file.read_text(encoding="utf-8").strip()
+            fresh = abs(time.time() - int(timestamp)) <= 300
+        except (OSError, ValueError):
+            secret, fresh = "", False
+        expected = "sha256=" + hmac.new(secret.encode(), timestamp.encode() + b"." + raw, hashlib.sha256).hexdigest()
+        if not fresh or not hmac.compare_digest(signature, expected):
+            self.reply(401, "invalid signature")
+            return
+        result = subprocess.run(
+            ["systemctl", "--user", "start", f"agent-board-poll@{slug}.service"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            self.reply(503, "unit start failed")
+            return
+        self.reply(202, "started")
+
+
+def serve() -> int:
+    _, host = host_config()
+    port = int(os.environ.get("AGENT_KICK_PORT", host.get("WEBHOOK_PORT", "8793")))
+    server = ThreadingHTTPServer(("127.0.0.1", port), KickHandler)
+    print(f"agent-kick listening on 127.0.0.1:{port}", flush=True)
+    server.serve_forever()
+    return 0
+
+
+def main() -> int:
+    if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
+        print("agent-kick [serve|register]: receive mentions or register host webhooks")
+        return 0
+    command = sys.argv[1] if len(sys.argv) > 1 else "serve"
+    if command == "register":
+        return register()
+    if command == "serve":
+        return serve()
+    raise SystemExit(f"unknown command: {command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

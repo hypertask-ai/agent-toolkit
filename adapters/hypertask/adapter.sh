@@ -1233,19 +1233,6 @@ be true for a different customer? Yes is a rule, no is a fact.
 EOF
 }
 
-# adapter_failure_comment <board-cli> <ref> <stderr-text>
-# A run that died is written on the ticket, where a human already looks, not
-# only in a log on one machine. The ticket is not moved: where it sits is the
-# board's record of how far it got.
-adapter_failure_comment() {
-  local board_cli="$1" ref="$2" detail="$3" html
-  html="$(DETAIL="$detail" python3 -c '
-import html, os
-detail = os.environ["DETAIL"].strip()[:300] or "no output on stderr"
-print("<p><strong>Run failed: %s</strong></p>" % html.escape(detail))')"
-  "$board_cli" comment add "$ref" --text "$html" >/dev/null 2>&1 || return 1
-}
-
 # ---------- fleet wiring (this tracker only, and only where it exists) ----------
 adapter_fleet_wire() {
   local slug="$1"
