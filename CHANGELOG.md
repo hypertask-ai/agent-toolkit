@@ -1,3 +1,10 @@
+## 3.33.0 - 2026-09-17
+
+- AGTE-25 keeps the installed core path private to the update re-exec so staged
+  evals resolve files from the incoming release.
+- Offline coverage fails when the installed core path leaks into staged evals.
+- ACTION: run `agent-template update --keep-timers` to install the update bootstrap fix.
+
 ## 3.32.0 - 2026-09-17
 
 - AGTE-25 turns queued advisor instructions into visible toolkit board tickets

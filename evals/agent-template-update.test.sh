@@ -35,6 +35,10 @@ cat > "$TEMPLATE/scripts/migrate-quiet-mode.py" <<'EOF'
 EOF
 cat > "$TEMPLATE/evals/run-evals.sh" <<'EOF'
 #!/usr/bin/env bash
+if [ -n "${AGENT_TEMPLATE_CORE_ROOT:-}" ]; then
+  echo 'FAIL staged-core-root inherited installed tree'
+  exit 1
+fi
 if [ "${EVAL_MODE:-green}" = red ]; then
   echo 'FAIL staged-release staged failure'
   echo '1 case(s) run, 1 failed'
@@ -79,6 +83,15 @@ run_update() {
     PATH="$TMP/bin:$PATH" GIT_LOG="$TMP/git.log" SYSTEMCTL_LOG="$TMP/systemctl.log" \
     INSTALL_MARKER="$TMP/installed" "$ROOT/scripts/agent-template" update "$@"
 }
+
+OLD_CORE="$TMP/old-installed"
+mkdir -p "$OLD_CORE/scripts/lib"
+cp "$ROOT/scripts/lib/core.sh" "$ROOT/scripts/lib/feedback.sh" "$OLD_CORE/scripts/lib/"
+if AGENT_TEMPLATE_CORE_ROOT="$OLD_CORE" "$ROOT/scripts/agent-template" --help >/dev/null 2>&1; then
+  ok staged-helper-bootstrap "a staged script escapes an older installed core that lacks its new library"
+else
+  bad staged-helper-bootstrap "the inherited old core hid a library present in the staged tree"
+fi
 
 # Stable is the default and selects only the stable tag.
 : > "$TMP/git.log"

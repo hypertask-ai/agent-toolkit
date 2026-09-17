@@ -108,7 +108,17 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 # /tmp so it survives install.sh overwriting the original mid-run. That
 # copy's own dirname is not CORE_ROOT, so the parent passes the real one
 # through instead of letting the child recompute a wrong one.
-CORE_ROOT="${AGENT_TEMPLATE_CORE_ROOT:-$(dirname "$(dirname "$SELF")")}"
+SELF_ROOT="$(dirname "$(dirname "$SELF")")"
+CORE_ROOT="${AGENT_TEMPLATE_CORE_ROOT:-$SELF_ROOT}"
+# An older updater can leak its installed root into a staged release that has
+# newer library files. Prefer this script's complete tree in that one case.
+if [ ! -f "$CORE_ROOT/scripts/lib/instructions.sh" ] \
+   && [ -f "$SELF_ROOT/scripts/lib/instructions.sh" ]; then
+  CORE_ROOT="$SELF_ROOT"
+fi
+# The override only carries CORE_ROOT across this script's private update re-exec.
+# Staged eval children must resolve their own tree, including newly added files.
+unset AGENT_TEMPLATE_CORE_ROOT
 # shellcheck disable=SC1091
 . "$CORE_ROOT/scripts/lib/core.sh"
 # shellcheck disable=SC1091
