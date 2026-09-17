@@ -1,3 +1,16 @@
+## 3.25.0 - 2026-09-17
+
+- Question and Decision comments now receive the pospeak, unslop, and
+  i-have-adhd rules in every runner prompt and pass a plain-language check in
+  the board wrapper before posting.
+- A failed draft gets one 60-second rewrite through the configured cheap model;
+  a second failure keeps the draft and reasons in the run log and emits held
+  activity instead of posting the raw comment.
+- Focused coverage verifies rewrite, unchanged pass-through, em dash refusal,
+  and unchanged Handoff and Done handling.
+- ACTION: run `agent-template update --keep-timers` so current agents receive
+  the plain-language comment guard without changing timer state.
+
 ## 3.24.0 - 2026-09-17
 
 - AGTE-11 adds manager-only mode, model preset, quiet, and identity-bound

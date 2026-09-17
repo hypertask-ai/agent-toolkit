@@ -121,6 +121,18 @@ ticket per day unless a human writes in between. With `QUIET="on"`, the wrapper
 strips and logs board-owner mentions; moving the ticket to review requests
 attention.
 
+`Question:` and `Decision:` comments are for a product owner reading on a
+phone. Every runner prompt includes the pospeak, unslop, and i-have-adhd rules
+verbatim. It reads the canonical `skills/talk-to-valentin/` company-pack copy
+when present and uses the template's bundled copy when a reference is absent.
+Before either kind posts, the board wrapper requires a bold first sentence in
+a first `<p>`, at most 80 words, no code-shaped detail or em dash, linked ticket
+and PR references, and a final question or `Next:` block. A failure gets one
+60-second rewrite through `CHAT_CLI`, falling back to `RESEARCH_CLI`. If the
+rewrite still fails, the wrapper keeps the draft and reasons in the run log,
+posts `Question held: did not pass the plain-language check` as activity, and
+posts no comment. `Handoff:` and `Done:` keep their existing short shape.
+
 ## The three wiring modes
 
 | Mode | What it needs | What you get | When to pick it |

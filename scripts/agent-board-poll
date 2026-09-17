@@ -116,6 +116,8 @@ TRIAGE="${TRIAGE:-$TRIAGE_DEFAULT}"
 TRIAGE_HARD_CLI="${TRIAGE_HARD_CLI:-$MODEL_CLI}"
 TRIAGE_MODEL_CLI="${TRIAGE_MODEL_CLI:-$MODEL_CLI}"
 RESEARCH_CLI="${RESEARCH_CLI:-}"
+CHAT_CLI="${CHAT_CLI:-}"
+COMMENT_REWRITE_CLI="${CHAT_CLI:-$RESEARCH_CLI}"
 ADVISOR_MAX="${ADVISOR_MAX:-2}"
 ADVISOR_CLI="$RESEARCH_CLI"
 AGENT_ADVISOR_AVAILABLE="no"
@@ -144,6 +146,30 @@ COMPANY_SKILLS_DIR="$(core_company_pack)"
 # path, so a plugin host and a clone host read the same skill file.
 export COMPANY_SKILLS_DIR
 COMPANY_SKILLS_VERSION="$(core_pack_version "$COMPANY_SKILLS_DIR")"
+
+TALK_TO_VALENTIN_SKILL="$COMPANY_SKILLS_DIR/skills/talk-to-valentin/SKILL.md"
+TALK_TO_VALENTIN_REFS="$COMPANY_SKILLS_DIR/skills/talk-to-valentin/reference"
+PLAIN_LANGUAGE_FALLBACK="$CORE_ROOT/adapters/hypertask/plain-language"
+POSPEAK_SKILL="$TALK_TO_VALENTIN_REFS/pospeak.md"
+UNSLOP_SKILL="$TALK_TO_VALENTIN_REFS/unslop.md"
+ADHD_SKILL="$TALK_TO_VALENTIN_REFS/i-have-adhd.md"
+[ -r "$POSPEAK_SKILL" ] || POSPEAK_SKILL="$PLAIN_LANGUAGE_FALLBACK/pospeak.md"
+[ -r "$UNSLOP_SKILL" ] || UNSLOP_SKILL="$PLAIN_LANGUAGE_FALLBACK/unslop.md"
+[ -r "$ADHD_SKILL" ] || ADHD_SKILL="$PLAIN_LANGUAGE_FALLBACK/i-have-adhd.md"
+for skill in "$POSPEAK_SKILL" "$UNSLOP_SKILL" "$ADHD_SKILL"; do
+  [ -r "$skill" ] || die "plain-language rules are missing at $skill" \
+    "restore the installed template or company skill pack, then retry"
+done
+PLAIN_LANGUAGE_PROMPT="For every Question: or Decision: ticket comment, follow the three rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, put every ticket or PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:.
+
+POSPEAK RULES, VERBATIM:
+$(cat "$POSPEAK_SKILL")
+
+UNSLOP RULES, VERBATIM:
+$(cat "$UNSLOP_SKILL")
+
+I-HAVE-ADHD RULES, VERBATIM:
+$(cat "$ADHD_SKILL")"
 
 REPO_SKILLS_DIR="$(core_repo_skills "${AGENT_REPO:-}")"
 REPO_SKILLS_VERSION="$(core_pack_version "$REPO_SKILLS_DIR")"
@@ -1076,6 +1102,8 @@ These commands never change token files, credentials, foreign units, files outsi
 
 COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent. \`Done:\` is one line and includes the pull request link. Everything else, including claims, plans, progress, retries, checks, and blockers, is run activity. The board wrapper redirects an unmarked comment to activity instead of posting it. The existing limit remains at one reminder and three total ticket comments per day unless a human wrote in between.
 
+$PLAIN_LANGUAGE_PROMPT
+
 QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any ticket comment. The board wrapper strips and logs an owner mention before posting. Attention comes from moving the ticket to the review column."
 
   RUN_DIR="${AGENT_REPO:-}"
@@ -1171,6 +1199,8 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     PATH="${AGENT_IDENTITY_PATH:-$PATH}" \
     AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
     AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base" \
+    AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" \
+    AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL" \
     AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER" \
     AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI" \
       "${MODEL_ARGV[@]}" "$PROMPT"

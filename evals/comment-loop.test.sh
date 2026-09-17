@@ -32,6 +32,12 @@ cat > "$TMP/bin/provider" <<'EOF'
 #!/usr/bin/env bash
 printf '%s' "${!#}" > "$PROMPT_CAPTURE"
 EOF
+cat > "$TMP/bin/rewrite-model" <<'EOF'
+#!/usr/bin/env bash
+printf 'called\n' >> "$REWRITE_CALLS"
+printf '%s' "${!#}" > "$REWRITE_PROMPT"
+printf '%s' "$REWRITE_OUTPUT"
+EOF
 cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
@@ -137,6 +143,22 @@ if grep -qF 'Question:' "$TMP/prompt" \
 else
   bad comment-kind-prompt-contract 'the model prompt omitted the four-kind contract'
 fi
+if ROOT="$ROOT" TMP="$TMP" python3 - <<'PYEOF'
+import os
+from pathlib import Path
+root = Path(os.environ["ROOT"])
+prompt = Path(os.environ["TMP"], "prompt").read_text()
+rules = root / "adapters" / "hypertask" / "plain-language"
+assert "product owner on a phone" in prompt
+assert str(Path(os.environ["TMP"], "company", "skills", "talk-to-valentin", "SKILL.md")) in prompt
+for name in ("pospeak.md", "unslop.md", "i-have-adhd.md"):
+    assert (rules / name).read_text().rstrip() in prompt
+PYEOF
+then
+  ok plain-language-prompt-contract 'Question and Decision prompts contain all three rule texts verbatim'
+else
+  bad plain-language-prompt-contract 'the runner prompt omitted the phone reader or verbatim rules'
+fi
 if grep -qF 'exactly four allowed' "$ROOT/SKILL.md" \
    && grep -qF 'exactly four allowed' "$ROOT/MAINTAINER.md" \
    && grep -qF 'Ticket comments have exactly four kinds' "$ROOT/scripts/create-agent.sh"; then
@@ -153,8 +175,8 @@ MECH_POSTS="$TMP/mechanical-posts"
 MECH_UPDATES="$TMP/mechanical-updates"
 export MECH_COMMENTS MECH_POSTS MECH_UPDATES
 adapter_install_board_cli mention-test "$TMP/token" "$TMP/mention-board" "Test Bot" agent-1 1
-mention='<p>Decision: <span data-type="mention" data-label="name-6">Owner</span> first</p>'
-second='<p>Decision: Again <span data-type="mention" data-label="name-6">Owner</span></p>'
+mention='<p><strong>Decision: <span data-type="mention" data-label="name-6">Owner</span> must approve.</strong></p><p>Next: wait for approval.</p>'
+second='<p><strong>Decision: <span data-type="mention" data-label="name-6">Owner</span> must approve again.</strong></p><p>Next: wait for approval.</p>'
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/mention-board" comment add TEST-1 --text "$mention" >/dev/null
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/mention-board" comment add TEST-1 --text "$second" >"$TMP/second.out" 2>"$TMP/second.err"
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/mention-board" comment update 9 --text "$second" >"$TMP/update.out" 2>"$TMP/update.err"
@@ -184,8 +206,8 @@ else
 fi
 
 for allowed in \
-  '<p>Question: Which release number is needed?</p>' \
-  '<p>Decision: The release must wait for legal approval.</p>' \
+  '<p><strong>Question: Which release number is needed?</strong></p>' \
+  '<p><strong>Decision: Legal approval is required.</strong></p><p>Next: wait for approval.</p>' \
   '<p>Handoff: QA Bot owns verification.</p>' \
   '<p>Done: https://github.com/example/repo/pull/1</p>'
 do
@@ -197,6 +219,75 @@ else
   bad four-comment-markers-pass "posts=$(cat "$MECH_POSTS")"
 fi
 
+MECH_POSTS="$TMP/plain-posts"
+MECH_UPDATES="$TMP/plain-updates"
+REWRITE_CALLS="$TMP/rewrite-calls"
+REWRITE_PROMPT="$TMP/rewrite-prompt"
+export MECH_POSTS MECH_UPDATES REWRITE_CALLS REWRITE_PROMPT
+: > "$MECH_POSTS"
+: > "$MECH_UPDATES"
+: > "$REWRITE_CALLS"
+adapter_install_board_cli plain-test "$TMP/token" "$TMP/plain-board" "Test Bot" agent-1 1
+technical='<p>Question: Should runThing() in src/app.ts ship?</p>'
+REWRITE_OUTPUT='<p><strong>Question: Should this change ship today?</strong></p>'
+export REWRITE_OUTPUT
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+  AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
+  "$TMP/plain-board" comment add TEST-1 --text "$technical" >"$TMP/technical.out" 2>"$TMP/technical.err"
+if [ "$(wc -l < "$REWRITE_CALLS")" -eq 1 ] \
+   && grep -qF '<p><strong>Question: Should this change ship today?</strong></p>' "$MECH_POSTS" \
+   && grep -qF 'comment contains a file path' "$REWRITE_PROMPT" \
+   && grep -qF 'POSPEAK RULES, VERBATIM:' "$REWRITE_PROMPT"; then
+  ok technical-comment-rewritten 'a technical draft is rewritten once and the passing replacement posts'
+else
+  bad technical-comment-rewritten "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/technical.err")"
+fi
+
+: > "$MECH_POSTS"
+: > "$REWRITE_CALLS"
+passing='<p><strong>Decision: The release is ready.</strong></p><p>Next: approve the release.</p>'
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+  AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
+  "$TMP/plain-board" comment add TEST-1 --text "$passing" >/dev/null
+if [ ! -s "$REWRITE_CALLS" ] && grep -qF "$passing" "$MECH_POSTS"; then
+  ok passing-comment-unchanged 'a passing draft posts unchanged without a model call'
+else
+  bad passing-comment-unchanged "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS")"
+fi
+
+: > "$MECH_POSTS"
+: > "$REWRITE_CALLS"
+REWRITE_OUTPUT='<p><strong>Decision: The release is ready — now.</strong></p><p>Next: approve the release.</p>'
+export REWRITE_OUTPUT
+em_dash='<p><strong>Decision: The release is ready — now.</strong></p><p>Next: approve the release.</p>'
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+  AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
+  "$TMP/plain-board" comment add TEST-1 --text "$em_dash" >"$TMP/em-dash.out" 2>"$TMP/em-dash.err"
+if [ ! -s "$MECH_POSTS" ] \
+   && [ "$(wc -l < "$REWRITE_CALLS")" -eq 1 ] \
+   && grep -qF 'comment contains an em dash' "$TMP/state/agent-board-poll/plain-test.log" \
+   && grep -qF 'run-activity: action Question held: did not pass the plain-language check' "$TMP/state/agent-board-poll/plain-test.log"; then
+  ok em-dash-comment-held 'an em dash fails twice, logs the draft and posts only held activity'
+else
+  bad em-dash-comment-held "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/em-dash.err")"
+fi
+
+: > "$MECH_POSTS"
+: > "$REWRITE_CALLS"
+for unaffected in \
+  '<p>Handoff: QA checks src/app.ts with runThing() — today.</p>' \
+  '<p>Done: PR-12 at deadbeef</p>'
+do
+  HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+    AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
+    "$TMP/plain-board" comment add TEST-1 --text "$unaffected" >/dev/null
+done
+if [ "$(wc -l < "$MECH_POSTS")" -eq 2 ] && [ ! -s "$REWRITE_CALLS" ]; then
+  ok handoff-done-unaffected 'Handoff and Done comments bypass plain-language enforcement'
+else
+  bad handoff-done-unaffected "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS")"
+fi
+
 MECH_POSTS="$TMP/dedupe-posts"
 MECH_UPDATES="$TMP/dedupe-updates"
 export MECH_POSTS MECH_UPDATES
@@ -204,9 +295,9 @@ touch "$MECH_POSTS" "$MECH_UPDATES"
 adapter_install_board_cli noise-test "$TMP/token" "$TMP/noise-board" "Test Bot" agent-1 1
 now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$TMP/mechanical-comments.json" <<EOF
-{"comments":[{"id":41,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p>Decision: Filing deadline status for 22 September.</p><p>Old detail.</p>"}]}
+{"comments":[{"id":41,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p><strong>Decision: The filing deadline is 22 September.</strong></p><p>Next: review the deadline.</p>"}]}
 EOF
-printf '<p>Decision: Filing deadline status for 22 September.</p><p>New detail.</p>\n' > "$TMP/reminder.html"
+printf '<p><strong>Decision: The filing deadline is 22 September.</strong></p><p>Next: confirm the deadline.</p>\n' > "$TMP/reminder.html"
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/noise-board" comment add TEST-1 --file "$TMP/reminder.html" >"$TMP/dedupe.out" 2>"$TMP/dedupe.err"
 if [ ! -s "$MECH_POSTS" ] \
    && grep -qF 'comment update 41 --text' "$MECH_UPDATES" \
@@ -220,12 +311,12 @@ fi
 : > "$MECH_UPDATES"
 cat > "$TMP/mechanical-comments.json" <<EOF
 {"comments":[
-  {"id":51,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p>Decision: First distinct update with enough unique text.</p>"},
-  {"id":52,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p>Decision: Second distinct update with enough unique text.</p>"},
-  {"id":53,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p>Decision: Third distinct update with enough unique text.</p>"}
+  {"id":51,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p><strong>Decision: The first distinct update is ready.</strong></p><p>Next: review the first update.</p>"},
+  {"id":52,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p><strong>Decision: The second distinct update is ready.</strong></p><p>Next: review the second update.</p>"},
+  {"id":53,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p><strong>Decision: The third distinct update is ready.</strong></p><p>Next: review the third update.</p>"}
 ]}
 EOF
-HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/noise-board" comment add TEST-1 --text '<p>Decision: Fourth distinct update with enough unique text.</p>' >"$TMP/cap.out" 2>"$TMP/cap.err"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/noise-board" comment add TEST-1 --text '<p><strong>Decision: The fourth distinct update is ready.</strong></p><p>Next: review the fourth update.</p>' >"$TMP/cap.out" 2>"$TMP/cap.err"
 if [ ! -s "$MECH_POSTS" ] \
    && grep -qF 'daily cap reached (3 agent comments on this ticket today UTC)' "$TMP/cap.err" \
    && grep -qF 'daily cap reached' "$TMP/state/agent-board-poll/noise-test.log"; then

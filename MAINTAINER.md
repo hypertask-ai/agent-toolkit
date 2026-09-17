@@ -126,6 +126,18 @@ run activity. `QUIET="on"` is the default and strips board-owner mentions from
 comments, logging the change. The review column provides attention instead.
 The existing one-reminder and three-comments-per-day limits still apply.
 
+The runner appends the pospeak, unslop, and i-have-adhd texts verbatim for
+`Question:` and `Decision:` output and says the product owner reads it on a
+phone. Paths under the company pack's `skills/talk-to-valentin/` directory are
+canonical; bundled files under `adapters/hypertask/plain-language/` fill any
+missing reference. The generated board wrapper checks the first `<p>` and bold
+sentence, the 80-word cap, code-shaped tokens, commit hashes, em dashes, linked
+ticket and PR references, and the last block. It tries one 60-second rewrite
+with `CHAT_CLI` or `RESEARCH_CLI`, then checks again. A second failure logs the
+draft and reasons, emits the `Question held: did not pass the plain-language
+check` activity, and sends no raw comment. The check does not run for
+`Handoff:` or `Done:`.
+
 At ticket-run start the adapter posts `{taskId, source: "runtime"}` to
 `/api/mcp/agents/runs`. Claimed, started, PR opened, red check, fix pushed,
 retrying, blocked, and done are activities, and the final status closes the run.
