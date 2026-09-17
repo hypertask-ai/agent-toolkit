@@ -1055,6 +1055,15 @@ post a fourth comment to say the plan is done.
 $PROMPT"
   fi
 
+  if [ "${MANAGER:-off}" = "on" ]; then
+    PROMPT="$PROMPT
+
+MANAGER COMMANDS:
+- \`agent-template ctl start|stop|status <slug>\`: use this only when asked to turn a named agent runner on or off, or check whether it is running.
+- \`agent-template delegate <ticket> <slug> --why \"<one line reason>\"\`: use this only when asked to hand a ticket to a named agent.
+After either command, your reply must be exactly the command's one-line result, unchanged."
+  fi
+
   PROMPT="$PROMPT
 
 COMMENT CONTRACT: Post a reminder or status line once, then edit that comment in place with \`$BOARD_CLI comment update <id>\`; never re-post it. Post at most one reminder comment per ticket per day and at most three comments total per ticket per day unless a human wrote in between. A due-date countdown is one comment that you edit, not a series of new comments. The board wrapper updates near-duplicates and logs a refused fourth daily comment outside the ticket.

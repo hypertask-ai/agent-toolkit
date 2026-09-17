@@ -442,6 +442,7 @@ MODEL_CLI="$MODEL_CLI"
 MAX_CONCURRENT_RUNS="$MAX_CONCURRENT_RUNS"
 WIRING="$WIRING"
 CHAT="$CHAT"
+MANAGER="off"
 EOF
 )"
 # PR_REPO only when given: an empty PR_REPO="" written to a conf that has

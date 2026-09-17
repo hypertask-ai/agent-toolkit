@@ -58,3 +58,4 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `TRIAGE_MODEL_CLI` | Optional tie-break scoring command, default `MODEL_CLI`. |
 | `ADVISOR_MAX` | Research calls per run, default 2 when `RESEARCH_CLI` exists. |
 | `CHAT` | `on` enables the host chat lane. |
+| `MANAGER` | `on` allows `agent-template ctl` and `agent-template delegate`; default `off`. |

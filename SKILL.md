@@ -446,6 +446,7 @@ See `CONF.md` for the complete schema.
 | `CHAT_CLI` | optional chat command; absent uses `MODEL_CLI` |
 | `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
 | `CHAT` | `on` to answer through the host chat daemon, default `on` for non-CLI board agents |
+| `MANAGER` | `on` to allow runner control and ticket delegation, default `off` |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
 | `EXCLUDE_LABELS` | labels that make a ticket off limits, comma separated |
 | `WORKDIR_MODE` | `repo` (default) runs in `AGENT_REPO`; `per-run` gives each ticket its own checkout |
@@ -458,6 +459,26 @@ See `CONF.md` for the complete schema.
 | `TRIAGE` | `yes` to score a ticket before pickup; defaults to `yes` for `AGENT_KIND=dev` and `no` for everything else |
 | `TRIAGE_MODEL_CLI` | optional command that breaks a tie the rules could not; default `MODEL_CLI` |
 | `ADVISOR_MAX` | `agent-advisor` calls allowed per run, default 2 |
+
+## Manager agents
+
+`MANAGER="on"` gives that agent two commands. All other agents are refused and
+do not receive these commands in runner or chat prompts.
+
+```sh
+agent-template ctl start|stop|status <slug>
+agent-template delegate <ticket> <slug> --why "<one line reason>"
+```
+
+`ctl` starts a runner timer, stops its timer and current service, or reports
+both states. It accepts only a current-schema agent slug. `delegate` uses the
+manager's own `BOARD_CLI`, assigns the target agent UUID, and posts one handoff
+comment. It refuses the board owner's tickets and userId 6. Every attempted
+manager action is recorded in
+`~/.local/state/agent-board-poll/manager-actions.log`.
+
+A session can file feedback with an explicit identity using `agent-template
+feedback --as <slug> ...`, or with a wrapper using `--board-cli <path>`.
 
 ## How hard is this ticket
 

@@ -43,6 +43,22 @@ provider processes receive a per-agent command shim first on `PATH`; bare
 wrapper. A missing token ends the run with `no agent token for <slug>` before a
 board write, rather than falling back to the login in the owner's home config.
 
+## Manager access
+
+Manager access is per agent, not per host. Set `MANAGER="on"` only in a trusted
+manager's current-schema conf. Missing or any other value means off.
+
+- `agent-template ctl start|stop|status <slug>` controls only
+  `agent-board-poll@<slug>.timer` and `.service` for a current-schema conf.
+- `agent-template delegate <ticket> <slug> --why "<one line reason>"` uses the
+  manager's `BOARD_CLI`, assigns the target agent UUID, and posts the handoff.
+- Delegation refuses userId 6 and a ticket explicitly held by its board owner.
+- Every accepted or refused call is logged with caller, command, and timestamp
+  in `~/.local/state/agent-board-poll/manager-actions.log`.
+
+Runner and chat prompts expose these commands only when `MANAGER="on"`. A chat
+reply after either command must be exactly the command's one-line result.
+
 ## Channels
 
 The host config is `~/.config/agent-template/config`. Ordinary hosts default to
@@ -60,7 +76,8 @@ installed manifest, stages the complete target template, and runs the staged eva
 suite. A red suite leaves the installed tree untouched, logs `update to X refused:
 N evals red`, and exits zero so the timer is not reported as crashed. `--force`
 skips the eval gate. A normal install evaluates its source before its first copy as
-well.
+well. Use `agent-template update --keep-timers` when deployment must leave every
+runner timer in its current started or stopped state.
 
 ## Local patches
 

@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import runpy
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
 module = runpy.run_path(str(root / "scripts/agent-chat"))
 Agent = module["Agent"]
 ChatDaemon = module["ChatDaemon"]
+prompt_for = module["prompt_for"]
 ERROR_REPLY = module["ERROR_REPLY"]
 
 
@@ -20,8 +22,12 @@ with tempfile.TemporaryDirectory() as temporary:
     fallback.write_text(common)
     explicit = temporary / "explicit.conf"
     explicit.write_text(common + 'CHAT_CLI="chat-command --brief"\n')
+    manager = temporary / "manager.conf"
+    manager.write_text(common + 'MANAGER="on"\n')
     assert Agent.from_conf(fallback).model_cli == "model-command --normal"
     assert Agent.from_conf(explicit).model_cli == "chat-command --brief"
+    assert Agent.from_conf(fallback).manager is False
+    assert Agent.from_conf(manager).manager is True
     print("PASS agent-chat-command-from-conf")
 
 
@@ -39,6 +45,19 @@ def agent(slug):
         api_url="https://example.invalid/api",
         webhook_secret_file=None,
     )
+
+
+message = {"userName": "Valentin", "text": "stop dev 1"}
+regular_prompt = prompt_for(agent("regular"), message, [])
+manager_prompt = prompt_for(replace(agent("manager"), manager=True), message, [])
+assert "agent-template ctl" not in regular_prompt
+assert "agent-template delegate" not in regular_prompt
+assert "agent-template ctl start|stop|status <slug>" in manager_prompt
+assert 'agent-template delegate <ticket> <slug> --why "<one line reason>"' in manager_prompt
+assert "agent-template ctl stop dev-1" in manager_prompt
+assert "agent-template delegate HTPR-6550 dev-2" in manager_prompt
+assert "return exactly its one-line result unchanged" in manager_prompt
+print("PASS agent-chat-manager-command-contract")
 
 
 class FakeApi:

@@ -1,3 +1,14 @@
+## 3.22.0 - 2026-09-17
+
+- Agents with `MANAGER="on"` can start, stop, or inspect current runner units
+  and delegate a ticket to a current agent identity through their own board CLI.
+- Manager actions are identity-gated, owner-held tickets and userId 6 are
+  protected, every attempt is logged, and runner plus chat prompts expose the
+  commands only to managers.
+- Feedback accepts `--board-cli` and `--as`, and `update --keep-timers` deploys
+  without restarting a timer whose state must be preserved.
+- ACTION: set `MANAGER="on"` in `product-bot.conf` to enable manager commands.
+
 ## 3.21.6 - 2026-09-17
 
 - Setup guidance, generated briefs, and every runner prompt now require reminder

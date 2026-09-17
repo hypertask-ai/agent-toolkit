@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # agent-template: the template talking about itself.
 #
-# Three subcommands today:
+# Commands:
+#
+#   agent-template ctl start|stop|status <slug>
+#
+#   agent-template delegate <ticket> <slug> --why "<one line reason>"
 #
 #   agent-template feedback --kind bug|change|idea \
 #       --what "<summary>" --got "<current behavior or context>" \
 #       --expected "<desired behavior>" \
-#       [--adapter hypertask|linear|none] [--agent <slug>] \
-#       [--dry-run] [--opt-out] [--case --check '<predicate> ["<arg>"]']
+#       [--adapter hypertask|linear|none] [--as <slug>] \
+#       [--board-cli <path>] [--dry-run] [--opt-out] \
+#       [--case --check '<predicate> ["<arg>"]']
 #
 #   agent-template report [--days N]
 #
-#   agent-template update [--dry-run] [--no-host-notes]
+#   agent-template update [--dry-run] [--no-host-notes] [--keep-timers]
 #
 #   agent-template promote
 #
@@ -52,6 +57,7 @@
 #      the timers that were already enabled and whose unit config actually
 #      changed this run.
 # --dry-run prints what step 3 and 4 would do and changes nothing.
+# --keep-timers reloads changed unit files but does not restart any timer.
 #
 # Run feedback the moment a human corrects your output. It files the
 # correction on the feedback board so it can become a replayable check,
@@ -62,7 +68,8 @@
 #   --expected  what should have happened
 #   --adapter   which adapter was in play          (default: from the conf)
 #   --kind      bug, change or idea                         (default: bug)
-#   --agent     agent slug, if the conf cannot be found from the environment
+#   --as        agent slug whose conf supplies BOARD_CLI and identity
+#   --board-cli executable agent board wrapper for a session
 #   --dry-run   print the ticket body, send nothing
 #   --opt-out   this run sends nothing (the conf key FEEDBACK_OPT_OUT=yes
 #               turns sending off for every run)
@@ -110,8 +117,9 @@ Board: $FEEDBACK_BOARD_URL
 Example:
   agent-template feedback --kind bug --what "Update hid the feedback board" --got "No feedback hint" --expected "Print the board URL"
 
-Options: --adapter hypertask|linear|none, --agent <slug>, --dry-run,
-         --opt-out, --case --check '<predicate> ["<arg>"]'
+Options: --adapter hypertask|linear|none, --as <slug>, --agent <slug>,
+         --board-cli <path>, --dry-run, --opt-out,
+         --case --check '<predicate> ["<arg>"]'
 EOF
 }
 
@@ -139,6 +147,8 @@ fi
 case "$1" in
   -h|--help|help) usage; exit 0 ;;
   version) cat "$CORE_ROOT/VERSION"; exit 0 ;;
+  ctl) shift; SUBCOMMAND="ctl" ;;
+  delegate) shift; SUBCOMMAND="delegate" ;;
   feedback) shift ;;
   report) shift; SUBCOMMAND="report" ;;
   update) shift; SUBCOMMAND="update" ;;
@@ -152,6 +162,158 @@ host_config_value() {
   value="$(sed -n "s/^${key}=//p" "$HOST_CONFIG" 2>/dev/null | tail -n1 | tr -d '\"' || true)"
   printf '%s\n' "${value:-$fallback}"
 }
+
+MANAGER_ACTIONS_LOG="${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll/manager-actions.log"
+manager_caller_slug() {
+  local entry parent
+  if [ -n "${AGENT_SLUG:-}" ]; then
+    printf '%s' "$AGENT_SLUG"
+    return
+  fi
+  while IFS= read -r entry; do
+    parent="$(basename "$(dirname "$entry")")"
+    if [ "$parent" = "agent-identity-shims" ]; then
+      basename "$entry"
+      return
+    fi
+  done < <(printf '%s' "$PATH" | tr ':' '\n')
+}
+manager_log_call() {
+  local who="$1" what="$2"
+  mkdir -p "$(dirname "$MANAGER_ACTIONS_LOG")"
+  who="${who//$'\n'/ }"
+  what="${what//$'\n'/ }"
+  printf '%s\twho=%s\twhat=%s\n' "$(date -Is)" "${who:-unknown}" "$what" >> "$MANAGER_ACTIONS_LOG"
+}
+manager_refuse() {
+  printf '%s\n' "$1"
+  exit 1
+}
+manager_current_conf() {
+  local slug="$1" conf
+  case "$slug" in
+    ''|*[!a-z0-9-]*) return 1 ;;
+  esac
+  conf="$(core_find_conf "$slug" 2>/dev/null)" || return 1
+  [ "$(basename "$conf")" = "$slug.conf" ] || return 1
+  grep -q '^BOARD_ADAPTER=' "$conf" || return 1
+  grep -qvE '^\s*(#.*)?$|^[A-Z][A-Z0-9_]*=' "$conf" && return 1
+  printf '%s' "$conf"
+}
+manager_conf_value() {
+  local conf="$1" key="$2"
+  (
+    unset "$key"
+    # shellcheck disable=SC1090
+    . "$conf"
+    printf '%s' "${!key:-}"
+  )
+}
+manager_authorize() {
+  local conf
+  MANAGER_CALLER="$(manager_caller_slug)"
+  manager_log_call "$MANAGER_CALLER" "$SUBCOMMAND $*"
+  [ -n "$MANAGER_CALLER" ] || manager_refuse "$SUBCOMMAND refused: no calling agent identity"
+  conf="$(manager_current_conf "$MANAGER_CALLER")" \
+    || manager_refuse "$SUBCOMMAND refused: caller $MANAGER_CALLER has no current agent conf"
+  [ "$(manager_conf_value "$conf" MANAGER)" = "on" ] \
+    || manager_refuse "$SUBCOMMAND refused: caller $MANAGER_CALLER is not a manager"
+  MANAGER_CONF="$conf"
+  MANAGER_NAME="$(manager_conf_value "$conf" AGENT_NAME)"
+  MANAGER_BOARD_CLI="$(manager_conf_value "$conf" BOARD_CLI)"
+}
+
+if [ "${SUBCOMMAND:-feedback}" = "ctl" ]; then
+  manager_authorize "$@"
+  [ "$#" -eq 2 ] || manager_refuse "ctl refused: use agent-template ctl start|stop|status <slug>"
+  action="$1"
+  target="$2"
+  case "$action" in start|stop|status) ;; *) manager_refuse "ctl refused: action must be start, stop, or status" ;; esac
+  target_conf="$(manager_current_conf "$target")" \
+    || manager_refuse "ctl refused: $target is not a current agent slug"
+  timer="agent-board-poll@$target.timer"
+  service="agent-board-poll@$target.service"
+  case "$action" in
+    start)
+      systemctl --user start "$timer" >/dev/null 2>&1 \
+        || manager_refuse "ctl failed: could not start $timer"
+      echo "ctl start $target: started $timer"
+      ;;
+    stop)
+      systemctl --user stop "$timer" "$service" >/dev/null 2>&1 \
+        || manager_refuse "ctl failed: could not stop $timer and $service"
+      echo "ctl stop $target: stopped $timer and $service"
+      ;;
+    status)
+      timer_state="$(systemctl --user is-active "$timer" 2>/dev/null || true)"
+      service_state="$(systemctl --user is-active "$service" 2>/dev/null || true)"
+      echo "ctl status $target: timer=${timer_state:-unknown} service=${service_state:-unknown}"
+      ;;
+  esac
+  exit 0
+fi
+
+if [ "${SUBCOMMAND:-feedback}" = "delegate" ]; then
+  manager_authorize "$@"
+  [ "$#" -eq 4 ] && [ "$3" = "--why" ] \
+    || manager_refuse "delegate refused: use agent-template delegate <ticket> <slug> --why \"<one line reason>\""
+  ticket="$1"
+  target="$2"
+  why="$4"
+  case "$ticket" in *-[0-9]*) ;; *) manager_refuse "delegate refused: $ticket is not a ticket reference" ;; esac
+  [ -n "$why" ] && [ "$(printf '%s' "$why" | wc -l)" -eq 0 ] \
+    || manager_refuse "delegate refused: --why must be one non-empty line"
+  target_conf="$(manager_current_conf "$target")" \
+    || manager_refuse "delegate refused: $target is not a current agent slug"
+  target_id="$(manager_conf_value "$target_conf" AGENT_ID)"
+  target_name="$(manager_conf_value "$target_conf" AGENT_NAME)"
+  [ -n "$target_id" ] && [ -n "$target_name" ] \
+    || manager_refuse "delegate refused: $target has no agent identity"
+  [ "$target_id" != "6" ] || manager_refuse "delegate refused: userId 6 is the board owner and cannot be assigned"
+  [ -x "$MANAGER_BOARD_CLI" ] \
+    || manager_refuse "delegate refused: manager $MANAGER_CALLER has no executable BOARD_CLI"
+
+  task_file="$(mktemp)"
+  project_file="$(mktemp)"
+  trap 'rm -f "$task_file" "$project_file"' EXIT
+  "$MANAGER_BOARD_CLI" task get "$ticket" > "$task_file" 2>/dev/null \
+    || manager_refuse "delegate refused: could not read $ticket with the manager board CLI"
+  project_id="$(python3 - "$task_file" <<'PYEOF'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+    print(task.get("projectId") or task.get("boardId") or "")
+except Exception:
+    pass
+PYEOF
+)"
+  [ -n "$project_id" ] || manager_refuse "delegate refused: $ticket did not identify its board"
+  "$MANAGER_BOARD_CLI" project show "$project_id" > "$project_file" 2>/dev/null \
+    || manager_refuse "delegate refused: could not read board owner for $ticket"
+  if python3 - "$task_file" "$project_file" <<'PYEOF'
+import json, sys
+task_doc = json.load(open(sys.argv[1], encoding="utf-8"))
+project_doc = json.load(open(sys.argv[2], encoding="utf-8"))
+task = (task_doc.get("tasks") or [task_doc.get("task") or task_doc])[0]
+project = project_doc.get("project") or project_doc
+owner = str(project.get("ownerId") or (project.get("owner") or {}).get("id") or "")
+held = any(str(who.get("id") or who.get("userId") or "") == owner and not who.get("agent")
+           for who in task.get("assignees") or [] if isinstance(who, dict))
+raise SystemExit(0 if owner and held else 1)
+PYEOF
+  then
+    manager_refuse "delegate refused: $ticket is held by the board owner"
+  fi
+
+  "$MANAGER_BOARD_CLI" task assign "$ticket" --assignee "$target_id" >/dev/null 2>&1 \
+    || manager_refuse "delegate failed: could not assign $ticket to $target_name"
+  handoff="Handed to $target_name by ${MANAGER_NAME:-$MANAGER_CALLER}: $why"
+  "$MANAGER_BOARD_CLI" comment add "$ticket" --text "$handoff" >/dev/null 2>&1 \
+    || manager_refuse "delegate failed: $ticket was assigned but the handoff comment failed"
+  echo "$handoff"
+  exit 0
+fi
 
 if [ "${SUBCOMMAND:-feedback}" = "promote" ]; then
   [ $# -eq 0 ] || die "promote takes no options" "run agent-template promote"
@@ -230,6 +392,7 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   NO_HOST_NOTES="no"
   FORCE="no"
   KEEP_LOCAL_PATCHES="no"
+  KEEP_TIMERS="no"
   TIMER_RUN="no"
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -237,6 +400,7 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
       --no-host-notes) NO_HOST_NOTES="yes"; shift ;;
       --force) FORCE="yes"; shift ;;
       --keep-local-patches) KEEP_LOCAL_PATCHES="yes"; shift ;;
+      --keep-timers) KEEP_TIMERS="yes"; shift ;;
       --timer) TIMER_RUN="yes"; shift ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown option $1" "run agent-template update --help" ;;
@@ -562,6 +726,7 @@ block = "\n".join([
     'SKILLS_INDEX="%s"' % esc(skills_index),
     'MODEL_CLI="%s"' % esc(model_cli),
     'MAX_CONCURRENT_RUNS="1"',
+    'MANAGER="off"',
 ])
 print("CONVERT")
 print(block)
@@ -661,14 +826,18 @@ PYEOF
 
   if [ "$DRY_RUN" != "yes" ] && [ -n "$RESTART_SLUGS" ]; then
     systemctl --user daemon-reload 2>/dev/null || true
-    for slug in $RESTART_SLUGS; do
-      timer="agent-board-poll@$slug.timer"
-      if systemctl --user is-enabled "$timer" >/dev/null 2>&1; then
-        systemctl --user restart "$timer" 2>/dev/null || true
-        systemctl --user reset-failed "agent-board-poll@$slug.service" 2>/dev/null || true
-        echo "  restarted $timer (its unit config changed: redundant path.conf removed)"
-      fi
-    done
+    if [ "$KEEP_TIMERS" = "yes" ]; then
+      echo "  kept timer states unchanged (--keep-timers)"
+    else
+      for slug in $RESTART_SLUGS; do
+        timer="agent-board-poll@$slug.timer"
+        if systemctl --user is-enabled "$timer" >/dev/null 2>&1; then
+          systemctl --user restart "$timer" 2>/dev/null || true
+          systemctl --user reset-failed "agent-board-poll@$slug.service" 2>/dev/null || true
+          echo "  restarted $timer (its unit config changed: redundant path.conf removed)"
+        fi
+      done
+    fi
   fi
 
   echo "== feedback filed from this host =="
@@ -730,6 +899,7 @@ EXPECTED=""
 ADAPTER=""
 KIND="bug"
 SLUG=""
+BOARD_CLI_ARG=""
 DRY_RUN="no"
 OPT_OUT="no"
 CASE_IT="no"
@@ -742,7 +912,8 @@ while [ $# -gt 0 ]; do
     --expected) EXPECTED="${2:?--expected needs a sentence}"; shift 2 ;;
     --adapter) ADAPTER="${2:?--adapter needs a name}"; shift 2 ;;
     --kind) KIND="${2:?--kind needs bug, change or idea}"; shift 2 ;;
-    --agent) SLUG="${2:?--agent needs a slug}"; shift 2 ;;
+    --as|--agent) SLUG="${2:?$1 needs a slug}"; shift 2 ;;
+    --board-cli) BOARD_CLI_ARG="${2:?--board-cli needs a path}"; shift 2 ;;
     --dry-run) DRY_RUN="yes"; shift ;;
     --opt-out) OPT_OUT="yes"; shift ;;
     --case) CASE_IT="yes"; shift ;;
@@ -777,18 +948,29 @@ fi
 
 # ---------- who is reporting ----------
 # The poll runner puts AGENT_NAME and AGENT_BOARD_CLI in the child's
-# environment, so an agent mid-run needs no flags. Outside a run, --agent
-# names the conf to read instead.
+# environment, so an agent mid-run needs no flags. Outside a run, --as names
+# the conf to read and --board-cli can supply a session's wrapper directly.
 AGENT_NAME="${AGENT_NAME:-}"
 BOARD_CLI="${AGENT_BOARD_CLI:-${BOARD_CLI:-}}"
 BOARD_ADAPTER="${BOARD_ADAPTER:-}"
 if [ -n "$SLUG" ]; then
   CONF="$(core_find_conf "$SLUG")" || die "no conf found for agent '$SLUG'" \
-    "check the slug, or drop --agent and let the environment supply the name"
+    "check the slug, or drop --as and let the environment supply the name"
   core_read_conf "$CONF"
 fi
+[ -z "$BOARD_CLI_ARG" ] || BOARD_CLI="$BOARD_CLI_ARG"
 [ -n "$AGENT_NAME" ] || AGENT_NAME="unknown"
-[ -n "$ADAPTER" ] || ADAPTER="${BOARD_ADAPTER:-none}"
+if [ -z "$ADAPTER" ]; then
+  if [ -n "$BOARD_CLI_ARG" ] || [ -n "${AGENT_BOARD_CLI:-}" ]; then
+    ADAPTER="hypertask"
+  elif [ -n "${BOARD_ADAPTER:-}" ]; then
+    ADAPTER="$BOARD_ADAPTER"
+  elif [ -n "$BOARD_CLI" ]; then
+    ADAPTER="hypertask"
+  else
+    ADAPTER="none"
+  fi
+fi
 case "$ADAPTER" in
   hypertask|linear|none) ;;
   *) die "--adapter must be hypertask, linear or none, got '$ADAPTER'" \

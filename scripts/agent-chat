@@ -131,6 +131,7 @@ class Agent:
     skills: tuple[str, ...]
     api_url: str
     webhook_secret_file: Path | None
+    manager: bool = False
 
     @classmethod
     def from_conf(cls, path: Path) -> "Agent | None":
@@ -172,6 +173,7 @@ class Agent:
             skills=tuple(indexes),
             api_url=api_base(values),
             webhook_secret_file=Path(secret).expanduser() if secret else None,
+            manager=values.get("MANAGER") == "on",
         )
 
     def token(self) -> str:
@@ -452,6 +454,20 @@ def prompt_for(agent: Agent, message: dict[str, Any], history: list[dict[str, An
         for row in history[-50:]
     ) or "(no earlier messages)"
     indexes = "\n".join(f"- {path}" for path in agent.skills) or "- none configured"
+    manager_brief = ""
+    board_rule = "- Never post a ticket comment or make any board write."
+    external_rule = "- Do not change files, accounts, connectors, code, or any external system."
+    if agent.manager:
+        board_rule = "- Never post a ticket comment or make any board write except through the delegate command listed below."
+        external_rule = "- Do not change files, accounts, connectors, code, or any external system except through the manager commands listed below."
+        manager_brief = """
+Manager commands available in this chat:
+- `agent-template ctl start|stop|status <slug>`: use it when the user asks to turn a named agent runner on or off, or asks for its status.
+- `agent-template delegate <ticket> <slug> --why "<one line reason>"`: use it when the user asks to hand a ticket to a named agent.
+- "stop dev 1" means run `agent-template ctl stop dev-1`.
+- "give HTPR-6550 to dev 2" means run `agent-template delegate HTPR-6550 dev-2 --why "<one line reason>"`.
+These are the only external changes allowed in chat. After either command, return exactly its one-line result unchanged, with no other text.
+"""
     return f"""You are {agent.name}. This is a live Hypertask Agent Chat conversation, not ticket work.
 
 Mission:
@@ -459,11 +475,11 @@ Mission:
 
 Hard lane boundary:
 - Reply to the user in chat only.
-- Never post a ticket comment or make any board write.
+{board_rule}
 - Never inspect, create, or edit a repository worktree.
-- Do not change files, accounts, connectors, code, or any external system.
-- If the user asks for a change, explain what should be done and that it needs ticket work.
-
+{external_rule}
+- If the user asks for any other change, explain what should be done and that it needs ticket work.
+{manager_brief}
 Read the applicable skills from these index paths in order, company pack first:
 {indexes}
 

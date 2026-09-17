@@ -253,6 +253,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/agent-template-update.test.sh" ]; then
   echo "-- agent-template update behavioural checks --"
   bash "$HERE/agent-template-update.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/manager-actions.test.sh" ]; then
+  echo ""
+  echo "-- manager action behavioural checks --"
+  bash "$HERE/manager-actions.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/feedback-loop.test.sh" ]; then
   echo ""
   echo "-- feedback loop behavioural checks --"

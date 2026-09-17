@@ -50,7 +50,11 @@ exit 0
 EOF
 cat > "$TMP/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
-exit 1
+printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+case "$*" in
+  '--user is-enabled agent-board-poll@worker.timer') exit 0 ;;
+  *) exit 1 ;;
+esac
 EOF
 chmod +x "$TEMPLATE/install.sh" "$TEMPLATE/scripts/sync-project.sh" \
   "$TEMPLATE/evals/run-evals.sh" "$TMP/bin/git" "$TMP/bin/systemctl"
@@ -68,8 +72,8 @@ run_update() {
   HOME="$HOME_DIR" AGENT_CONFIG_DIR="$CONF_DIR" AGENT_TEMPLATE_CONFIG_DIR="$CONF_DIR" \
     AGENT_TEMPLATE_HOST_CONFIG="$HOST_CONFIG" AGENT_TEMPLATE_REPO="$FAKE_REPO" \
     AGENT_SYSTEMD_DIR="$TMP/units" XDG_STATE_HOME="$TMP/state" \
-    PATH="$TMP/bin:$PATH" GIT_LOG="$TMP/git.log" INSTALL_MARKER="$TMP/installed" \
-    "$ROOT/scripts/agent-template" update "$@"
+    PATH="$TMP/bin:$PATH" GIT_LOG="$TMP/git.log" SYSTEMCTL_LOG="$TMP/systemctl.log" \
+    INSTALL_MARKER="$TMP/installed" "$ROOT/scripts/agent-template" update "$@"
 }
 
 # Stable is the default and selects only the stable tag.
@@ -119,6 +123,23 @@ if [ "$status" -eq 0 ] && [ ! -e "$TMP/installed" ] \
   ok local-patch-refuses-swap "host edit is archived and the swap is refused"
 else
   bad local-patch-refuses-swap "status=$status output=$(cat "$TMP/patch.out")"
+fi
+
+# --keep-timers may reload changed units but never restarts an enabled timer.
+mkdir -p "$TMP/units/agent-board-poll@worker.service.d"
+printf '[Service]\nEnvironment=PATH=/tmp/bin\n' > "$TMP/units/agent-board-poll@worker.service.d/path.conf"
+: > "$TMP/systemctl.log"
+set +e
+run_update --keep-timers >"$TMP/keep-timers.out" 2>"$TMP/keep-timers.err"
+status=$?
+set -e
+if [ "$status" -eq 0 ] \
+   && grep -q 'kept timer states unchanged (--keep-timers)' "$TMP/keep-timers.out" \
+   && grep -q '^--user daemon-reload$' "$TMP/systemctl.log" \
+   && ! grep -q '^--user restart ' "$TMP/systemctl.log"; then
+  ok keep-timers-preserves-state "changed units reload without starting a stopped timer"
+else
+  bad keep-timers-preserves-state "status=$status output=$(cat "$TMP/keep-timers.out") systemctl=$(cat "$TMP/systemctl.log")"
 fi
 
 # Promotion cannot move stable until this exact install is 24 hours old.
