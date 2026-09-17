@@ -129,6 +129,12 @@ PROMPT_CAPTURE="$TMP/prompt" HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.confi
   XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
   TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
   PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test
+if grep -qF 'run-activity: action run finished for TEST-1' "$TMP/state/agent-board-poll/test.log" \
+   && ! grep -qF 'run-activity: response' "$TMP/state/agent-board-poll/test.log"; then
+  ok run-finished-is-action 'a successful run records completion as action with no response activity'
+else
+  bad run-finished-is-action "log=$(cat "$TMP/state/agent-board-poll/test.log")"
+fi
 if grep -qF 'When it is on, do not @mention the board owner' "$TMP/prompt"; then
   ok owner-mention-prompt-contract 'quiet runs forbid owner mentions'
 else

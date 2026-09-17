@@ -1,3 +1,16 @@
+## 3.30.0 - 2026-09-17
+
+- AGTE-23 records successful run completion as mechanical action activity and
+  never as a human response.
+- Human response activities and ticket comments now share the same marker and
+  plain-language rewrite gate.
+- Updates accept an installed hand patch when the incoming release contains the
+  exact same file, so the upstream completion fix installs without a conflict.
+- Offline coverage verifies completion activity, response rewriting, quiet
+  prefixes, and clean installation over an already-upstream hand patch.
+- ACTION: run `agent-template update --keep-timers` so current agents receive
+  the activity classification and response gate without changing timer state.
+
 ## 3.29.0 - 2026-09-17
 
 - AGTE-17 moves each advisor instruction into its own transient systemd unit, so

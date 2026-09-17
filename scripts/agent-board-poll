@@ -1848,7 +1848,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       if [ "$is_pr_fix" = "yes" ]; then
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "fix pushed $ref"
       fi
-      adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" response "done $ref"
+      adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "run finished for $ref"
       adapter_run_stop "$TOKEN_FILE" "$runtime_run_id" "$LOG" completed
     fi
   fi

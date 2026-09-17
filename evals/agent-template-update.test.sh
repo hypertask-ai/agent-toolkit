@@ -128,6 +128,27 @@ else
   bad local-patch-refuses-swap "status=$status output=$(cat "$TMP/patch.out")"
 fi
 
+# A host edit already present byte-for-byte upstream is no longer a conflict.
+MATCHED="$TMP/matched-template"
+mkdir -p "$MATCHED/scripts"
+printf 'old-version\n' > "$MATCHED/VERSION"
+printf 'release copy\n' > "$MATCHED/scripts/agent-board-poll"
+(cd "$MATCHED" && sha256sum scripts/agent-board-poll > .manifest.sha256)
+printf 'upstream fix\n' > "$MATCHED/scripts/agent-board-poll"
+printf 'upstream fix\n' > "$TEMPLATE/scripts/agent-board-poll"
+rm -f "$TMP/installed"
+set +e
+AGENT_TEMPLATE_INSTALL_DIR="$MATCHED" run_update >"$TMP/matched.out" 2>"$TMP/matched.err"
+status=$?
+set -e
+if [ "$status" -eq 0 ] && [ -e "$TMP/installed" ] \
+   && [ ! -e "$MATCHED/local-patches/old-version/scripts/agent-board-poll" ] \
+   && grep -q 'no local patches found' "$TMP/matched.out"; then
+  ok upstreamed-patch-installs "an installed hand patch identical to the incoming release installs cleanly"
+else
+  bad upstreamed-patch-installs "status=$status output=$(cat "$TMP/matched.out")"
+fi
+
 # --keep-timers may reload changed units but never restarts an enabled timer.
 mkdir -p "$TMP/units/agent-board-poll@worker.service.d"
 printf '[Service]\nEnvironment=PATH=/tmp/bin\n' > "$TMP/units/agent-board-poll@worker.service.d/path.conf"

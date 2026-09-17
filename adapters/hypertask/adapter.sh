@@ -9,6 +9,15 @@
 # through the agent's own CLI wrapper so the board records the agent, not
 # whoever happens to own the shell.
 
+_ADAPTER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PLAIN_LANGUAGE_DIR="${PLAIN_LANGUAGE_DIR:-$_ADAPTER_DIR/plain-language}"
+PLAIN_LANGUAGE_CHECK="${PLAIN_LANGUAGE_CHECK:-$PLAIN_LANGUAGE_DIR/check-comment.py}"
+POSPEAK_SKILL="${POSPEAK_SKILL:-$PLAIN_LANGUAGE_DIR/pospeak.md}"
+UNSLOP_SKILL="${UNSLOP_SKILL:-$PLAIN_LANGUAGE_DIR/unslop.md}"
+ADHD_SKILL="${ADHD_SKILL:-$PLAIN_LANGUAGE_DIR/i-have-adhd.md}"
+# shellcheck source=plain-language/outbound-text-gate.sh
+. "$PLAIN_LANGUAGE_DIR/outbound-text-gate.sh"
+
 adapter_id() { printf 'hypertask'; }
 
 # Where this tracker's identities already live on a machine.
@@ -113,9 +122,23 @@ adapter_run_open() {
   printf 'local'
 }
 
+_outbound_gate_activity() {
+  local gate_type="$1" gate_message="$2"
+  adapter_run_activity "$token_file" "$run_id" "$log_file" "$gate_type" "$gate_message"
+}
+
+_outbound_gate_note() {
+  _adapter_run_log "$log_file" "$1"
+}
+
 # adapter_run_activity <token-file> <run-id> <run-log> <type> <message>
 adapter_run_activity() {
   local token_file="$1" run_id="$2" log_file="$3" type="$4" message="$5" payload reply status
+  local TEXT="$message" RUN_LOG="$log_file"
+  if [ "$type" = "response" ]; then
+    _outbound_text_gate "$message" || return 0
+    message="$TEXT"
+  fi
   _adapter_run_log "$log_file" "$type $message"
   [ -n "$run_id" ] && [ "$run_id" != "local" ] || return 0
   payload="$(ACTIVITY_TYPE="$type" MESSAGE="$message" python3 -c 'import json,os; print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"]}))')"
@@ -252,6 +275,7 @@ POSTED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.posted-co
 OWNER_MENTIONS="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.owner-mentions"
 PLAIN_LANGUAGE_DIR="$plain_language_dir"
 PLAIN_LANGUAGE_CHECK="\$PLAIN_LANGUAGE_DIR/check-comment.py"
+OUTBOUND_TEXT_GATE="\$PLAIN_LANGUAGE_DIR/outbound-text-gate.sh"
 POSPEAK_SKILL="\${AGENT_POSPEAK_SKILL:-\$PLAIN_LANGUAGE_DIR/pospeak.md}"
 UNSLOP_SKILL="\${AGENT_UNSLOP_SKILL:-\$PLAIN_LANGUAGE_DIR/unslop.md}"
 ADHD_SKILL="\${AGENT_ADHD_SKILL:-\$PLAIN_LANGUAGE_DIR/i-have-adhd.md}"
@@ -288,7 +312,11 @@ print(project.get("ownerId") or (project.get("owner") or {}).get("id") or "")
 }
 
 _run_activity() {
-  local type="\$1" message="\$2" payload status
+  local type="\$1" message="\$2" payload status TEXT="\$2"
+  if [ "\$type" = "response" ]; then
+    _outbound_text_gate "\$message" || return 0
+    message="\$TEXT"
+  fi
   mkdir -p "\$(dirname "\$RUN_LOG")" 2>/dev/null || true
   printf '%s run-activity: %s %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$type" "\$message" >> "\$RUN_LOG" 2>/dev/null || true
   [ -n "\${AGENT_RUN_ID:-}" ] && [ "\$AGENT_RUN_ID" != "local" ] && [ -n "\${AGENT_RUN_API_BASE:-}" ] || return 0
@@ -299,91 +327,10 @@ _run_activity() {
   case "\$status" in 2*) : ;; *) _comment_cap_note "run activity delivery failed (HTTP \$status), kept locally" ;; esac
 }
 
-_plain_comment() {
-  COMMENT_TEXT="\$1" python3 -c '
-import html, os, re
-print(html.unescape(re.sub(r"<[^>]+>", " ", os.environ["COMMENT_TEXT"])).strip())
-'
-}
-
-_allowed_comment() {
-  local plain
-  plain="\$(_plain_comment "\$1")"
-  case "\$plain" in
-    Question:*|Decision:*|Handoff:*|Done:*) return 0 ;;
-  esac
-  _run_activity action "\${plain:-empty comment}"
-  _comment_cap_note "quiet mode: redirected unmarked ticket comment to run activity"
-  return 1
-}
-
-_rewrite_plain_comment() {
-  local draft="\$1" reasons="\$2" cli="\${AGENT_COMMENT_REWRITE_CLI:-}"
-  local prompt output
-  local -a argv
-  [ -n "\$cli" ] || return 1
-  for skill in "\$POSPEAK_SKILL" "\$UNSLOP_SKILL" "\$ADHD_SKILL"; do
-    [ -r "\$skill" ] || return 1
-  done
-  prompt="\$(cat <<PROMPTEOF
-Rewrite the HTML ticket comment below. A product owner with ADHD reads it on a phone. Use low effort and return only the replacement HTML, with no code fence or explanation. Start with <p><strong> and bold the complete first sentence. Use at most 80 words. Remove paths, function calls, code spans, commit hashes, and em dashes. Put each ticket or PR reference inside an <a href="https://..."> link. End the last block with a question mark or start it with Next:.
-
-The mechanical check rejected it for:
-\$reasons
-
-Draft:
-\$draft
-
-POSPEAK RULES, VERBATIM:
-\$(cat "\$POSPEAK_SKILL")
-
-UNSLOP RULES, VERBATIM:
-\$(cat "\$UNSLOP_SKILL")
-
-I-HAVE-ADHD RULES, VERBATIM:
-\$(cat "\$ADHD_SKILL")
-PROMPTEOF
-)"
-  read -r -a argv <<< "\$cli"
-  [ "\${#argv[@]}" -gt 0 ] || return 1
-  output="\$(timeout 60 "\${argv[@]}" "\$prompt")" || return 1
-  [ -n "\$output" ] || return 1
-  printf '%s' "\$output"
-}
-
-_enforce_plain_comment() {
-  local original="\$1" plain kind reasons rewritten final_draft final_reasons
-  plain="\$(_plain_comment "\$original")"
-  kind="\${plain%%:*}"
-  case "\$kind" in
-    Question|Decision) ;;
-    *) TEXT="\$original"; return 0 ;;
-  esac
-  if reasons="\$(printf '%s' "\$original" | python3 "\$PLAIN_LANGUAGE_CHECK" 2>&1)"; then
-    TEXT="\$original"
-    return 0
-  fi
-  final_draft="\$original"
-  final_reasons="\$reasons"
-  if rewritten="\$(_rewrite_plain_comment "\$original" "\$reasons" 2>>"\$RUN_LOG")"; then
-    final_draft="\$rewritten"
-    if final_reasons="\$(printf '%s' "\$rewritten" | python3 "\$PLAIN_LANGUAGE_CHECK" 2>&1)"; then
-      TEXT="\$rewritten"
-      return 0
-    fi
-  else
-    final_reasons="\$reasons
-rewrite model did not return a replacement within 60 seconds"
-  fi
-  mkdir -p "\$(dirname "\$RUN_LOG")" 2>/dev/null || true
-  {
-    printf '%s plain-language-held: draft follows\n%s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$final_draft"
-    printf 'plain-language-held: reasons follow\n%s\n' "\$final_reasons"
-  } >> "\$RUN_LOG" 2>/dev/null || true
-  _run_activity action "Question held: did not pass the plain-language check"
-  _comment_cap_note "Question held: did not pass the plain-language check"
-  return 1
-}
+_outbound_gate_activity() { _run_activity "\$@"; }
+_outbound_gate_note() { _comment_cap_note "\$@"; }
+# shellcheck source=/dev/null
+. "\$OUTBOUND_TEXT_GATE"
 
 _strip_owner_mentions() {
   local text="\$1" owner_ids="\$2"
@@ -423,8 +370,7 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "update" ] && [ -n "\${3:-}" ]; th
         _comment_cap_note "quiet mode: stripped board-owner mention from comment update"
       fi
     fi
-    _allowed_comment "\$TEXT" || exit 0
-    _enforce_plain_comment "\$TEXT" || exit 0
+    _outbound_text_gate "\$TEXT" || exit 0
     if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
       exec hypertask --token "\$TOKEN" comment update "\$3" --text "\$TEXT"
     fi
@@ -463,10 +409,7 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
         _comment_cap_note "quiet mode: stripped board-owner mention from comment on \$REF"
       fi
     fi
-    _allowed_comment "\$TEXT" || exit 0
-    if [ "\$VERBATIM" != "yes" ]; then
-      _enforce_plain_comment "\$TEXT" || exit 0
-    fi
+    _outbound_text_gate "\$TEXT" "\$VERBATIM" || exit 0
     mkdir -p "\$(dirname "\$OWNER_MENTIONS")" 2>/dev/null || true
     touch "\$OWNER_MENTIONS"
     exec 9>>"\$OWNER_MENTIONS.lock"

@@ -68,5 +68,37 @@ else
   bad run-api-404-local-only "id=$run_id log=$(cat "$TMP/run.log")"
 fi
 
+cat > "$TMP/rewrite-model" <<'EOF'
+#!/usr/bin/env bash
+printf 'called\n' >> "$REWRITE_CALLS"
+printf '%s' "$REWRITE_OUTPUT"
+EOF
+chmod +x "$TMP/rewrite-model"
+REWRITE_CALLS="$TMP/rewrite-calls"
+REWRITE_OUTPUT='<p><strong>Question: Should this change ship today?</strong></p>'
+RUN_PAYLOAD="$TMP/response-payload"
+export REWRITE_CALLS REWRITE_OUTPUT RUN_PAYLOAD
+: > "$REWRITE_CALLS"
+_ht_run_post() {
+  printf '%s' "$3" > "$RUN_PAYLOAD"
+  printf '201\n{}'
+}
+technical='<p>Question: Should runThing() in src/app.ts ship?</p>'
+QUIET=on COMMENT_REWRITE_CLI="$TMP/rewrite-model" \
+  adapter_run_activity "$TMP/token" run-1 "$TMP/response.log" response "$technical"
+if [ "$(wc -l < "$REWRITE_CALLS")" -eq 1 ] \
+   && PAYLOAD="$RUN_PAYLOAD" EXPECTED="$REWRITE_OUTPUT" python3 - <<'PYEOF'
+import json, os
+with open(os.environ["PAYLOAD"], encoding="utf-8") as handle:
+    payload = json.load(handle)
+assert payload == {"type": "response", "text": os.environ["EXPECTED"]}
+assert "Question:" in payload["text"]
+PYEOF
+then
+  ok response-uses-comment-gate 'a quiet response keeps its prefix and posts the shared gate rewrite'
+else
+  bad response-uses-comment-gate "calls=$(cat "$REWRITE_CALLS") payload=$(cat "$RUN_PAYLOAD")"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

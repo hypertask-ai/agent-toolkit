@@ -1048,14 +1048,14 @@ PYEOF
     fi
   fi
   if [ -f "$MANIFEST" ]; then
-    LOCAL_PATCHES="$(python3 - "$INSTALLED_TEMPLATE" "$MANIFEST" "$INSTALLED_VERSION" <<'PYEOF'
+    LOCAL_PATCHES="$(python3 - "$INSTALLED_TEMPLATE" "$MANIFEST" "$INSTALLED_VERSION" "$TEMPLATE_DIR" <<'PYEOF'
 import hashlib
 import os
 from pathlib import Path
 import shutil
 import sys
 
-root, manifest, version = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+root, manifest, version, incoming_root = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], Path(sys.argv[4])
 archive = root / "local-patches" / version
 for line in manifest.read_text(encoding="utf-8").splitlines():
     digest, marker, relative = line.partition("  ")
@@ -1068,8 +1068,12 @@ for line in manifest.read_text(encoding="utf-8").splitlines():
     if not source.is_file():
         print(f"deleted: {relative}")
         continue
-    current = hashlib.sha256(source.read_bytes()).hexdigest()
+    content = source.read_bytes()
+    current = hashlib.sha256(content).hexdigest()
     if current == digest:
+        continue
+    incoming = incoming_root / rel
+    if incoming.is_file() and content == incoming.read_bytes():
         continue
     target = archive / rel
     target.parent.mkdir(parents=True, exist_ok=True)
