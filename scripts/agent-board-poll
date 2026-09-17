@@ -78,6 +78,11 @@ case "$QUIET" in
   on|off) : ;;
   *) die "QUIET must be on or off, got '$QUIET'" "set QUIET=on unless ticket comments are intentionally verbose" ;;
 esac
+MAINTAINER="${MAINTAINER:-off}"
+case "$MAINTAINER" in
+  on|off) : ;;
+  *) die "MAINTAINER must be on or off, got '$MAINTAINER'" "set MAINTAINER=off unless this is the setup maintainer" ;;
+esac
 # An agent may also take tickets nobody has claimed, which is how a board column
 # becomes a queue without anyone assigning by hand. Off unless the conf says so,
 # because on a shared board it is the difference between helping and barging in.
@@ -170,6 +175,18 @@ $(cat "$UNSLOP_SKILL")
 
 I-HAVE-ADHD RULES, VERBATIM:
 $(cat "$ADHD_SKILL")"
+
+MAINTAINER_GUIDANCE=""
+if [ "$MAINTAINER" = "on" ]; then
+  MAINTAINER_GUIDANCE='SETUP MAINTAINER CONTRACT:
+You execute setup changes. A session or advisor supplies instructions but never edits on your behalf.
+Use `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]` for every change to the agent toolkit, supervisor rules, analytics site, app, CLI, or Slack bot. Never run hax or codex directly.
+Write each build specification with four explicit parts: Ticket, What, Done when, and Guardrails.
+Use `agent-template build status [id]` and `agent-template build list` to inspect work. If asked what you did, answer from build list and its recorded output, not from memory.
+Use `agent-template merge <pr-url>` only when asked to merge an existing allowlisted pull request. It refuses drafts and non-green checks.
+After a toolkit build merges, deployment uses `agent-template update --keep-timers` so timer states do not change.
+The repository allowlist is the complete boundary. Do not change a repo that is absent from it.'
+fi
 
 REPO_SKILLS_DIR="$(core_repo_skills "${AGENT_REPO:-}")"
 REPO_SKILLS_VERSION="$(core_pack_version "$REPO_SKILLS_DIR")"
@@ -364,6 +381,169 @@ log() {
   printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"
   if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
 }
+
+check_maintainer_builds() {
+  local state="$STATE_DIR/$SLUG-builds.json" row build_id ticket out_file rc pr message status
+  [ "$MAINTAINER" = "on" ] && [ -f "$state" ] || return 0
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    build_id="$(row_field "$row" id)"
+    ticket="$(row_field "$row" ticket)"
+    out_file="$(row_field "$row" out)"
+    rc="$(row_field "$row" rc)"
+    pr="$(row_field "$row" pr)"
+    if [ "$rc" = "0" ] && [ -n "$pr" ]; then
+      message="Done: Build $build_id finished. $pr"
+      status="done"
+    else
+      message='<p><strong>Decision: build failed: The job stopped before it opened a pull request.</strong></p><p>Next: Review the build log.</p>'
+      status="failed"
+    fi
+    if [ "$DRY_RUN" = "yes" ]; then
+      echo "would close build $build_id with rc=$rc and one comment on $ticket"
+      continue
+    fi
+    if ! "$BOARD_CLI" comment add "$ticket" --text "$message" >>"$LOG" 2>&1; then
+      log "build completion $build_id could not comment on $ticket; it remains open"
+      continue
+    fi
+    exec 7>>"$state.lock"
+    flock 7
+    BUILD_ID="$build_id" BUILD_RC="$rc" BUILD_STATUS="$status" BUILD_PR="$pr" \
+      COMPLETED="$(date -Is)" python3 - "$state" <<'PYEOF'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+rows = json.load(open(path, encoding="utf-8"))
+for row in rows:
+    if row.get("id") == os.environ["BUILD_ID"] and row.get("status") == "running":
+        row.update(status=os.environ["BUILD_STATUS"], rc=int(os.environ["BUILD_RC"]),
+                   completed=os.environ["COMPLETED"], pr=os.environ["BUILD_PR"])
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(rows, handle, indent=2)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+    flock -u 7
+    log "build completion $build_id status=$status rc=$rc ticket=$ticket${pr:+ pr=$pr}"
+  done < <(python3 - "$state" <<'PYEOF'
+import json
+import re
+import sys
+
+try:
+    rows = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    rows = []
+for row in rows:
+    if row.get("status") != "running":
+        continue
+    try:
+        output = open(row.get("out", ""), encoding="utf-8", errors="replace").read()
+    except OSError:
+        continue
+    markers = re.findall(r"(?m)^hax rc=(\d+)$", output)
+    if not markers:
+        continue
+    row = dict(row)
+    row["rc"] = markers[-1]
+    prs = re.findall(r"https://github\.com/[^\s/]+/[^\s/]+/pull/\d+", output)
+    row["pr"] = prs[-1].rstrip(".,)") if prs else ""
+    print(json.dumps(row))
+PYEOF
+)
+}
+
+run_advisor_instruction() {
+  local instruction_dir="$STATE_DIR/$SLUG-instructions" files instruction_file row
+  local instruction_id instruction ticket prompt reply_file err_file rc reply comment
+  [ "$MAINTAINER" = "on" ] && [ -d "$instruction_dir" ] || return 1
+  shopt -s nullglob
+  files=("$instruction_dir"/*.json)
+  shopt -u nullglob
+  [ "${#files[@]}" -gt 0 ] || return 1
+  instruction_file="${files[0]}"
+  row="$(cat "$instruction_file")"
+  instruction_id="$(row_field "$row" id)"
+  instruction="$(row_field "$row" instruction)"
+  ticket="$(row_field "$row" ticket)"
+  if [ "$DRY_RUN" = "yes" ]; then
+    echo "would run instruction $instruction_id source=advisor${ticket:+ ticket=$ticket}; nothing was started."
+    return 0
+  fi
+  prompt="Read $SKILLS_INDEX_SENTENCE first, in that order, and follow the applicable skills.
+
+You are $AGENT_NAME. This run has source=advisor and no board ticket of its own.
+Your mission is: ${AGENT_MISSION:-Maintain the configured product setup.}
+Do not edit a shared checkout yourself. Use the setup maintainer commands for every external change.
+
+$MAINTAINER_GUIDANCE
+
+ADVISOR INSTRUCTION:
+$instruction
+
+Return only a concise reply for the advisor. Do not post to the board yourself."
+  if [ -n "$ticket" ]; then
+    prompt="$prompt
+
+The runner will also place your reply on $ticket. Keep it factual, plain, and suitable for the product owner on a phone.
+
+$PLAIN_LANGUAGE_PROMPT"
+  fi
+  reply_file="$instruction_dir/$instruction_id.reply"
+  err_file="$instruction_dir/$instruction_id.err"
+  read -r -a MODEL_ARGV <<< "$MODEL_CLI"
+  log "run start instruction=$instruction_id source=advisor${ticket:+ ticket=$ticket}"
+  set +e
+  (
+    if [ -n "${AGENT_REPO:-}" ] && [ -d "$AGENT_REPO" ]; then cd "$AGENT_REPO"; fi
+    PATH="${AGENT_IDENTITY_PATH:-$PATH}" AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" \
+      AGENT_BOARD_CLI="$BOARD_CLI" AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" \
+      AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" \
+      AGENT_ADHD_SKILL="$ADHD_SKILL" "${MODEL_ARGV[@]}" "$prompt"
+  ) >"$reply_file" 2>"$err_file"
+  rc=$?
+  set -e
+  reply="$(cat "$reply_file" 2>/dev/null)"
+  {
+    printf '%s advisor reply %s:\n' "$(date -Is)" "$instruction_id"
+    printf '%s\n' "$reply"
+    cat "$err_file" 2>/dev/null || true
+  } >> "$LOG"
+  if [ "$rc" -ne 0 ] || [ -z "${reply//[[:space:]]/}" ]; then
+    log "run FAILED instruction=$instruction_id source=advisor exit=$rc; instruction remains queued"
+    return 0
+  fi
+  if [ -n "$ticket" ]; then
+    comment="$(REPLY="$reply" python3 - <<'PYEOF'
+import html
+import os
+import re
+
+text = html.unescape(re.sub(r"<[^>]+>", " ", os.environ["REPLY"]))
+text = text.replace("—", "-").replace("`", "")
+text = re.sub(r"\b(?:HTPR|AGTE)-\d+\b|\bPR\s*#?\s*\d+\b", "the linked work", text, flags=re.I)
+text = re.sub(r"\b[0-9a-f]{7,40}\b", "the latest change", text, flags=re.I)
+text = re.sub(r"\S+\.(?:ts|tsx|py|cjs|mjs)\b", "the changed file", text, flags=re.I)
+text = " ".join(text.split())
+words = text.split()[:55]
+summary = " ".join(words).rstrip(".!? ") or "The instruction completed"
+print("<p><strong>Decision: advisor reply.</strong></p><p>Next: %s.</p>" % html.escape(summary))
+PYEOF
+)"
+    if ! "$BOARD_CLI" comment add "$ticket" --text "$comment" >>"$LOG" 2>&1; then
+      log "advisor reply $instruction_id could not comment on $ticket; instruction remains queued"
+      return 0
+    fi
+  fi
+  rm -f "$instruction_file" "$reply_file" "$err_file"
+  log "run done instruction=$instruction_id source=advisor exit=0"
+  return 0
+}
+
 # push_skill_commits <ref>
 # The mission text tells an agent to fix a skill in the same run that got
 # corrected and commit it there, never open a pull request for it. This is
@@ -582,6 +762,11 @@ log "$SKILLS_LINE"
 if [ "$DRY_RUN" = "yes" ]; then
   echo "agent $AGENT_NAME ($AGENT_ID) on board $BOARD_ID, sections: $WATCH_SECTIONS"
   echo "$SKILLS_LINE"
+fi
+
+check_maintainer_builds
+if run_advisor_instruction; then
+  exit 0
 fi
 
 # Pull-request debt is a hard pickup gate, not a ranking hint. The adapter
@@ -1127,7 +1312,8 @@ Then do the work. Progress and plans are run activity, not ticket comments.
 $PROMPT"
   fi
 
-  if [ "${MANAGER:-off}" = "on" ] && [ "$is_reply_only" = "no" ]; then
+  if { [ "${MANAGER:-off}" = "on" ] || [ "$MAINTAINER" = "on" ]; } \
+     && [ "$is_reply_only" = "no" ]; then
     PROMPT="$PROMPT
 
 MANAGER COMMANDS:
@@ -1138,6 +1324,19 @@ MANAGER COMMANDS:
 - \`agent-template quiet on|off [<slug>|all]\`. Example: "quiet off for qa-1" runs \`agent-template quiet off qa-1\`.
 - \`agent-template feedback --as <slug> --kind bug|change|idea --what \"<summary>\" --got \"<current behavior or context>\" --expected \"<desired behavior>\"\`. Example: "file a toolkit ticket: add a setup report" runs \`agent-template feedback --as $SLUG --kind idea --what \"Add a setup report\" --got \"No setup report exists\" --expected \"Provide a setup report\"\`.
 These commands never change token files, credentials, foreign units, files outside the conf dir, or legacy confs without \`BOARD_ADAPTER\`. After any command, your reply must be exactly the command's result, unchanged."
+  fi
+
+  if [ "$MAINTAINER" = "on" ] && [ "$is_reply_only" = "no" ]; then
+    PROMPT="$PROMPT
+
+$MAINTAINER_GUIDANCE
+
+MAINTAINER COMMANDS:
+- \`agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]\`.
+- \`agent-template build status [id]\` and \`agent-template build list\`.
+- \`agent-template merge <pr-url>\`.
+- \`agent-template update --keep-timers\` after a toolkit build merges.
+After any command, echo its result unchanged."
   fi
 
   PROMPT="$PROMPT

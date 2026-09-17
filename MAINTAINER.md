@@ -46,7 +46,8 @@ board write, rather than falling back to the login in the owner's home config.
 ## Manager access
 
 Manager access is per agent, not per host. Set `MANAGER="on"` only in a trusted
-manager's current-schema conf. Missing or any other value means off.
+manager's current-schema conf. `MAINTAINER="on"` includes the manager controls
+and adds the setup commands below. Missing or any other value means off.
 
 - `agent-template ctl start|stop|status <slug>` controls only
   `agent-board-poll@<slug>.timer` and `.service` for a current-schema conf.
@@ -68,8 +69,53 @@ manager's current-schema conf. Missing or any other value means off.
 - Every accepted or refused call is logged with caller, command, and timestamp
   in `~/.local/state/agent-board-poll/manager-actions.log`.
 
-Runner and chat prompts expose these commands only when `MANAGER="on"`. A chat
-reply after a command must be exactly the command's result.
+Runner and chat prompts expose these commands only when `MANAGER="on"` or
+`MAINTAINER="on"`. A chat reply after a command must be exactly the command's
+result.
+
+## Setup maintainer
+
+Set `MAINTAINER="on"` only for the one agent that owns setup changes. It must
+use a build job for every change to the toolkit, supervisor rules, analytics
+site, app, CLI, or Slack bot. The advisor session queues instructions and does
+not edit those repositories itself.
+
+```sh
+agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]
+agent-template build status [id]
+agent-template build list
+agent-template merge <pr-url>
+agent-template update --keep-timers
+agent-template instruct <slug> <text|-> [--ticket <url>]
+```
+
+`repos.allow` beside the agent conf is CSV with `key,path,github slug,base
+branch`. Build and merge refuse anything outside it. The shipped file contains
+the six approved repositories and is installed only when the host has no
+allowlist, so host policy is never overwritten by an update.
+
+A build writes its guarded prompt and output under
+`~/.local/state/agent-board-poll/<slug>-builds/`, launches a 3 GB systemd user
+unit, and records durable state in `<slug>-builds.json`. The prompt requires a
+scratch worktree, the non-engineer pull request body, green checks, squash
+merge, timer-preserving toolkit update, cleanup, and a report under ten lines.
+`build status` returns the exit marker and the last twelve output lines.
+
+Each tick closes completed records once. Success posts one `Done:` line with
+the pull request URL. Failure posts one plain-language `Decision: build failed:`
+comment. Both go through the agent board wrapper, so quiet mode, comment limits,
+and the plain-language check still apply.
+
+`instruct` is the advisor's only identity-free entry point. It still refuses a
+target without `MAINTAINER="on"`, writes one JSON item under
+`<slug>-instructions/`, and logs the action. The target's next tick runs the
+oldest item with `source=advisor` through its normal model command and prompt
+contract. The reply is kept in the run log and, when `--ticket` is present,
+posted once through the target's board wrapper.
+
+Maintainer prompts require a four-part build spec: Ticket, What, Done when, and
+Guardrails. They forbid direct model-harness launches and answer questions
+about completed work from `build list`, not from memory.
 
 ## Channels
 

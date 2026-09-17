@@ -1,3 +1,15 @@
+## 3.27.0 - 2026-09-17
+
+- AGTE-14 adds a per-agent setup-maintainer gate with allowlisted background
+  builds, durable build status, and green-check-only squash merges.
+- The runner closes finished builds with one agent-authenticated comment and
+  consumes queued advisor instructions as normal runs with `source=advisor`.
+- Maintainer runner and chat prompts require four-part build specs, forbid
+  direct model-harness launches, and report completed work from the build log.
+- Offline coverage verifies allowlist refusal, guarded job recording, status,
+  red-check merge refusal, instruction pickup, completion, and non-maintainer refusal.
+- ACTION: set `MAINTAINER="on"` in `product-bot.conf`, run `agent-template update --keep-timers`, and confirm the dev-1, dev-2, qa-1, and product-bot timer states are unchanged.
+
 ## 3.26.0 - 2026-09-17
 
 - Human questions and direct mentions now become reply-only runs in every

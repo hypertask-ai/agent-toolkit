@@ -445,6 +445,7 @@ WIRING="$WIRING"
 CHAT="$CHAT"
 QUIET="$QUIET"
 MANAGER="off"
+MAINTAINER="off"
 EOF
 )"
 # PR_REPO only when given: an empty PR_REPO="" written to a conf that has

@@ -332,7 +332,7 @@ else
   bad manager-actions-audited "log=$(cat "$TMP/state/agent-board-poll/manager-actions.log")"
 fi
 
-if grep -qF 'if [ "${MANAGER:-off}" = "on" ]' "$ROOT/scripts/agent-board-poll" \
+if grep -qF 'if { [ "${MANAGER:-off}" = "on" ] || [ "$MAINTAINER" = "on" ]; }' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template mode manual|auto [--board <id>]' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template model <slug> <preset>' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template quiet on|off [<slug>|all]' "$ROOT/scripts/agent-board-poll" \

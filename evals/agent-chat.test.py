@@ -24,10 +24,14 @@ with tempfile.TemporaryDirectory() as temporary:
     explicit.write_text(common + 'CHAT_CLI="chat-command --brief"\n')
     manager = temporary / "manager.conf"
     manager.write_text(common + 'MANAGER="on"\n')
+    maintainer = temporary / "maintainer.conf"
+    maintainer.write_text(common + 'MAINTAINER="on"\n')
     assert Agent.from_conf(fallback).model_cli == "model-command --normal"
     assert Agent.from_conf(explicit).model_cli == "chat-command --brief"
     assert Agent.from_conf(fallback).manager is False
+    assert Agent.from_conf(fallback).maintainer is False
     assert Agent.from_conf(manager).manager is True
+    assert Agent.from_conf(maintainer).maintainer is True
     print("PASS agent-chat-command-from-conf")
 
 
@@ -50,6 +54,7 @@ def agent(slug):
 message = {"userName": "Valentin", "text": "stop dev 1"}
 regular_prompt = prompt_for(agent("regular"), message, [])
 manager_prompt = prompt_for(replace(agent("manager"), manager=True), message, [])
+maintainer_prompt = prompt_for(replace(agent("maintainer"), maintainer=True), message, [])
 assert "agent-template ctl" not in regular_prompt
 assert "agent-template delegate" not in regular_prompt
 assert "agent-template ctl start|stop|status <slug>" in manager_prompt
@@ -64,6 +69,14 @@ assert "quiet off for qa-1" in manager_prompt
 assert "file a toolkit ticket:" in manager_prompt
 assert "agent-template mode" not in regular_prompt
 assert "Return exactly the command result unchanged" in manager_prompt
+assert "agent-template build --repo <key>" not in regular_prompt
+assert "agent-template build --repo <key>" not in manager_prompt
+assert "agent-template build --repo <key>" in maintainer_prompt
+assert "agent-template build status [id]" in maintainer_prompt
+assert "agent-template build list" in maintainer_prompt
+assert "agent-template merge <pr-url>" in maintainer_prompt
+assert "agent-template update --keep-timers" in maintainer_prompt
+assert "Never launch a model harness directly" in maintainer_prompt
 print("PASS agent-chat-manager-command-contract")
 
 

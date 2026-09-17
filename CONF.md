@@ -59,4 +59,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `ADVISOR_MAX` | Research calls per run, default 2 when `RESEARCH_CLI` exists. |
 | `CHAT` | `on` enables the host chat lane. |
 | `QUIET` | `on` redirects unmarked comments to run activity and strips board-owner mentions; default `on`. |
-| `MANAGER` | `on` allows `agent-template ctl` and `agent-template delegate`; default `off`. |
+| `MANAGER` | `on` allows the manager control commands; default `off`. |
+| `MAINTAINER` | `on` allows manager controls plus allowlisted build, merge, and advisor-instruction commands; default `off`. |
+
+A maintainer reads `repos.allow` beside its conf. Each CSV row is `key,path,github slug,base branch`; paths and pull requests outside that file are refused. Build history is stored at `~/.local/state/agent-board-poll/<slug>-builds.json`, and queued advisor instructions are stored under `<slug>-instructions/` in the same state directory.

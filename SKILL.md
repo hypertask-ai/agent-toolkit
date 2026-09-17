@@ -467,6 +467,7 @@ See `CONF.md` for the complete schema.
 | `CHAT` | `on` to answer through the host chat daemon, default `on` for non-CLI board agents |
 | `QUIET` | `on` redirects unmarked comments to activity and strips board-owner mentions; default `on` |
 | `MANAGER` | `on` to allow runner control and ticket delegation, default `off` |
+| `MAINTAINER` | `on` to add allowlisted setup builds, merges, and advisor instructions, default `off` |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
 | `EXCLUDE_LABELS` | labels that make a ticket off limits, comma separated |
 | `WORKDIR_MODE` | `repo` (default) runs in `AGENT_REPO`; `per-run` gives each ticket its own checkout |
@@ -482,8 +483,9 @@ See `CONF.md` for the complete schema.
 
 ## Manager agents
 
-`MANAGER="on"` gives that agent the commands below. All other agents are
-refused and do not receive them in runner or chat prompts.
+`MANAGER="on"` gives that agent the commands below. `MAINTAINER="on"` includes
+them. All other agents are refused and do not receive them in runner or chat
+prompts.
 
 ```sh
 agent-template ctl start|stop|status <slug>
@@ -513,6 +515,40 @@ paths outside the configured conf directory, and confs without the
 `BOARD_ADAPTER` schema marker. Delegation also refuses the board owner's
 tickets and userId 6. Every accepted or refused manager action is recorded in
 `~/.local/state/agent-board-poll/manager-actions.log`.
+
+## Setup maintainer
+
+`MAINTAINER="on"` makes one agent the executor for setup changes. Missing or
+any other value is off. Its runner and chat prompts require a build for every
+change to the toolkit, supervisor rules, analytics site, app, CLI, or Slack bot,
+and forbid launching a model harness directly.
+
+```sh
+agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]
+agent-template build status [id]
+agent-template build list
+agent-template merge <pr-url>
+agent-template update --keep-timers
+agent-template instruct <slug> <text|-> [--ticket <url>]
+```
+
+`repos.allow` beside the conf supplies `key,path,github slug,base branch` CSV
+rows. A build outside it is refused. An accepted build writes the standard
+worktree, pull request, check, squash-merge, deployment, cleanup, and reporting
+guardrails into a prompt, starts a memory-capped systemd user job, and records
+its paths and status in `<slug>-builds.json`. Status prints the exit marker and
+twelve output lines; list is the source for answering what the agent did.
+
+The runner checks build records every tick. It posts exactly one `Done:` line
+with the pull request URL on success or one checked `Decision: build failed:`
+comment on failure, then closes the record. `merge` accepts only an allowlisted,
+non-draft pull request whose checks are all green and always uses squash merge.
+
+`instruct` is the advisor session's only setup entry point. It queues JSON under
+`<slug>-instructions/`; the next tick runs the oldest instruction with
+`source=advisor`, no owned ticket, and the normal maintainer prompt. The reply
+is logged and, when bound with `--ticket`, posted once as the agent. A spec has
+four parts: Ticket, What, Done when, and Guardrails.
 
 ## How hard is this ticket
 

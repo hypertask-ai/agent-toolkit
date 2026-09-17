@@ -132,6 +132,7 @@ class Agent:
     api_url: str
     webhook_secret_file: Path | None
     manager: bool = False
+    maintainer: bool = False
 
     @classmethod
     def from_conf(cls, path: Path) -> "Agent | None":
@@ -174,6 +175,7 @@ class Agent:
             api_url=api_base(values),
             webhook_secret_file=Path(secret).expanduser() if secret else None,
             manager=values.get("MANAGER") == "on",
+            maintainer=values.get("MAINTAINER") == "on",
         )
 
     def token(self) -> str:
@@ -457,7 +459,7 @@ def prompt_for(agent: Agent, message: dict[str, Any], history: list[dict[str, An
     manager_brief = ""
     board_rule = "- Never post a ticket comment or make any board write."
     external_rule = "- Do not change files, accounts, connectors, code, or any external system."
-    if agent.manager:
+    if agent.manager or agent.maintainer:
         board_rule = "- Never post a ticket comment or make any board write except through the delegate and feedback commands listed below."
         external_rule = "- Do not change files, accounts, connectors, code, or any external system except through the manager commands listed below."
         manager_brief = f"""
@@ -469,6 +471,18 @@ Manager commands available in this chat:
 - `agent-template quiet on|off [<slug>|all]`. Example: "quiet off for qa-1" runs `agent-template quiet off qa-1`.
 - `agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"`. Example: "file a toolkit ticket: add a setup report" runs `agent-template feedback --as {agent.slug} --kind idea --what "Add a setup report" --got "No setup report exists" --expected "Provide a setup report"`.
 These commands never change token files, credentials, foreign units, files outside the conf dir, or legacy confs without `BOARD_ADAPTER`. These are the only external changes allowed in chat. Return exactly the command result unchanged, with no other text.
+"""
+    if agent.maintainer:
+        external_rule = "- Make setup changes only through the allowlisted maintainer commands below. Never edit a shared checkout or run hax or codex directly."
+        manager_brief += f"""
+Setup maintainer contract:
+- You execute setup changes. The chat and advisor only supply instructions.
+- For every change to the agent toolkit, supervisor rules, analytics site, app, CLI, or Slack bot, write a spec with Ticket, What, Done when, and Guardrails, then run `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]`.
+- Inspect work with `agent-template build status [id]` and `agent-template build list`. Answer "what did you do" from that record.
+- Merge an existing allowlisted pull request only with `agent-template merge <pr-url>`.
+- After a toolkit build merges, deploy it with `agent-template update --keep-timers`.
+- Never launch a model harness directly. Never work around the repository allowlist.
+Return exactly the command result unchanged after a maintainer command.
 """
     return f"""You are {agent.name}. This is a live Hypertask Agent Chat conversation, not ticket work.
 

@@ -1,0 +1,7 @@
+# key,path,github slug,base branch
+vstack,/home/valentin/projects/vstack,valentinyeo/vstack,main
+company-skills,/home/valentin/projects/company-skills,hypertask-ai/company-skills,main
+analytics,/home/valentin/projects/hypertask-analytics,hypertask-ai/analytics,master
+hypertask,/home/valentin/projects/hypertasks,hypertask-ai/hypertasks,staging
+hypertask-mcp,/home/valentin/projects/hypertask-mcp,hypertask-ai/cli-node,main
+ht-slack,/home/valentin/projects/ht-slack,hypertask-ai/slack,master

@@ -42,6 +42,7 @@ UNIT_DIR_EXPLICIT="no"
 DRY_RUN="no"
 NO_HOST_NOTES="no"
 HOST_CONFIG="${AGENT_TEMPLATE_HOST_CONFIG:-$HOME/.config/agent-template/config}"
+AGENT_CONF_DIR="${AGENT_CONFIG_DIR:-$HOME/.config/hypertask-agents}"
 INSTALL_STATE="${AGENT_TEMPLATE_INSTALL_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-template/install-state}"
 
 fail() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
@@ -128,7 +129,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for item in SKILL.md MAINTAINER.md CONF.md VERSION CHANGELOG.md scripts adapters evals repo-skeleton project-template; do
+for item in SKILL.md MAINTAINER.md CONF.md VERSION CHANGELOG.md repos.allow scripts adapters evals repo-skeleton project-template; do
   [ -e "$SRC/$item" ] || fail "$SRC/$item is missing" \
     "run install.sh from inside the template folder in the repo"
 done
@@ -192,6 +193,15 @@ cp -a "$SRC/CONF.md" "$DEST/CONF.md"
 # `agent-template feedback` reports and what a bug report has to name.
 cp -a "$SRC/VERSION" "$DEST/VERSION"
 cp -a "$SRC/CHANGELOG.md" "$DEST/CHANGELOG.md"
+cp -a "$SRC/repos.allow" "$DEST/repos.allow"
+if [ ! -f "$AGENT_CONF_DIR/repos.allow" ]; then
+  mkdir -p "$AGENT_CONF_DIR"
+  cp -a "$SRC/repos.allow" "$AGENT_CONF_DIR/repos.allow"
+  chmod 600 "$AGENT_CONF_DIR/repos.allow"
+  echo "repository allowlist: $AGENT_CONF_DIR/repos.allow"
+else
+  echo "repository allowlist: $AGENT_CONF_DIR/repos.allow (kept existing)"
+fi
 
 # A timer fires every 60s for several agents, any of which may have
 # scripts/agent-board-poll or an adapter open mid-read while this runs. The
@@ -244,7 +254,7 @@ import os
 from pathlib import Path
 
 root = Path(os.environ["DEST"])
-paths = [root / name for name in ("SKILL.md", "MAINTAINER.md", "CONF.md", "VERSION", "CHANGELOG.md")]
+paths = [root / name for name in ("SKILL.md", "MAINTAINER.md", "CONF.md", "VERSION", "CHANGELOG.md", "repos.allow")]
 for name in ("scripts", "adapters", "evals", "repo-skeleton", "project-template"):
     paths.extend(path for path in (root / name).rglob("*") if path.is_file())
 lines = []
