@@ -156,13 +156,10 @@ PYEOF
 # a command line, or a prompt.
 #
 # It also enforces the comment rules a run has to follow, instead of leaving
-# them to the prompt alone: a model that has already decided the ticket
-# needs no action posted the same "Nothing from you." comment three times in
-# ten minutes (20:37, 20:44, 20:47) because nothing in the prompt can make it
-# check what it already said. This checks for real: same first line already
-# posted by this agent, or three comments already on this ticket, refuses
-# the call instead of forwarding it, and says why on stderr and in this
-# agent's own tick log, never on the ticket.
+# them to the prompt alone. A near-duplicate add updates the agent's recent
+# comment in place, and a fourth comment on the same UTC day is refused. Both
+# --text and --file calls pass through these checks, so scheduled tools cannot
+# bypass the wrapper used by model runs.
 adapter_install_board_cli() {
   local slug="$1" token_file="$2" dest="$3" agent_name="${4:-}"
   local agent_id="${5:-}" board_ids="${6:-}"
@@ -215,12 +212,17 @@ print(project.get("ownerId") or (project.get("owner") or {}).get("id") or "")
 # can identify the ticket and enforce its 24-hour ledger.
 if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "update" ] && [ -n "\${3:-}" ]; then
   TEXT=""
+  FILE=""
   args=("\$@")
   for ((i = 0; i < \${#args[@]}; i++)); do
     case "\${args[\$i]}" in
       --text|--body) TEXT="\${args[\$((i + 1))]:-}" ;;
+      --file) FILE="\${args[\$((i + 1))]:-}" ;;
     esac
   done
+  if [ -z "\$TEXT" ] && [ -n "\$FILE" ] && [ -r "\$FILE" ]; then
+    TEXT="\$(cat "\$FILE")"
+  fi
   if [ -n "\$TEXT" ]; then
     OWNER_IDS="\$(_board_owner_ids)"
     if TEXT="\$TEXT" OWNER_IDS="\$OWNER_IDS" python3 -c '
@@ -238,12 +240,17 @@ fi
 if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
   REF="\$3"
   TEXT=""
+  FILE=""
   args=("\$@")
   for ((i = 0; i < \${#args[@]}; i++)); do
     case "\${args[\$i]}" in
       --text|--body) TEXT="\${args[\$((i + 1))]:-}" ;;
+      --file) FILE="\${args[\$((i + 1))]:-}" ;;
     esac
   done
+  if [ -z "\$TEXT" ] && [ -n "\$FILE" ] && [ -r "\$FILE" ]; then
+    TEXT="\$(cat "\$FILE")"
+  fi
   if [ -n "\$TEXT" ]; then
     mkdir -p "\$(dirname "\$OWNER_MENTIONS")" 2>/dev/null || true
     touch "\$OWNER_MENTIONS"
@@ -254,21 +261,11 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
     VERDICT="\$(EXISTING="\$EXISTING" NEW_TEXT="\$TEXT" AGENT_NAME="\$AGENT_NAME" \
       AGENT_ID="\$AGENT_ID" OWNER_IDS="\$OWNER_IDS" REF="\$REF" \
       OWNER_MENTIONS="\$OWNER_MENTIONS" NOW="\$(date +%s)" python3 -c '
-import datetime, json, os, re
+import datetime, html, json, os, re
 
-def first_line(html):
-    # The bold lead, not the whole comment: "Nothing from you." said three
-    # times with different filler after it is still the same reply. A
-    # leading <strong>/<b> is the bold-lead convention every prompt in this
-    # template uses; fall back to the first sentence when there is none.
-    stripped = html.lstrip()
-    lead = re.match(r"^\s*<(strong|b)[^>]*>(.*?)</\1>", stripped, re.IGNORECASE | re.DOTALL)
-    if lead:
-        text = re.sub(r"<[^>]+>", " ", lead.group(2))
-    else:
-        text = re.sub(r"<[^>]+>", " ", stripped)
-        text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
-    return " ".join(text.split())[:80].strip().casefold()
+def signature(value):
+    text = html.unescape(re.sub(r"<[^>]+>", " ", value))
+    return " ".join(text.split()).casefold()[:40]
 
 def author_of(c):
     who = c.get("agent") or c.get("creator") or c.get("user") or {}
@@ -285,12 +282,12 @@ def is_mine(c):
 def mention_ids(text):
     return set(re.findall(r"data-label\s*=\s*[^>]*?name-([A-Za-z0-9_-]+)", text, re.I))
 
-def created_epoch(c):
+def created_at(c):
     value = str(c.get("createdAt") or "")
     try:
-        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(datetime.timezone.utc)
     except ValueError:
-        return 0
+        return None
 
 try:
     comments = json.loads(os.environ["EXISTING"]).get("comments") or []
@@ -302,16 +299,26 @@ new_text = os.environ["NEW_TEXT"]
 new_mentions = mention_ids(new_text)
 new_owner_mention = bool(new_mentions & owner_ids)
 now = int(os.environ["NOW"])
-
-mine = []
+now_at = datetime.datetime.fromtimestamp(now, datetime.timezone.utc)
+new_signature = signature(new_text)
+recent_duplicate = None
+today_count = 0
 recent_owner_mention = False
 for c in comments:
     if not is_mine(c):
         continue
     text = c.get("text") or c.get("commentText") or c.get("comment") or c.get("html") or ""
-    mine.append(first_line(text))
-    if now - created_epoch(c) < 86400 and mention_ids(text) & owner_ids:
-        recent_owner_mention = True
+    when = created_at(c)
+    if when and when.date() == now_at.date():
+        today_count += 1
+    age = now - when.timestamp() if when else 86401
+    if 0 <= age < 86400:
+        if mention_ids(text) & owner_ids:
+            recent_owner_mention = True
+        if new_signature and signature(text) == new_signature and c.get("id") is not None:
+            candidate = (when, str(c.get("id")))
+            if recent_duplicate is None or candidate > recent_duplicate:
+                recent_duplicate = candidate
 
 try:
     with open(os.environ["OWNER_MENTIONS"], encoding="utf-8") as handle:
@@ -322,14 +329,13 @@ try:
 except (OSError, ValueError):
     pass
 
-new_first = first_line(new_text)
 if new_mentions and not owner_ids:
     print("OWNER_UNKNOWN")
 elif new_owner_mention and recent_owner_mention:
     print("OWNER")
-elif new_first and new_first in mine:
-    print("DUP")
-elif len(mine) >= 3:
+elif recent_duplicate:
+    print("UPDATE:" + recent_duplicate[1])
+elif today_count >= 3:
     print("CAP")
 elif new_owner_mention:
     print("OK_OWNER")
@@ -343,11 +349,19 @@ else:
       OWNER_UNKNOWN)
         _comment_cap_note "owner-mention budget: comment add refused on \$REF because the board owner could not be verified"
         exit 0 ;;
-      DUP)
-        _comment_cap_note "comment add refused on \$REF: this agent already has a comment starting the same way, not posting it again"
-        exit 0 ;;
+      UPDATE:*)
+        UPDATE_ID="\${VERDICT#UPDATE:}"
+        if OUT="\$(hypertask --token "\$TOKEN" comment update "\$UPDATE_ID" --text "\$TEXT")"; then
+          _comment_cap_note "comment dedupe on \$REF: updated near-identical comment \$UPDATE_ID instead of posting a new one"
+          printf '%s\n' "\$OUT"
+          exit 0
+        else
+          RC=\$?
+          printf '%s\n' "\$OUT"
+          exit "\$RC"
+        fi ;;
       CAP)
-        _comment_cap_note "comment add refused on \$REF: cap reached (3 comments already on this ticket), ending this run's posting"
+        _comment_cap_note "comment add refused on \$REF: daily cap reached (3 agent comments on this ticket today UTC)"
         exit 0 ;;
     esac
     # Posted for real: run it directly (not exec) so this script can look up

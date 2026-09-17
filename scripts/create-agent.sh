@@ -491,6 +491,8 @@ esac
 
 # ---------- 5. acceptance ----------
 echo
+echo "Comment rule: post a reminder or status once, then edit it with 'hypertask comment update <id>'; never re-post it. One reminder and three total comments per ticket per day, unless a human writes in between. A due-date countdown is one edited comment."
+echo
 echo "=== check before you say done ==="
 cat <<EOF
   [ ] $CONF_FILE is 0600 and names the right board, sections and skills index

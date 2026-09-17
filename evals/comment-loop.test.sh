@@ -37,6 +37,7 @@ cat > "$TMP/bin/hypertask" <<'EOF'
 case " $* " in
   *' --json project show '*) printf '{"project":{"ownerId":6}}\n' ;;
   *' --json comment list '*) cat "${MECH_COMMENTS:-/dev/null}" ;;
+  *' comment update '*) printf '%s\n' "$*" >> "$MECH_UPDATES"; printf 'updated\n' ;;
   *' comment add '*) printf 'post\n' >> "$MECH_POSTS"; printf 'posted\n' ;;
   *) printf '{}\n' ;;
 esac
@@ -127,6 +128,21 @@ if grep -qF 'You may @mention the board owner at most once on this ticket in any
 else
   bad owner-mention-prompt-contract 'the model prompt omitted the owner-mention budget'
 fi
+if grep -qF 'Post a reminder or status line once, then edit that comment in place' "$TMP/prompt" \
+   && grep -qF 'at most one reminder comment per ticket per day' "$TMP/prompt" \
+   && grep -qF 'at most three comments total per ticket per day unless a human wrote in between' "$TMP/prompt" \
+   && grep -qF 'A due-date countdown is one comment that you edit' "$TMP/prompt"; then
+  ok reminder-prompt-contract 'every run receives the reminder and daily comment contract'
+else
+  bad reminder-prompt-contract 'the model prompt omitted the reminder or daily comment contract'
+fi
+if grep -qF 'A due-date countdown is one edited comment.' "$ROOT/SKILL.md" \
+   && grep -qF 'A due-date countdown is one edited comment.' "$ROOT/project-template/AGENTS.md" \
+   && grep -qF 'Comment rule: post a reminder or status once' "$ROOT/scripts/create-agent.sh"; then
+  ok reminder-setup-contract 'the skill, generated brief, and setup output state the rule'
+else
+  bad reminder-setup-contract 'one setup surface omitted the reminder contract'
+fi
 
 # shellcheck disable=SC1090
 . "$ROOT/adapters/hypertask/adapter.sh"
@@ -148,6 +164,43 @@ if [ "$posts" -eq 1 ] \
   ok owner-mention-mechanical-budget 'the wrapper refuses and logs owner-mention budget bypasses'
 else
   bad owner-mention-mechanical-budget "posts=$posts add=$(cat "$TMP/second.err") update=$(cat "$TMP/update.err")"
+fi
+
+MECH_POSTS="$TMP/dedupe-posts"
+MECH_UPDATES="$TMP/dedupe-updates"
+export MECH_POSTS MECH_UPDATES
+touch "$MECH_POSTS" "$MECH_UPDATES"
+adapter_install_board_cli noise-test "$TMP/token" "$TMP/noise-board" "Test Bot" agent-1 1
+now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+cat > "$TMP/mechanical-comments.json" <<EOF
+{"comments":[{"id":41,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p>Status reminder for the filing deadline on 22 September.</p><p>Old detail.</p>"}]}
+EOF
+printf '<p>Status reminder for the filing deadline on 22 September.</p><p>New detail.</p>\n' > "$TMP/reminder.html"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/noise-board" comment add TEST-1 --file "$TMP/reminder.html" >"$TMP/dedupe.out" 2>"$TMP/dedupe.err"
+if [ ! -s "$MECH_POSTS" ] \
+   && grep -qF 'comment update 41 --text' "$MECH_UPDATES" \
+   && grep -qF 'updated near-identical comment 41 instead of posting a new one' "$TMP/dedupe.err"; then
+  ok near-duplicate-updates-in-place 'a file-backed near-duplicate updates the recent agent comment'
+else
+  bad near-duplicate-updates-in-place "posts=$(cat "$MECH_POSTS") updates=$(cat "$MECH_UPDATES") error=$(cat "$TMP/dedupe.err")"
+fi
+
+: > "$MECH_POSTS"
+: > "$MECH_UPDATES"
+cat > "$TMP/mechanical-comments.json" <<EOF
+{"comments":[
+  {"id":51,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p>First distinct update with enough unique text.</p>"},
+  {"id":52,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p>Second distinct update with enough unique text.</p>"},
+  {"id":53,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p>Third distinct update with enough unique text.</p>"}
+]}
+EOF
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/noise-board" comment add TEST-1 --text '<p>Fourth distinct update with enough unique text.</p>' >"$TMP/cap.out" 2>"$TMP/cap.err"
+if [ ! -s "$MECH_POSTS" ] \
+   && grep -qF 'daily cap reached (3 agent comments on this ticket today UTC)' "$TMP/cap.err" \
+   && grep -qF 'daily cap reached' "$TMP/state/agent-board-poll/noise-test.log"; then
+  ok daily-comment-cap 'a fourth agent comment in one UTC day is refused and logged'
+else
+  bad daily-comment-cap "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/cap.err")"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

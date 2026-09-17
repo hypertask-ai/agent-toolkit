@@ -110,6 +110,12 @@ Claude: [runs the script with --yes] ... FP CRO Bot picked up the test ticket
    the timer's state. An agent nobody has seen do one piece of work is not
    finished, and saying so plainly beats a green checklist.
 
+Every setup must tell the bot and the person creating it the comment contract.
+A reminder or status line is posted once and then edited in place with
+`hypertask comment update <id>`, never re-posted. A bot posts at most one
+reminder per ticket per day and at most three comments per ticket per day unless
+a human writes in between. A due-date countdown is one edited comment.
+
 ## The three wiring modes
 
 | Mode | What it needs | What you get | When to pick it |

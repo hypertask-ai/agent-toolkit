@@ -1,3 +1,15 @@
+## 3.21.6 - 2026-09-17
+
+- Setup guidance, generated briefs, and every runner prompt now require reminder
+  and status comments to be edited in place, with one reminder and three total
+  comments per ticket per day unless a human replies.
+- The board wrapper now reads file-backed comment bodies, updates a matching
+  recent comment instead of adding it, and logs a three-comment UTC daily cap.
+- Focused coverage verifies the prompt and setup contract, file-backed
+  near-duplicate updates, and the daily cap.
+- ACTION: run `agent-template update` on bot hosts so scheduled reminders use
+  refreshed wrappers and stop creating duplicate ticket comments.
+
 ## 3.21.5 - 2026-09-16
 
 - Comment candidates now reject the current agent's identity in both owned-reply

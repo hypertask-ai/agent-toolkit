@@ -1057,6 +1057,8 @@ $PROMPT"
 
   PROMPT="$PROMPT
 
+COMMENT CONTRACT: Post a reminder or status line once, then edit that comment in place with \`$BOARD_CLI comment update <id>\`; never re-post it. Post at most one reminder comment per ticket per day and at most three comments total per ticket per day unless a human wrote in between. A due-date countdown is one comment that you edit, not a series of new comments. The board wrapper updates near-duplicates and logs a refused fourth daily comment outside the ticket.
+
 OWNER-MENTION BUDGET: You may @mention the board owner at most once on this ticket in any 24-hour period. Before mentioning the owner, read the recent ticket comments. If this agent already mentioned the owner in the last 24 hours, write the update without that mention and do not try the mention again. The board wrapper enforces this limit mechanically and logs a refused second mention outside the ticket."
 
   RUN_DIR="${AGENT_REPO:-}"
