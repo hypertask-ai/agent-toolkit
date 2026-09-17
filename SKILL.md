@@ -542,14 +542,19 @@ twelve output lines; list is the source for answering what the agent did.
 
 The runner checks build records every tick. It posts exactly one `Done:` line
 with the pull request URL on success or one checked `Decision: build failed:`
-comment on failure, then closes the record. `merge` accepts only an allowlisted,
+comment on failure, then closes the record. Ticket URLs are resolved through the
+board adapter before posting. Comment failures stop after two attempts and log
+the command, exit code, and stderr. `merge` accepts only an allowlisted,
 non-draft pull request whose checks are all green and always uses squash merge.
 
 `instruct` is the advisor session's only setup entry point. It queues JSON under
-`<slug>-instructions/`; the next tick runs the oldest instruction with
-`source=advisor`, no owned ticket, and the normal maintainer prompt. The reply
-is logged and, when bound with `--ticket`, posted once as the agent. A spec has
-four parts: Ticket, What, Done when, and Guardrails.
+`<slug>-instructions/`; the next tick launches the oldest instruction in a
+unique transient systemd unit with `source=advisor`, no owned ticket, and the
+normal maintainer prompt, then returns. A later tick reads the result, logs the
+reply, posts it when bound with `--ticket`, and removes the state. Quiet-mode
+prefixed replies are posted verbatim. Running instructions and builds do not
+block reply-only owner questions on later ticks. A spec has four parts: Ticket,
+What, Done when, and Guardrails.
 
 ## How hard is this ticket
 

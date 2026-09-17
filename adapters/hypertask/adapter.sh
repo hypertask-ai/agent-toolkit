@@ -246,6 +246,7 @@ AGENT_NAME="$agent_name"
 AGENT_ID="$agent_id"
 BOARD_IDS="$board_ids"
 QUIET="$quiet"
+VERBATIM="\${AGENT_COMMENT_VERBATIM:-no}"
 RUN_LOG="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.log"
 POSTED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.posted-comments"
 OWNER_MENTIONS="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.owner-mentions"
@@ -456,14 +457,16 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
   if [ -n "\$TEXT" ]; then
     ORIGINAL_TEXT="\$TEXT"
     OWNER_IDS="\$(_board_owner_ids)"
-    if [ "\$QUIET" = "on" ]; then
+    if [ "\$QUIET" = "on" ] && [ "\$VERBATIM" != "yes" ]; then
       TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
       if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
         _comment_cap_note "quiet mode: stripped board-owner mention from comment on \$REF"
       fi
     fi
     _allowed_comment "\$TEXT" || exit 0
-    _enforce_plain_comment "\$TEXT" || exit 0
+    if [ "\$VERBATIM" != "yes" ]; then
+      _enforce_plain_comment "\$TEXT" || exit 0
+    fi
     mkdir -p "\$(dirname "\$OWNER_MENTIONS")" 2>/dev/null || true
     touch "\$OWNER_MENTIONS"
     exec 9>>"\$OWNER_MENTIONS.lock"
@@ -554,6 +557,9 @@ elif new_owner_mention:
 else:
     print("OK")
 ')"
+    if [ "\$VERBATIM" = "yes" ] && [[ "\$VERDICT" = UPDATE:* ]]; then
+      VERDICT="OK"
+    fi
     case "\$VERDICT" in
       OWNER)
         _comment_cap_note "owner-mention budget: comment add refused on \$REF because this agent already @mentioned the board owner in the last 24 hours"
@@ -712,6 +718,32 @@ for task in doc.get("tasks") or []:
     }))
 '
   done
+}
+
+# adapter_ticket_ref <token-file> <ticket-ref-or-url>
+# URLs are resolved through the same normalized task rows used by ticket pickup,
+# so project ids never become a second hard-coded prefix map in core.
+adapter_ticket_ref() {
+  local token_file="$1" ticket="$2" board_id rows
+  if [[ ! "$ticket" =~ ^https://app\.hypertask\.ai/detail/project-([0-9]+)/([0-9]+)$ ]]; then
+    printf '%s' "$ticket"
+    return 0
+  fi
+  board_id="${BASH_REMATCH[1]}"
+  rows="$(adapter_list_candidates "$token_file" "$board_id" "*")" || return 1
+  printf '%s\n' "$rows" | TICKET_URL="$ticket" python3 -c '
+import json, os, re, sys
+wanted = os.environ["TICKET_URL"]
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    ref = str(row.get("ref") or "")
+    if row.get("url") == wanted and re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-[0-9]+", ref):
+        print(ref)
+        raise SystemExit(0)
+raise SystemExit(1)
+'
 }
 
 # adapter_ticket_comments <token-file> <task-id> <board-id>

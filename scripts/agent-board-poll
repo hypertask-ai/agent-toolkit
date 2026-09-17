@@ -37,12 +37,14 @@ usage() {
 
 DRY_RUN="no"
 EXPLAIN="no"
+INSTRUCTION_WORKER=""
 SLUG=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --once) shift ;;   # accepted for readability; every run is one tick
     --dry-run) DRY_RUN="yes"; shift ;;
     --explain) EXPLAIN="yes"; shift ;;
+    --instruction-worker) INSTRUCTION_WORKER="${2:?--instruction-worker needs a state file}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown option $1" "run agent-board-poll --help for the accepted flags" ;;
     *) [ -z "$SLUG" ] || die "more than one slug given ($SLUG and $1)" \
@@ -220,6 +222,39 @@ if [ -n "${PROMPT_FILE:-}" ]; then
     "write that file, or drop the key to fall back to the board's own prompt"
 fi
 
+run_instruction_worker() {
+  local state_file="$1" fields prompt_file reply_file err_file result_file rc
+  fields="$(python3 - "$state_file" <<'PYEOF'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+for key in ("prompt", "reply", "err", "result"):
+    print(row.get(key) or "")
+PYEOF
+)"
+  { IFS= read -r prompt_file; IFS= read -r reply_file; IFS= read -r err_file; IFS= read -r result_file; } <<< "$fields"
+  [ -r "$prompt_file" ] && [ -n "$reply_file" ] && [ -n "$err_file" ] && [ -n "$result_file" ] \
+    || die "advisor instruction state is incomplete in $state_file" "leave the state file for the next tick to report"
+  read -r -a MODEL_ARGV <<< "$MODEL_CLI"
+  set +e
+  (
+    if [ -n "${AGENT_REPO:-}" ] && [ -d "$AGENT_REPO" ]; then cd "$AGENT_REPO"; fi
+    PATH="${AGENT_IDENTITY_PATH:-$PATH}" AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" \
+      AGENT_BOARD_CLI="$BOARD_CLI" AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" \
+      AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" \
+      AGENT_ADHD_SKILL="$ADHD_SKILL" "${MODEL_ARGV[@]}" "$(cat "$prompt_file")"
+  ) >"$reply_file" 2>"$err_file"
+  rc=$?
+  set -e
+  printf '%s\n' "$rc" > "$result_file.new"
+  mv "$result_file.new" "$result_file"
+  return "$rc"
+}
+
+if [ -n "$INSTRUCTION_WORKER" ]; then
+  run_instruction_worker "$INSTRUCTION_WORKER"
+  exit $?
+fi
+
 core_load_adapter "$BOARD_ADAPTER"
 adapter_require_tools
 if [ "$BOARD_ADAPTER" = "hypertask" ]; then
@@ -383,6 +418,52 @@ log() {
   if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
 }
 
+# post_ticket_comment <ticket-ref-or-url> <text|file> <payload>
+# Completion comments get two total attempts. A caller closes its durable state
+# after failure so a later tick cannot silently turn that cap into an endless retry.
+post_ticket_comment() {
+  local ticket="$1" mode="$2" payload="$3" ref attempt rc err_file
+  if ! ref="$(adapter_ticket_ref "$TOKEN_FILE" "$ticket" 2>>"$LOG")" || [ -z "$ref" ]; then
+    log "comment add failed: could not resolve $ticket to a ticket reference through $BOARD_ADAPTER"
+    return 1
+  fi
+  if [[ "$ref" =~ ^https?:// ]]; then
+    log "comment add refused: adapter returned a URL instead of a ticket reference for $ticket"
+    return 1
+  fi
+  err_file="$(mktemp "$STATE_DIR/.comment-error.XXXXXX")"
+  for attempt in 1 2; do
+    if [ "$mode" = "file" ]; then
+      if AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$ref" --file "$payload" >>"$LOG" 2>"$err_file"; then
+        rm -f "$err_file"
+        return 0
+      else
+        rc=$?
+      fi
+    else
+      if "$BOARD_CLI" comment add "$ref" --text "$payload" >>"$LOG" 2>"$err_file"; then
+        rm -f "$err_file"
+        return 0
+      else
+        rc=$?
+      fi
+    fi
+    {
+      printf '%s comment add failed: attempt=%s command=' "$(date -Is)" "$attempt"
+      if [ "$mode" = "file" ]; then
+        printf '%q ' AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$ref" --file "$payload"
+      else
+        printf '%q ' "$BOARD_CLI" comment add "$ref" --text "$payload"
+      fi
+      printf 'exit=%s stderr follows\n' "$rc"
+      cat "$err_file"
+      printf '\n'
+    } >> "$LOG"
+  done
+  rm -f "$err_file"
+  return 1
+}
+
 check_maintainer_builds() {
   local state="$STATE_DIR/$SLUG-builds.json" row build_id ticket out_file rc pr message status
   [ "$MAINTAINER" = "on" ] && [ -f "$state" ] || return 0
@@ -404,9 +485,9 @@ check_maintainer_builds() {
       echo "would close build $build_id with rc=$rc and one comment on $ticket"
       continue
     fi
-    if ! "$BOARD_CLI" comment add "$ticket" --text "$message" >>"$LOG" 2>&1; then
-      log "build completion $build_id could not comment on $ticket; it remains open"
-      continue
+    if ! post_ticket_comment "$ticket" text "$message"; then
+      status="comment-failed"
+      log "build completion $build_id could not comment on $ticket after 2 attempts; no further comment will be tried"
     fi
     exec 7>>"$state.lock"
     flock 7
@@ -459,8 +540,9 @@ PYEOF
 }
 
 run_advisor_instruction() {
-  local instruction_dir="$STATE_DIR/$SLUG-instructions" files instruction_file row
-  local instruction_id instruction ticket prompt reply_file err_file rc reply comment
+  local instruction_dir="$STATE_DIR/$SLUG-instructions" files instruction_file row status
+  local instruction_id instruction ticket prompt prompt_file reply_file err_file result_file
+  local unit unit_state unit_state_rc launch_err launch_rc rc reply first_line comment comment_status
   [ "$MAINTAINER" = "on" ] && [ -d "$instruction_dir" ] || return 1
   shopt -s nullglob
   files=("$instruction_dir"/*.json)
@@ -471,10 +553,94 @@ run_advisor_instruction() {
   instruction_id="$(row_field "$row" id)"
   instruction="$(row_field "$row" instruction)"
   ticket="$(row_field "$row" ticket)"
+  status="$(row_field "$row" status)"
+
   if [ "$DRY_RUN" = "yes" ]; then
-    echo "would run instruction $instruction_id source=advisor${ticket:+ ticket=$ticket}; nothing was started."
+    if [ "$status" = "running" ]; then
+      echo "instruction $instruction_id source=advisor is already running; nothing was started."
+    else
+      echo "would run instruction $instruction_id source=advisor${ticket:+ ticket=$ticket}; nothing was started."
+    fi
     return 0
   fi
+
+  if [ "$status" = "running" ]; then
+    unit="$(row_field "$row" unit)"
+    reply_file="$(row_field "$row" reply)"
+    err_file="$(row_field "$row" err)"
+    result_file="$(row_field "$row" result)"
+    set +e
+    unit_state="$(systemctl --user show "$unit" \
+      --property=LoadState --property=ActiveState --property=SubState \
+      --property=Result --property=ExecMainStatus 2>&1)"
+    unit_state_rc=$?
+    set -e
+    log "instruction $instruction_id unit=$unit systemd_rc=$unit_state_rc state=$(printf '%s' "$unit_state" | tr '\n' ' ')"
+    if [ -s "$result_file" ]; then
+      read -r rc < "$result_file" || rc=125
+    elif [ "$unit_state_rc" -eq 0 ]; then
+      case "$unit_state" in
+        *'ActiveState=active'*|*'ActiveState=activating'*|*'SubState=running'*) return 1 ;;
+      esac
+      rc="$(printf '%s\n' "$unit_state" | sed -n 's/^ExecMainStatus=//p' | tail -n1)"
+      [ -n "$rc" ] || rc=125
+    else
+      return 1
+    fi
+    [[ "$rc" =~ ^[0-9]+$ ]] || rc=125
+    reply="$(cat "$reply_file" 2>/dev/null)"
+    {
+      printf '%s advisor reply %s:\n' "$(date -Is)" "$instruction_id"
+      cat "$reply_file" 2>/dev/null || true
+      printf '\n'
+      cat "$err_file" 2>/dev/null || true
+    } >> "$LOG"
+    if [ "$rc" -ne 0 ] || [ -z "${reply//[[:space:]]/}" ]; then
+      log "run FAILED instruction=$instruction_id source=advisor exit=$rc; unit completion recorded and state cleaned"
+      rm -f "$instruction_file" "$(row_field "$row" prompt)" "$reply_file" "$err_file" "$result_file"
+      return 1
+    fi
+
+    comment_status="posted"
+    if [ -n "$ticket" ]; then
+      IFS= read -r first_line < "$reply_file" || true
+      case "$first_line" in
+        Question:*|Decision:*|Handoff:*|Done:*)
+          if ! post_ticket_comment "$ticket" file "$reply_file"; then comment_status="failed"; fi
+          ;;
+        *)
+          comment="$(REPLY="$reply" python3 - <<'PYEOF'
+import html
+import os
+import re
+
+text = html.unescape(re.sub(r"<[^>]+>", " ", os.environ["REPLY"]))
+text = text.replace("—", "-").replace("`", "")
+text = re.sub(r"\b(?:HTPR|AGTE)-\d+\b|\bPR\s*#?\s*\d+\b", "the linked work", text, flags=re.I)
+text = re.sub(r"\b[0-9a-f]{7,40}\b", "the latest change", text, flags=re.I)
+text = re.sub(r"\S+\.(?:ts|tsx|py|cjs|mjs)\b", "the changed file", text, flags=re.I)
+text = " ".join(text.split())
+words = text.split()[:55]
+summary = " ".join(words).rstrip(".!? ") or "The instruction completed"
+print("<p><strong>Decision: advisor reply.</strong></p><p>Next: %s.</p>" % html.escape(summary))
+PYEOF
+)"
+          if ! post_ticket_comment "$ticket" text "$comment"; then comment_status="failed"; fi
+          ;;
+      esac
+    fi
+    if [ "$comment_status" = "failed" ]; then
+      log "advisor reply $instruction_id could not comment on $ticket after 2 attempts; no further comment will be tried"
+    fi
+    rm -f "$instruction_file" "$(row_field "$row" prompt)" "$reply_file" "$err_file" "$result_file"
+    log "run done instruction=$instruction_id source=advisor exit=0 comment=$comment_status"
+    return 1
+  fi
+
+  command -v systemd-run >/dev/null 2>&1 || {
+    log "instruction $instruction_id could not launch: systemd-run is not available"
+    return 0
+  }
   prompt="Read $SKILLS_INDEX_SENTENCE first, in that order, and follow the applicable skills.
 
 You are $AGENT_NAME. This run has source=advisor and no board ticket of its own.
@@ -494,54 +660,66 @@ The runner will also place your reply on $ticket. Keep it factual, plain, and su
 
 $PLAIN_LANGUAGE_PROMPT"
   fi
+  prompt_file="$instruction_dir/$instruction_id.prompt"
   reply_file="$instruction_dir/$instruction_id.reply"
   err_file="$instruction_dir/$instruction_id.err"
-  read -r -a MODEL_ARGV <<< "$MODEL_CLI"
-  log "run start instruction=$instruction_id source=advisor${ticket:+ ticket=$ticket}"
-  set +e
-  (
-    if [ -n "${AGENT_REPO:-}" ] && [ -d "$AGENT_REPO" ]; then cd "$AGENT_REPO"; fi
-    PATH="${AGENT_IDENTITY_PATH:-$PATH}" AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" \
-      AGENT_BOARD_CLI="$BOARD_CLI" AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" \
-      AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" \
-      AGENT_ADHD_SKILL="$ADHD_SKILL" "${MODEL_ARGV[@]}" "$prompt"
-  ) >"$reply_file" 2>"$err_file"
-  rc=$?
-  set -e
-  reply="$(cat "$reply_file" 2>/dev/null)"
-  {
-    printf '%s advisor reply %s:\n' "$(date -Is)" "$instruction_id"
-    printf '%s\n' "$reply"
-    cat "$err_file" 2>/dev/null || true
-  } >> "$LOG"
-  if [ "$rc" -ne 0 ] || [ -z "${reply//[[:space:]]/}" ]; then
-    log "run FAILED instruction=$instruction_id source=advisor exit=$rc; instruction remains queued"
-    return 0
-  fi
-  if [ -n "$ticket" ]; then
-    comment="$(REPLY="$reply" python3 - <<'PYEOF'
-import html
+  result_file="$instruction_dir/$instruction_id.result"
+  launch_err="$instruction_dir/$instruction_id.launch.err"
+  unit="advisor-$SLUG-${instruction_id#advisor-}"
+  unit="${unit//[^A-Za-z0-9_.@-]/-}"
+  printf '%s' "$prompt" > "$prompt_file"
+  INSTRUCTION_UNIT="$unit" PROMPT_FILE="$prompt_file" REPLY_FILE="$reply_file" \
+    ERR_FILE="$err_file" RESULT_FILE="$result_file" STARTED="$(date -Is)" \
+    python3 - "$instruction_file" <<'PYEOF'
+import json
 import os
-import re
+import sys
 
-text = html.unescape(re.sub(r"<[^>]+>", " ", os.environ["REPLY"]))
-text = text.replace("—", "-").replace("`", "")
-text = re.sub(r"\b(?:HTPR|AGTE)-\d+\b|\bPR\s*#?\s*\d+\b", "the linked work", text, flags=re.I)
-text = re.sub(r"\b[0-9a-f]{7,40}\b", "the latest change", text, flags=re.I)
-text = re.sub(r"\S+\.(?:ts|tsx|py|cjs|mjs)\b", "the changed file", text, flags=re.I)
-text = " ".join(text.split())
-words = text.split()[:55]
-summary = " ".join(words).rstrip(".!? ") or "The instruction completed"
-print("<p><strong>Decision: advisor reply.</strong></p><p>Next: %s.</p>" % html.escape(summary))
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row.update(status="running", unit=os.environ["INSTRUCTION_UNIT"],
+           prompt=os.environ["PROMPT_FILE"], reply=os.environ["REPLY_FILE"],
+           err=os.environ["ERR_FILE"], result=os.environ["RESULT_FILE"],
+           started=os.environ["STARTED"])
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+    handle.write("\n")
+os.replace(temporary, path)
 PYEOF
-)"
-    if ! "$BOARD_CLI" comment add "$ticket" --text "$comment" >>"$LOG" 2>&1; then
-      log "advisor reply $instruction_id could not comment on $ticket; instruction remains queued"
-      return 0
-    fi
+  log "run start instruction=$instruction_id source=advisor unit=$unit${ticket:+ ticket=$ticket}"
+  set +e
+  systemd-run --user --unit="$unit" -p MemoryMax=3G --setenv=PATH="$PATH" \
+    "$SELF" --instruction-worker "$instruction_file" "$SLUG" >/dev/null 2>"$launch_err"
+  launch_rc=$?
+  set -e
+  if [ "$launch_rc" -ne 0 ]; then
+    {
+      printf '%s instruction launch failed: command=' "$(date -Is)"
+      printf '%q ' systemd-run --user --unit="$unit" -p MemoryMax=3G --setenv=PATH="$PATH" \
+        "$SELF" --instruction-worker "$instruction_file" "$SLUG"
+      printf 'exit=%s stderr follows\n' "$launch_rc"
+      cat "$launch_err"
+      printf '\n'
+    } >> "$LOG"
+    python3 - "$instruction_file" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+for key in ("unit", "prompt", "reply", "err", "result", "started"):
+    row.pop(key, None)
+row.pop("status", None)
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+    rm -f "$prompt_file" "$launch_err"
+  else
+    rm -f "$launch_err"
+    log "instruction $instruction_id detached in $unit; this tick will not wait for it"
   fi
-  rm -f "$instruction_file" "$reply_file" "$err_file"
-  log "run done instruction=$instruction_id source=advisor exit=0"
   return 0
 }
 
@@ -785,10 +963,10 @@ if [ "$DRY_RUN" = "yes" ]; then
   echo "$SKILLS_LINE"
 fi
 
-check_maintainer_builds
 if run_advisor_instruction; then
   exit 0
 fi
+check_maintainer_builds
 
 # Pull-request debt is a hard pickup gate, not a ranking hint. The adapter
 # proves LIVE and returns every owned debt oldest first. Core works only the

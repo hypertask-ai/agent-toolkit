@@ -45,6 +45,15 @@ else
   bad owned-row-parse-error "status=$status error=$(cat "$TMP/bad.err")"
 fi
 
+printf '%s\n' '{"tasks":[{"id":"task-19","ticketNumber":"AGTE-19","section":"Inbox","title":"URL conversion","uniqueIndex":19}]}' > "$COMMENTS"
+resolved="$(adapter_ticket_ref "$TMP/token" 'https://app.hypertask.ai/detail/project-5500/19')"
+unchanged="$(adapter_ticket_ref "$TMP/token" 'AGTE-19')"
+if [ "$resolved" = 'AGTE-19' ] && [ "$unchanged" = 'AGTE-19' ]; then
+  ok ticket-url-to-ref 'ticket URLs reuse normalized adapter rows to produce PREFIX-NNN'
+else
+  bad ticket-url-to-ref "resolved=$resolved unchanged=$unchanged"
+fi
+
 printf 'token\n' > "$TMP/token"
 _ht_run_post() { printf '404\n{}'; }
 run_id="$(adapter_run_open "$TMP/token" task-1 "$TMP/run.log")"

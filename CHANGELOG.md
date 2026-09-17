@@ -1,3 +1,17 @@
+## 3.29.0 - 2026-09-17
+
+- AGTE-17 moves each advisor instruction into its own transient systemd unit, so
+  the launch tick returns without waiting for the model or a build.
+- A later tick reads the instruction result, reports completion, removes its
+  state, and still allows reply-only owner questions while other work runs.
+- AGTE-19 resolves stored ticket URLs through the Hypertask adapter before
+  completion comments, preserves prefixed quiet replies byte for byte, and
+  stops after two failed comment attempts with the command, exit, and stderr logged.
+- Offline coverage verifies URL conversion, exact quiet output, bounded errors,
+  detached execution, later completion reporting, and concurrent owner replies.
+- ACTION: run `agent-template update --keep-timers` so current agents receive
+  the completion and scheduling fixes without changing timer state.
+
 ## 3.28.0 - 2026-09-17
 
 - Owner questions now choose one reply-only agent by machine mention, assignee,

@@ -103,15 +103,19 @@ merge, timer-preserving toolkit update, cleanup, and a report under ten lines.
 
 Each tick closes completed records once. Success posts one `Done:` line with
 the pull request URL. Failure posts one plain-language `Decision: build failed:`
-comment. Both go through the agent board wrapper, so quiet mode, comment limits,
-and the plain-language check still apply.
+comment. A stored ticket URL is resolved to its board reference through the
+adapter first. A failed comment stops after two attempts and records the command,
+exit code, and stderr in the run log.
 
 `instruct` is the advisor's only identity-free entry point. It still refuses a
 target without `MAINTAINER="on"`, writes one JSON item under
-`<slug>-instructions/`, and logs the action. The target's next tick runs the
-oldest item with `source=advisor` through its normal model command and prompt
-contract. The reply is kept in the run log and, when `--ticket` is present,
-posted once through the target's board wrapper.
+`<slug>-instructions/`, and logs the action. The target's next tick launches the
+oldest item with `source=advisor` in a unique transient systemd unit and returns.
+A later tick reads the unit result, logs the reply, posts it when `--ticket` is
+present, and removes the instruction state. A reply that already begins with a
+quiet-mode comment prefix is posted from its output file without rewriting it.
+A running instruction or build does not prevent a reply-only owner question from
+starting on the next tick.
 
 Maintainer prompts require a four-part build spec: Ticket, What, Done when, and
 Guardrails. They forbid direct model-harness launches and answer questions
