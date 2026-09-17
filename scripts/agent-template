@@ -1287,6 +1287,7 @@ block = "\n".join([
     'MODEL_CLI="%s"' % esc(model_cli),
     'MAX_CONCURRENT_RUNS="1"',
     'QUIET="on"',
+    'ANSWERER_FALLBACK=""',
     'MANAGER="off"',
     'MAINTAINER="off"',
 ])

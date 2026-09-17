@@ -30,6 +30,7 @@ adapter_extract_identity_id() { _linear_todo "adapter_extract_identity_id"; }
 adapter_install_board_cli() { _linear_todo "adapter_install_board_cli"; }
 adapter_list_candidates() { _linear_todo "adapter_list_candidates"; }
 adapter_latest_comment() { _linear_todo "adapter_latest_comment"; }
+adapter_ticket_comments() { _linear_todo "adapter_ticket_comments"; }
 adapter_mention_token() { _linear_todo "adapter_mention_token"; }
 adapter_task_url() { _linear_todo "adapter_task_url"; }
 adapter_post_comment() { _linear_todo "adapter_post_comment"; }

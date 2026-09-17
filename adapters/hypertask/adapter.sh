@@ -714,38 +714,41 @@ for task in doc.get("tasks") or []:
   done
 }
 
-# adapter_latest_comment <token-file> <task-id> <board-id>
-# JSON {"id":..., "html":..., "author":..., "agent_id":...} or an empty line
-# when there is none.
-#
-# A comment's real actor is the "agent" field, not "creator": every comment
-# posted through an agent's own board CLI still carries the account owner as
-# creator, because the token is scoped under that account. "agent" is null
-# only for a comment a person typed themselves, so author here is the agent's
-# name when one posted it, the creator's name otherwise, and agent_id is set
-# only in the first case.
-adapter_latest_comment() {
+# adapter_ticket_comments <token-file> <task-id> <board-id>
+# One JSON array of normalized comments. A comment's real actor is the "agent"
+# field, not "creator": an agent-authenticated comment still carries the
+# account owner as creator.
+adapter_ticket_comments() {
   local token_file="$1" task_id="$2" board_id="$3" json
   json="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")"
   printf '%s' "$json" | python3 -c '
 import json, sys
-doc = json.load(sys.stdin)
-comments = doc.get("comments") or []
-if not comments:
-    print("")
-    sys.exit(0)
-def key(comment):
-    return (comment.get("createdAt") or "", comment.get("id") or 0)
-newest = max(comments, key=key)
-agent = newest.get("agent") if isinstance(newest.get("agent"), dict) else None
-creator = newest.get("creator") if isinstance(newest.get("creator"), dict) else {}
-author = (agent or creator).get("displayName") or ""
-print(json.dumps({
-    "id": newest.get("id"),
-    "html": newest.get("text") or newest.get("commentText") or newest.get("html") or "",
-    "author": author,
-    "agent_id": (agent or {}).get("id") or "",
-}))
+rows = []
+for comment in json.load(sys.stdin).get("comments") or []:
+    agent = comment.get("agent") if isinstance(comment.get("agent"), dict) else None
+    creator = comment.get("creator") if isinstance(comment.get("creator"), dict) else {}
+    rows.append({
+        "id": comment.get("id"),
+        "createdAt": comment.get("createdAt") or "",
+        "html": comment.get("text") or comment.get("commentText") or comment.get("html") or "",
+        "author": (agent or creator).get("displayName") or "",
+        "agent_id": (agent or {}).get("id") or "",
+    })
+print(json.dumps(rows))
+'
+}
+
+# adapter_latest_comment <token-file> <task-id> <board-id>
+# JSON {"id":..., "createdAt":..., "html":..., "author":..., "agent_id":...}
+# or an empty line when there is none.
+adapter_latest_comment() {
+  local comments
+  comments="$(adapter_ticket_comments "$1" "$2" "$3")"
+  COMMENTS="$comments" python3 -c '
+import json, os
+comments = json.loads(os.environ["COMMENTS"])
+if comments:
+    print(json.dumps(max(comments, key=lambda c: (c.get("createdAt") or "", c.get("id") or 0))))
 '
 }
 
@@ -940,8 +943,8 @@ if addressed:
         _, author = actor(trigger)
         row["trigger"] = "reply_only"
         row["trigger_comment"] = {
-            "id": trigger.get("id"), "html": body(trigger),
-            "author": author, "agent_id": "",
+            "id": trigger.get("id"), "createdAt": trigger.get("createdAt") or "",
+            "html": body(trigger), "author": author, "agent_id": "",
         }
         print(json.dumps(row))
 ')"

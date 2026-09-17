@@ -1,3 +1,15 @@
+## 3.28.0 - 2026-09-17
+
+- Owner questions now choose one reply-only agent by machine mention, assignee,
+  latest prior `Done:` or `Decision:` author, then configured fallback.
+- One normalized comment read suppresses duplicate answers when another agent
+  already replied, while losing agents remain eligible for ordinary ticket work.
+- New offline coverage verifies every answerer rank, the answered-question race,
+  owned-ticket replies, and adapter-default conf resolution for manager commands.
+- `ANSWERER_FALLBACK` defaults empty in the shared schema and has no bot-specific
+  runner default.
+- ACTION: set `ANSWERER_FALLBACK="product-bot"` in this host's agent confs and run `agent-template update --keep-timers`.
+
 ## 3.27.0 - 2026-09-17
 
 - AGTE-14 adds a per-agent setup-maintainer gate with allowlisted background

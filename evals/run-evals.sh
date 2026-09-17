@@ -238,6 +238,16 @@ if [ -z "$ONLY" ] && [ -x "$HERE/owned-reply-trigger.test.sh" ]; then
   echo "-- owned reply trigger behavioural checks --"
   bash "$HERE/owned-reply-trigger.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/answerer-selection.test.sh" ]; then
+  echo ""
+  echo "-- answerer selection behavioural checks --"
+  bash "$HERE/answerer-selection.test.sh"
+fi
+if [ -z "$ONLY" ] && [ -x "$HERE/conf-dir-resolution.test.sh" ]; then
+  echo ""
+  echo "-- config directory resolution checks --"
+  bash "$HERE/conf-dir-resolution.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/comment-cursor.test.sh" ]; then
   echo ""
   echo "-- comment cursor behavioural checks --"

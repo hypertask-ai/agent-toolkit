@@ -88,6 +88,7 @@ esac
 # because on a shared board it is the difference between helping and barging in.
 CLAIM_UNASSIGNED="${CLAIM_UNASSIGNED:-no}"
 EXCLUDE_LABELS="${EXCLUDE_LABELS:-}"
+ANSWERER_FALLBACK="${ANSWERER_FALLBACK:-}"
 # Where the run happens. "repo" runs in AGENT_REPO, the way it always has;
 # "per-run" gives each ticket its own checkout and throws it away after.
 WORKDIR_MODE="${WORKDIR_MODE:-repo}"
@@ -753,6 +754,26 @@ fi
 trap ': > "$LOCK"' EXIT
 
 MENTION="$(adapter_mention_token "$AGENT_ID")"
+answerer_agent_rows() {
+  local current_adapter="$BOARD_ADAPTER" dir agent_conf token
+  while IFS= read -r dir; do
+    for agent_conf in "$dir"/*.conf; do
+      [ -f "$agent_conf" ] || continue
+      (
+        unset AGENT_ID AGENT_SLUG BOARD_ADAPTER BOARD_ID
+        # shellcheck disable=SC1090
+        . "$agent_conf"
+        [ "${BOARD_ADAPTER:-}" = "$current_adapter" ] || exit 0
+        [ -n "${AGENT_ID:-}" ] || exit 0
+        token="$(adapter_mention_token "$AGENT_ID" 2>/dev/null)" || exit 0
+        SLUG_VALUE="${AGENT_SLUG:-$(basename "$agent_conf" .conf)}" \
+          ID_VALUE="$AGENT_ID" TOKEN_VALUE="$token" BOARDS_VALUE="${BOARD_ID:-}" \
+          python3 -c 'import json,os; print(json.dumps({"slug":os.environ["SLUG_VALUE"], "id":os.environ["ID_VALUE"], "token":os.environ["TOKEN_VALUE"], "boards":os.environ["BOARDS_VALUE"]}))'
+      )
+    done
+  done < <(core_conf_dirs)
+}
+ANSWERER_AGENTS="$(answerer_agent_rows)"
 # Which skills this tick will read, by version, logged before any ticket is
 # picked. A bot behaving oddly is usually a bot reading an old pack, and this
 # is the line that shows it. It belongs to the tick, not to the ticket run, so
@@ -919,15 +940,33 @@ print("yes" if json.loads(os.environ["ROW"]).get("assignee_count", 1) == 0 else 
   comment_is_own="no"
   comment_is_human="no"
   mentioned="no"
+  comments_json=""
+  comments_available="no"
   if [ "$is_pr_fix" = "yes" ]; then
     comment_json=""
     comment_text="$(row_field "$row" pr_feedback)"
   else
+    if declare -F adapter_ticket_comments >/dev/null 2>&1; then
+      if comments_json="$(adapter_ticket_comments "$TOKEN_FILE" "$task_id" "$board" 2>>"$LOG")"; then
+        comments_available="yes"
+      else
+        comments_json=""
+      fi
+    fi
     comment_json="$(ROW="$row" python3 -c '
 import json, os
 value = json.loads(os.environ["ROW"]).get("trigger_comment")
 print(json.dumps(value) if value else "")')"
-    [ -n "$comment_json" ] || comment_json="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$board")"
+    if [ -z "$comment_json" ] && [ -n "$comments_json" ]; then
+      comment_json="$(COMMENTS="$comments_json" python3 -c '
+import json, os
+comments = json.loads(os.environ["COMMENTS"])
+if comments:
+    print(json.dumps(max(comments, key=lambda c: (c.get("createdAt") or "", c.get("id") or 0))))')"
+    fi
+    if [ -z "$comment_json" ] && [ "$comments_available" = "no" ]; then
+      comment_json="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$board")"
+    fi
   fi
   if [ -n "$comment_json" ]; then
     comment_id="$(CJ="$comment_json" python3 -c 'import json,os;print(json.loads(os.environ["CJ"]).get("id") or 0)')"
@@ -960,6 +999,108 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
     is_reply_only="yes"
   elif [ "$comment_is_human" = "yes" ] && { [ "$mentioned" = "yes" ] || [[ "$comment_text" == *\?* ]]; }; then
     is_reply_only="yes"
+  fi
+
+  if [ "$is_reply_only" = "yes" ]; then
+    answerer="$(CJ="$comment_json" COMMENTS="${comments_json:-[]}" ROW="$row" \
+      AGENTS="$ANSWERER_AGENTS" BOARD="$board" FALLBACK="$ANSWERER_FALLBACK" python3 -c '
+import html, json, os, re
+
+question = json.loads(os.environ["CJ"])
+try:
+    comments = json.loads(os.environ["COMMENTS"] or "[]")
+except json.JSONDecodeError:
+    comments = []
+row = json.loads(os.environ["ROW"])
+agents = []
+seen = set()
+for line in os.environ.get("AGENTS", "").splitlines():
+    try:
+        agent = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if agent.get("id") and agent["id"] not in seen:
+        seen.add(agent["id"])
+        agents.append(agent)
+
+def id_key(value):
+    try:
+        return (0, int(value))
+    except (TypeError, ValueError):
+        return (1, str(value or ""))
+
+def key(comment):
+    return (str(comment.get("createdAt") or ""), id_key(comment.get("id")))
+
+for comment in comments:
+    if str(comment.get("id") or "") == str(question.get("id") or ""):
+        if not question.get("createdAt"):
+            question["createdAt"] = comment.get("createdAt") or ""
+        break
+question_key = key(question)
+by_id = {str(agent["id"]): agent for agent in agents}
+board = os.environ["BOARD"]
+def on_board(agent):
+    return board in {value.strip() for value in str(agent.get("boards") or "").split(",") if value.strip()}
+
+after = [comment for comment in comments
+         if comment.get("agent_id") and key(comment) > question_key]
+if after:
+    latest = max(after, key=key)
+    actor = by_id.get(str(latest.get("agent_id") or ""), {})
+    print(json.dumps({"answered_by": actor.get("slug") or latest.get("agent_id") or latest.get("author") or "an agent"}))
+    raise SystemExit
+
+body = str(question.get("html") or "")
+mentioned = []
+for agent in agents:
+    if not on_board(agent):
+        continue
+    token = str(agent.get("token") or "")
+    match = re.search(re.escape(token) + r"(?![A-Za-z0-9_-])", body) if token else None
+    if match:
+        mentioned.append((match.start(), str(agent.get("slug") or ""), agent))
+if mentioned:
+    owner = min(mentioned, key=lambda item: (item[0], item[1]))[2]
+    reason = "mention"
+else:
+    assigned_ids = [str(value) for value in row.get("agent_ids") or [] if value]
+    if assigned_ids:
+        owner = by_id.get(assigned_ids[0], {"id": assigned_ids[0], "slug": ""})
+        reason = "assignee"
+    else:
+        prior = []
+        for comment in comments:
+            if not comment.get("agent_id") or key(comment) >= question_key:
+                continue
+            plain = html.unescape(re.sub(r"<[^>]+>", " ", str(comment.get("html") or "")))
+            if re.match(r"\s*(Done|Decision):", plain, re.I):
+                prior.append(comment)
+        if prior:
+            marker = max(prior, key=key)
+            marker_id = str(marker.get("agent_id") or "")
+            owner = by_id.get(marker_id, {"id": marker_id, "slug": ""})
+            reason = "last Done/Decision author"
+        else:
+            owner = {"id": "", "slug": os.environ.get("FALLBACK", "")}
+            reason = "fallback"
+print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("slug") or "", "reason": reason}))
+')"
+    answered_by="$(ANSWERER="$answerer" python3 -c 'import json,os; print(json.loads(os.environ["ANSWERER"]).get("answered_by") or "")')"
+    owner_id="$(ANSWERER="$answerer" python3 -c 'import json,os; print(json.loads(os.environ["ANSWERER"]).get("owner_id") or "")')"
+    owner_slug="$(ANSWERER="$answerer" python3 -c 'import json,os; print(json.loads(os.environ["ANSWERER"]).get("owner_slug") or "")')"
+    answerer_reason="$(ANSWERER="$answerer" python3 -c 'import json,os; print(json.loads(os.environ["ANSWERER"]).get("reason") or "")')"
+    if [ -n "$answered_by" ]; then
+      is_reply_only="no"
+      explain "answer $ref: $answered_by already commented after question $comment_id, so this agent will not post a second answer"
+    elif { [ -n "$owner_id" ] && [ "$owner_id" = "$AGENT_ID" ]; } \
+         || { [ -n "$owner_slug" ] && [ "$owner_slug" = "$SLUG" ]; }; then
+      explain "answer $ref: $SLUG owns question $comment_id by $answerer_reason"
+    else
+      is_reply_only="no"
+      answerer_owner="${owner_slug:-${owner_id:-no configured agent}}"
+      explain "answer $ref: $answerer_owner owns question $comment_id by $answerer_reason; $SLUG continues only for another ticket reason"
+    fi
   fi
 
   # An agent-authored comment is never a wake-up from that same agent, even

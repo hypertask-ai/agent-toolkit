@@ -466,6 +466,7 @@ See `CONF.md` for the complete schema.
 | `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
 | `CHAT` | `on` to answer through the host chat daemon, default `on` for non-CLI board agents |
 | `QUIET` | `on` redirects unmarked comments to activity and strips board-owner mentions; default `on` |
+| `ANSWERER_FALLBACK` | fallback answerer slug when no mention, agent assignee, or prior `Done:` or `Decision:` author exists; default empty |
 | `MANAGER` | `on` to allow runner control and ticket delegation, default `off` |
 | `MAINTAINER` | `on` to add allowlisted setup builds, merges, and advisor instructions, default `off` |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
