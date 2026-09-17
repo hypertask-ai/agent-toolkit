@@ -45,5 +45,19 @@ else
   bad owned-row-parse-error "status=$status error=$(cat "$TMP/bad.err")"
 fi
 
+printf 'token\n' > "$TMP/token"
+_ht_run_post() { printf '404\n{}'; }
+run_id="$(adapter_run_open "$TMP/token" task-1 "$TMP/run.log")"
+adapter_run_activity "$TMP/token" "$run_id" "$TMP/run.log" action 'started TEST-1'
+adapter_run_stop "$TMP/token" "$run_id" "$TMP/run.log" completed
+if [ "$run_id" = local ] \
+   && grep -qF 'opened local-only run for task task-1' "$TMP/run.log" \
+   && grep -qF 'action started TEST-1' "$TMP/run.log" \
+   && grep -qF 'closed run local with status completed' "$TMP/run.log"; then
+  ok run-api-404-local-only 'a missing runs route keeps open, activity, and close in the local log'
+else
+  bad run-api-404-local-only "id=$run_id log=$(cat "$TMP/run.log")"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

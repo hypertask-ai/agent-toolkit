@@ -111,10 +111,15 @@ Claude: [runs the script with --yes] ... FP CRO Bot picked up the test ticket
    finished, and saying so plainly beats a green checklist.
 
 Every setup must tell the bot and the person creating it the comment contract.
-A reminder or status line is posted once and then edited in place with
-`hypertask comment update <id>`, never re-posted. A bot posts at most one
-reminder per ticket per day and at most three comments per ticket per day unless
-a human writes in between. A due-date countdown is one edited comment.
+Ticket comments have exactly four allowed kinds: `Question:` asks a human,
+names what is needed, and ends with a question mark; `Decision:` states a fact
+the owner must know; `Handoff:` names the receiving agent; and `Done:` is one
+line with the pull request link. Everything else is run activity. A reminder
+that qualifies as a decision is posted once and then edited in place, never
+re-posted. The existing limit remains one reminder and three comments per
+ticket per day unless a human writes in between. With `QUIET="on"`, the wrapper
+strips and logs board-owner mentions; moving the ticket to review requests
+attention.
 
 ## The three wiring modes
 
@@ -177,10 +182,9 @@ or stale heartbeat is `offline`. Run `agent-chat --status` for each agent's
 last publish result, or read `~/.local/state/agent-chat/<slug>.log` for errors.
 
 The page's separate top word uses the durable `Agent.heartbeatAt`, which the
-runtime-heartbeat app route does not currently update. Recent comments and
-evidence still appear, but poll runs cannot add run activity cards: the app
-creates run IDs only for webhook or chat runs, and its ticket-independent chat
-activity fallback is feature-flag gated.
+runtime-heartbeat app route does not currently update. Recent comments and evidence still appear. Poll runs register against their
+ticket and stream progress to activity cards. Hosts remain compatible while
+the route rolls out because HTTP 404 uses local-only run logging.
 
 ## Where the agent runs
 
@@ -261,11 +265,14 @@ our own message rather than "command not found" three layers down.
 6. Drop anything already handled. The state key is `<task id>:<newest comment
    id>`, so a fresh reply on an old ticket counts as new work and a re-read of
    the same one does not.
-7. For each remaining ticket, up to `MAX_CONCURRENT_RUNS`, start **one
-   short-lived process**: the prompt tells it to read the skills index first,
-   gives it the ticket and the latest comment, and tells it to post its reply
-   with the agent's own board CLI and move the ticket per the skills index.
-8. Log to `~/.local/state/agent-board-poll/<slug>.log` and exit.
+7. For each remaining ticket, up to `MAX_CONCURRENT_RUNS`, register a runtime
+   run on that ticket, then start **one short-lived process**. Claimed, started,
+   PR opened, red check, fix pushed, retrying, blocked, and done progress is run
+   activity. A 404 from the runs API switches to local-only activity in the run
+   log without stopping work. The runner closes the run with its final status.
+8. The prompt tells the process to read the skills index first, gives it the
+   ticket and latest comment, and limits ticket comments to the four kinds.
+9. Log to `~/.local/state/agent-board-poll/<slug>.log` and exit.
 
 ## One ticket until live
 
@@ -446,6 +453,7 @@ See `CONF.md` for the complete schema.
 | `CHAT_CLI` | optional chat command; absent uses `MODEL_CLI` |
 | `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
 | `CHAT` | `on` to answer through the host chat daemon, default `on` for non-CLI board agents |
+| `QUIET` | `on` redirects unmarked comments to activity and strips board-owner mentions; default `on` |
 | `MANAGER` | `on` to allow runner control and ticket delegation, default `off` |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
 | `EXCLUDE_LABELS` | labels that make a ticket off limits, comma separated |

@@ -98,10 +98,27 @@ agent through `hypertask agents webhook configure` when available, otherwise thr
 `~/.config/agent-template/webhooks/`. With no public URL, the installer prints `no
 WEBHOOK_URL, mentions wait for the poll` and leaves the minute timer as fallback.
 
-A failed ticket run writes only its host log and
-`~/.local/state/agent-board-poll/<slug>.status`. It posts nothing on the ticket and
-does not add the mention key to `<slug>.seen`, so the next tick may retry the same
-mention. A later successful run removes the status file.
+A failed ticket run writes its host log and
+`~/.local/state/agent-board-poll/<slug>.status`, posts blocked activity, and closes
+the app run as failed. It posts no ticket comment and does not add the mention key
+to `<slug>.seen`, so the next tick may retry the same mention. A later successful
+run removes the status file.
+
+## Quiet ticket traffic
+
+Ticket comments have exactly four allowed kinds: `Question:` asks a human and
+ends with a question mark while naming what is needed; `Decision:` records a fact
+the owner must know; `Handoff:` names the receiving agent; and `Done:` is one
+line with the pull request link. The board wrapper redirects anything else to
+run activity. `QUIET="on"` is the default and strips board-owner mentions from
+comments, logging the change. The review column provides attention instead.
+The existing one-reminder and three-comments-per-day limits still apply.
+
+At ticket-run start the adapter posts `{taskId, source: "runtime"}` to
+`/api/mcp/agents/runs`. Claimed, started, PR opened, red check, fix pushed,
+retrying, blocked, and done are activities, and the final status closes the run.
+HTTP 404 means the app route is not deployed yet; open, activity, and close stay
+in the local run log and ticket work continues.
 
 ## The conf decides the provider
 
@@ -220,8 +237,8 @@ runtime snapshot every 30 seconds, whether chat is on or off. The Operations
 block at `https://app.hypertask.ai/agents/<slug>` then shows runtime, model,
 health, active ticket, or the PR it is waiting on. State comes from the poll
 runner's `<slug>.lock`, `<slug>.blocked`, and `<slug>.log`; board sections come
-from `board.yml` beside the conf. POST errors go to the per-agent daemon log
-and never stop the next agent.
+from `board.yml` beside the conf. Poll runs also publish ticket-linked activity.
+POST errors go to the per-agent daemon log and never stop the next agent.
 
 Use `agent-chat --status` to see the last publish result without exposing a
 token. Read `~/.local/state/agent-chat/<slug>.log` when it says `error`.

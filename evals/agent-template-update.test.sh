@@ -29,6 +29,9 @@ EOF
 cat > "$TEMPLATE/scripts/migrate-provider-policy.py" <<'EOF'
 #!/usr/bin/env python3
 EOF
+cat > "$TEMPLATE/scripts/migrate-quiet-mode.py" <<'EOF'
+#!/usr/bin/env python3
+EOF
 cat > "$TEMPLATE/evals/run-evals.sh" <<'EOF'
 #!/usr/bin/env bash
 if [ "${EVAL_MODE:-green}" = red ]; then

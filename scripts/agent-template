@@ -726,6 +726,7 @@ block = "\n".join([
     'SKILLS_INDEX="%s"' % esc(skills_index),
     'MODEL_CLI="%s"' % esc(model_cli),
     'MAX_CONCURRENT_RUNS="1"',
+    'QUIET="on"',
     'MANAGER="off"',
 ])
 print("CONVERT")
@@ -788,6 +789,12 @@ PYEOF
     done
   fi
   [ "$CHAT_ENABLED" -gt 0 ] || echo "  every template-wired agent already declares CHAT"
+
+  echo "== 3d. quiet mode for current-schema agents =="
+  MIGRATE_QUIET="$TEMPLATE_DIR/scripts/migrate-quiet-mode.py"
+  QUIET_ARGS=(--version "$TEMPLATE_VERSION")
+  [ "$DRY_RUN" = "yes" ] && QUIET_ARGS+=(--dry-run)
+  python3 "$MIGRATE_QUIET" "${QUIET_ARGS[@]}" "$CONFIG_DIR"
 
   echo "== 4. redundant agent-board-poll@<slug>.service.d/path.conf drop-ins =="
   # core_write_poll_units (run by install.sh, step 2) now puts PATH and HOME

@@ -58,6 +58,7 @@ MODEL_CLI=""
 MODEL_CLI_SET="no"
 MAX_CONCURRENT_RUNS="1"
 CHAT_PAGE="yes"
+QUIET="on"
 ROLE="write"
 DRY_RUN="yes"
 CONFIRM="no"
@@ -235,9 +236,9 @@ if [ -n "$MISSION_FILE" ]; then
   [ -f "$MISSION_FILE" ] || die "--mission-file $MISSION_FILE does not exist" "pass a file that is there"
   MISSION="$(cat "$MISSION_FILE")"
 elif [ "$KIND" = "qa" ]; then
-  MISSION="You are $DISPLAY_NAME. You verify, you never fix. Read the literal absolute path $SKILLS_INDEX first, then only the skills it points you to, and follow them exactly. Name the skill you used in your first comment. Corrections go into the skill file, not into chat, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. A session looking after you reads MAINTAINER.md next to this conf."
+  MISSION="You are $DISPLAY_NAME. You verify, you never fix. Read the literal absolute path $SKILLS_INDEX first, then only the skills it points you to, and follow them exactly. Record the skill you used in the run log, not a ticket comment. Corrections go into the skill file, not into chat, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. A session looking after you reads MAINTAINER.md next to this conf."
 else
-  MISSION="You are $DISPLAY_NAME. Step one, before anything else: open the file at the literal absolute path $SKILLS_INDEX and name the skill whose trigger matches this task in your first comment. Then follow that skill exactly, including its scripts. If no skill matches, say so and stop. Corrections go into the skill file, never into chat memory, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. Unsure which: would it still be true for a different customer? Yes is a rule, no is a fact. A session looking after you reads MAINTAINER.md next to this conf."
+  MISSION="You are $DISPLAY_NAME. Step one, before anything else: open the file at the literal absolute path $SKILLS_INDEX and record the skill whose trigger matches this task in the run log, not a ticket comment. Then follow that skill exactly, including its scripts. If no skill matches, say so and stop. Corrections go into the skill file, never into chat memory, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. Unsure which: would it still be true for a different customer? Yes is a rule, no is a fact. A session looking after you reads MAINTAINER.md next to this conf."
 fi
 
 # ---------- existing identity ----------
@@ -326,7 +327,7 @@ fi
 if [ "$BOARD" != "none" ]; then
   step 2 "install the board CLI wrapper at $BOARD_CLI (reads the token file at call time)"
   if [ "$DRY_RUN" != "yes" ]; then
-    adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" "$DISPLAY_NAME" "$AGENT_ID" "$BOARD_ID"
+    adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" "$DISPLAY_NAME" "$AGENT_ID" "$BOARD_ID" "$QUIET"
   fi
 fi
 
@@ -442,6 +443,7 @@ MODEL_CLI="$MODEL_CLI"
 MAX_CONCURRENT_RUNS="$MAX_CONCURRENT_RUNS"
 WIRING="$WIRING"
 CHAT="$CHAT"
+QUIET="$QUIET"
 MANAGER="off"
 EOF
 )"
@@ -492,7 +494,7 @@ esac
 
 # ---------- 5. acceptance ----------
 echo
-echo "Comment rule: post a reminder or status once, then edit it with 'hypertask comment update <id>'; never re-post it. One reminder and three total comments per ticket per day, unless a human writes in between. A due-date countdown is one edited comment."
+echo "Ticket comments have exactly four kinds: Question: asks a human and ends with a question mark; Decision: states a fact the owner must know; Handoff: names the receiving agent; Done: is one line with the PR link. Everything else is run activity."
 echo
 echo "=== check before you say done ==="
 cat <<EOF

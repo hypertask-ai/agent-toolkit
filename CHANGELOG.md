@@ -1,3 +1,14 @@
+## 3.23.0 - 2026-09-17
+
+- Runtime ticket work now opens an app run, streams lifecycle progress as run
+  activities, closes with a final status, and falls back to local-only logging
+  when the runs route returns HTTP 404.
+- The board wrapper permits only Question, Decision, Handoff, and Done ticket
+  comments; other text becomes activity, while quiet mode strips owner mentions.
+- New and migrated current-schema agents default to `QUIET="on"`; focused evals
+  cover comment routing, mention stripping, marker acceptance, and 404 fallback.
+- ACTION: run `agent-template update --keep-timers` so current agents receive quiet mode without changing timer state.
+
 ## 3.22.0 - 2026-09-17
 
 - Agents with `MANAGER="on"` can start, stop, or inspect current runner units

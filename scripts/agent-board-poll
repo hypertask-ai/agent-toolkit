@@ -73,6 +73,11 @@ done
   "PR_REPO is not set: every agent needs a repo, run create-agent --repo" \
   "run create-agent.sh --resume --pr-repo <org/name> for this agent, or add PR_REPO= to $CONF by hand"
 MAX_CONCURRENT_RUNS="${MAX_CONCURRENT_RUNS:-1}"
+QUIET="${QUIET:-on}"
+case "$QUIET" in
+  on|off) : ;;
+  *) die "QUIET must be on or off, got '$QUIET'" "set QUIET=on unless ticket comments are intentionally verbose" ;;
+esac
 # An agent may also take tickets nobody has claimed, which is how a board column
 # becomes a queue without anyone assigning by hand. Off unless the conf says so,
 # because on a shared board it is the difference between helping and barging in.
@@ -176,7 +181,7 @@ adapter_require_tools
 if [ "$BOARD_ADAPTER" = "hypertask" ]; then
   # Refresh old wrappers too. Template updates replace this runner, but agent
   # wrappers live outside the template and otherwise keep stale write guards.
-  adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" "$AGENT_NAME" "$AGENT_ID" "$BOARD_ID"
+  adapter_install_board_cli "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" "$AGENT_NAME" "$AGENT_ID" "$BOARD_ID" "$QUIET"
 fi
 [ -x "$BOARD_CLI" ] || die "the board CLI $BOARD_CLI is missing or not executable" \
   "re-run create-agent.sh --resume for this agent to reinstall its board wrapper"
@@ -1000,9 +1005,10 @@ Latest comment: ${comment_text:-none}
 
 ${AGENT_ADVISOR_GUIDANCE:+$AGENT_ADVISOR_GUIDANCE
 
-}You are $AGENT_NAME. Do the work, then post your reply with
-\`$BOARD_CLI comment add $ref --text '<p>your reply in HTML block tags</p>'\`
-as this agent, and move the ticket per the skills index. Do not ask for
+}You are $AGENT_NAME. Do the work. Post a ticket comment only when it fits one
+of the four kinds in the comment contract below, using \`$BOARD_CLI comment add
+$ref --text '<p>Marker: your reply in HTML block tags</p>'\` as this agent, and
+move the ticket per the skills index. Do not ask for
 permission and do not stop halfway: this process exits when you do.
 
 If a human corrects your output at any point, whether they edit your comment,
@@ -1041,16 +1047,14 @@ Keep fixing this PR until it merges and is live."
   # a human can disagree with before the code exists.
   if [ "$TRIAGE_THIS" = "hard" ]; then
     log "triage $ref: hard, using TRIAGE_HARD_CLI"
-    PROMPT="This ticket is scored HARD. Before you change any code, post your
-plan as your first comment on $ref: a numbered list, exactly three points.
+    PROMPT="This ticket is scored HARD. Before you change any code, write a
+numbered three-point plan in your run output, not as a ticket comment.
 
 1. The root cause you think is behind this, in one sentence.
 2. The files you are going to touch.
 3. How you will prove it is fixed.
 
-That plan is one of the three comments you get for this whole run, not an
-extra one. Post it, then do the work, then post your result comment. Do not
-post a fourth comment to say the plan is done.
+Then do the work. Progress and plans are run activity, not ticket comments.
 
 $PROMPT"
   fi
@@ -1066,9 +1070,9 @@ After either command, your reply must be exactly the command's one-line result, 
 
   PROMPT="$PROMPT
 
-COMMENT CONTRACT: Post a reminder or status line once, then edit that comment in place with \`$BOARD_CLI comment update <id>\`; never re-post it. Post at most one reminder comment per ticket per day and at most three comments total per ticket per day unless a human wrote in between. A due-date countdown is one comment that you edit, not a series of new comments. The board wrapper updates near-duplicates and logs a refused fourth daily comment outside the ticket.
+COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent. \`Done:\` is one line and includes the pull request link. Everything else, including claims, plans, progress, retries, checks, and blockers, is run activity. The board wrapper redirects an unmarked comment to activity instead of posting it. The existing limit remains at one reminder and three total ticket comments per day unless a human wrote in between.
 
-OWNER-MENTION BUDGET: You may @mention the board owner at most once on this ticket in any 24-hour period. Before mentioning the owner, read the recent ticket comments. If this agent already mentioned the owner in the last 24 hours, write the update without that mention and do not try the mention again. The board wrapper enforces this limit mechanically and logs a refused second mention outside the ticket."
+QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any ticket comment. The board wrapper strips and logs an owner mention before posting. Attention comes from moving the ticket to the review column."
 
   RUN_DIR="${AGENT_REPO:-}"
   if [ "$WORKDIR_MODE" = "per-run" ]; then
@@ -1089,6 +1093,23 @@ OWNER-MENTION BUDGET: You may @mention the board owner at most once on this tick
   : > "$POSTED"
   run_started_epoch="$(date +%s)"
   record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
+  runtime_run_id="local"
+  if declare -F adapter_run_open >/dev/null 2>&1; then
+    runtime_run_id="$(adapter_run_open "$TOKEN_FILE" "$task_id" "$LOG")"
+    adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "claimed $ref"
+    adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "started $ref"
+    if [ "$tries" -gt 0 ] || [ "$is_pr_fix" = "yes" ]; then
+      adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "retrying $ref"
+    fi
+    if [ "$is_pr_fix" = "yes" ]; then
+      while IFS= read -r red_check; do
+        [ -n "$red_check" ] || continue
+        adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" error "check $red_check red"
+      done < <(printf '%s' "$comment_text" | sed -n 's/^- \([^[]*\) \[.*/\1/p')
+    fi
+  fi
+  run_api_base=""
+  if declare -F _ht_api_base >/dev/null 2>&1; then run_api_base="$(_ht_api_base)"; fi
   run_started_at="$(date -Is)"
   REF="$ref" TITLE="$title" BOARD="$board" STARTED_AT="$run_started_at" python3 -c '
 import json, os
@@ -1145,6 +1166,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
     PATH="${AGENT_IDENTITY_PATH:-$PATH}" \
     AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
+    AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base" \
     AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER" \
     AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI" \
       "${MODEL_ARGV[@]}" "$PROMPT"
@@ -1162,7 +1184,11 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         continue
       fi
       printf '%s\t%s\t%s\n' "$PR_REPO" "$opened_number" "$ref" >> "$OPENED_PRS"
+      opened_url="https://github.com/$PR_REPO/pull/$opened_number"
       log "recorded PR #$opened_number as opened by $SLUG during the $ref run"
+      if declare -F adapter_run_activity >/dev/null 2>&1; then
+        adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "PR opened $opened_url"
+      fi
     done <<< "$OPEN_PRS_AFTER"
   fi
   # The seen-key and run-done bookkeeping happen first, before any optional
@@ -1183,6 +1209,10 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     log "run FAILED $ref exit=$rc: see the lines above in $LOG"
     detail="$(tail -c 2000 "$ERRFILE" 2>/dev/null)"
     write_failure_status "$ref" "$rc" "$detail"
+    if declare -F adapter_run_activity >/dev/null 2>&1; then
+      adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" error "blocked $ref: model exited $rc"
+      adapter_run_stop "$TOKEN_FILE" "$runtime_run_id" "$LOG" failed
+    fi
     if [ "$is_pr_fix" = "yes" ]; then
       printf 'ERROR: the PR-fix run for %s exited %s. Do this next: read %s; this PR has no attempt limit and retries after the ticket cooldown\n' \
         "$ref" "$rc" "$LOG" >&2
@@ -1206,6 +1236,13 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     fi
     rm -f "$STATUS"
     log "run done $ref exit=0"
+    if declare -F adapter_run_activity >/dev/null 2>&1; then
+      if [ "$is_pr_fix" = "yes" ]; then
+        adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "fix pushed $ref"
+      fi
+      adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" response "done $ref"
+      adapter_run_stop "$TOKEN_FILE" "$runtime_run_id" "$LOG" completed
+    fi
   fi
   : > "$LOCK"
   # Whether or not this ticket's own run succeeded, a skill edit the agent

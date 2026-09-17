@@ -66,6 +66,77 @@ _ht_get() {
   printf '%s' "$body"
 }
 
+# Run telemetry must never make ticket work fail. The runs API is deployed
+# independently, so 404 means this run remains local and its activity stays in
+# the runner log until the app route is available.
+_adapter_run_log() {
+  local log_file="$1" message="$2"
+  mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
+  printf '%s run-activity: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message" >> "$log_file" 2>/dev/null || true
+}
+
+# _ht_run_post <token-file> <path> <json>: prints "<status>\n<body>".
+_ht_run_post() {
+  local token_file="$1" path="$2" payload="$3" base tok reply status body
+  [ -r "$token_file" ] || { printf '000\n'; return 0; }
+  tok="$(cat "$token_file")"
+  base="$(_ht_api_base)"
+  reply="$(curl -sS -w $'\n%{http_code}' -X POST \
+    -H "Authorization: Bearer $tok" -H 'Content-Type: application/json' \
+    --data "$payload" "${base}${path}" 2>/dev/null)" || { printf '000\n'; return 0; }
+  status="${reply##*$'\n'}"
+  body="${reply%$'\n'*}"
+  printf '%s\n%s' "$status" "$body"
+}
+
+# adapter_run_open <token-file> <task-id> <run-log>
+# Prints the app run id, or "local" when registration is unavailable.
+adapter_run_open() {
+  local token_file="$1" task_id="$2" log_file="$3" payload reply status body run_id
+  payload="$(TASK_ID="$task_id" python3 -c 'import json,os; value=os.environ["TASK_ID"]; print(json.dumps({"taskId": int(value) if value.isdigit() else value, "source": "runtime"}))')"
+  reply="$(_ht_run_post "$token_file" '/mcp/agents/runs' "$payload")"
+  status="${reply%%$'\n'*}"
+  body="${reply#*$'\n'}"
+  if [[ "$status" = 2* ]]; then
+    run_id="$(printf '%s' "$body" | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("run") if isinstance(d.get("run"),dict) else d; print(r.get("id") or r.get("runId") or "")' 2>/dev/null || true)"
+    if [ -n "$run_id" ]; then
+      _adapter_run_log "$log_file" "opened run $run_id for task $task_id"
+      printf '%s' "$run_id"
+      return 0
+    fi
+  fi
+  if [ "$status" = "404" ]; then
+    _adapter_run_log "$log_file" "runs API unavailable (HTTP 404); opened local-only run for task $task_id"
+  else
+    _adapter_run_log "$log_file" "run registration failed (HTTP $status); opened local-only run for task $task_id"
+  fi
+  printf 'local'
+}
+
+# adapter_run_activity <token-file> <run-id> <run-log> <type> <message>
+adapter_run_activity() {
+  local token_file="$1" run_id="$2" log_file="$3" type="$4" message="$5" payload reply status
+  _adapter_run_log "$log_file" "$type $message"
+  [ -n "$run_id" ] && [ "$run_id" != "local" ] || return 0
+  payload="$(ACTIVITY_TYPE="$type" MESSAGE="$message" python3 -c 'import json,os; print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"]}))')"
+  reply="$(_ht_run_post "$token_file" "/mcp/agents/runs/$run_id/activities" "$payload")"
+  status="${reply%%$'\n'*}"
+  [[ "$status" = 2* ]] || _adapter_run_log "$log_file" "activity delivery failed (HTTP $status); kept locally: $message"
+  return 0
+}
+
+# adapter_run_stop <token-file> <run-id> <run-log> <status>
+adapter_run_stop() {
+  local token_file="$1" run_id="$2" log_file="$3" run_status="$4" payload reply status
+  _adapter_run_log "$log_file" "closed run ${run_id:-local} with status $run_status"
+  [ -n "$run_id" ] && [ "$run_id" != "local" ] || return 0
+  payload="$(RUN_STATUS="$run_status" python3 -c 'import json,os; print(json.dumps({"status": os.environ["RUN_STATUS"]}))')"
+  reply="$(_ht_run_post "$token_file" "/mcp/agents/runs/$run_id/stop" "$payload")"
+  status="${reply%%$'\n'*}"
+  [[ "$status" = 2* ]] || _adapter_run_log "$log_file" "run close failed (HTTP $status); local close remains authoritative"
+  return 0
+}
+
 # ---------- identity ----------
 # adapter_find_identity <display-name> <slug> : prints the id, or nothing.
 # Read-only, and it runs before any local write so a duplicate name fails early.
@@ -162,7 +233,7 @@ PYEOF
 # bypass the wrapper used by model runs.
 adapter_install_board_cli() {
   local slug="$1" token_file="$2" dest="$3" agent_name="${4:-}"
-  local agent_id="${5:-}" board_ids="${6:-}"
+  local agent_id="${5:-}" board_ids="${6:-}" quiet="${7:-on}"
   mkdir -p "$(dirname "$dest")"
   cat > "$dest" <<EOF
 #!/usr/bin/env bash
@@ -172,6 +243,7 @@ TOKEN_FILE="$token_file"
 AGENT_NAME="$agent_name"
 AGENT_ID="$agent_id"
 BOARD_IDS="$board_ids"
+QUIET="$quiet"
 RUN_LOG="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.log"
 POSTED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.posted-comments"
 OWNER_MENTIONS="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.owner-mentions"
@@ -207,6 +279,49 @@ print(project.get("ownerId") or (project.get("owner") or {}).get("id") or "")
   printf '%s' "\$ids"
 }
 
+_run_activity() {
+  local type="\$1" message="\$2" payload status
+  mkdir -p "\$(dirname "\$RUN_LOG")" 2>/dev/null || true
+  printf '%s run-activity: %s %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$type" "\$message" >> "\$RUN_LOG" 2>/dev/null || true
+  [ -n "\${AGENT_RUN_ID:-}" ] && [ "\$AGENT_RUN_ID" != "local" ] && [ -n "\${AGENT_RUN_API_BASE:-}" ] || return 0
+  payload="\$(ACTIVITY_TYPE="\$type" MESSAGE="\$message" python3 -c 'import json,os; print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"]}))')"
+  status="\$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer \$TOKEN" -H 'Content-Type: application/json' \
+    --data "\$payload" "\$AGENT_RUN_API_BASE/mcp/agents/runs/\$AGENT_RUN_ID/activities" 2>/dev/null || printf 000)"
+  case "\$status" in 2*) : ;; *) _comment_cap_note "run activity delivery failed (HTTP \$status), kept locally" ;; esac
+}
+
+_plain_comment() {
+  COMMENT_TEXT="\$1" python3 -c '
+import html, os, re
+print(html.unescape(re.sub(r"<[^>]+>", " ", os.environ["COMMENT_TEXT"])).strip())
+'
+}
+
+_allowed_comment() {
+  local plain
+  plain="\$(_plain_comment "\$1")"
+  case "\$plain" in
+    Question:*|Decision:*|Handoff:*|Done:*) return 0 ;;
+  esac
+  _run_activity action "\${plain:-empty comment}"
+  _comment_cap_note "quiet mode: redirected unmarked ticket comment to run activity"
+  return 1
+}
+
+_strip_owner_mentions() {
+  local text="\$1" owner_ids="\$2"
+  TEXT="\$text" OWNER_IDS="\$owner_ids" python3 -c '
+import os, re
+text = os.environ["TEXT"]
+owners = {value for value in os.environ["OWNER_IDS"].split(",") if value}
+pattern = re.compile(r"<span\\b(?=[^>]*data-label\\s*=\\s*[\"\\x27]?name-([A-Za-z0-9_-]+))[^>]*>(.*?)</span>", re.I | re.S)
+def replace(match):
+    return match.group(2) if not owners or match.group(1) in owners else match.group(0)
+print(pattern.sub(replace, text), end="")
+'
+}
+
 # An update has no ticket reference, so it cannot safely spend a per-ticket
 # allowance. Owner mentions must be added in a new comment where the wrapper
 # can identify the ticket and enforce its 24-hour ledger.
@@ -224,7 +339,18 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "update" ] && [ -n "\${3:-}" ]; th
     TEXT="\$(cat "\$FILE")"
   fi
   if [ -n "\$TEXT" ]; then
+    ORIGINAL_TEXT="\$TEXT"
     OWNER_IDS="\$(_board_owner_ids)"
+    if [ "\$QUIET" = "on" ]; then
+      TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
+      if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
+        _comment_cap_note "quiet mode: stripped board-owner mention from comment update"
+      fi
+    fi
+    _allowed_comment "\$TEXT" || exit 0
+    if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
+      exec hypertask --token "\$TOKEN" comment update "\$3" --text "\$TEXT"
+    fi
     if TEXT="\$TEXT" OWNER_IDS="\$OWNER_IDS" python3 -c '
 import os, re, sys
 mentions = set(re.findall(r"data-label\s*=\s*[^>]*?name-([A-Za-z0-9_-]+)", os.environ["TEXT"], re.I))
@@ -252,6 +378,15 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
     TEXT="\$(cat "\$FILE")"
   fi
   if [ -n "\$TEXT" ]; then
+    ORIGINAL_TEXT="\$TEXT"
+    OWNER_IDS="\$(_board_owner_ids)"
+    if [ "\$QUIET" = "on" ]; then
+      TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
+      if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
+        _comment_cap_note "quiet mode: stripped board-owner mention from comment on \$REF"
+      fi
+    fi
+    _allowed_comment "\$TEXT" || exit 0
     mkdir -p "\$(dirname "\$OWNER_MENTIONS")" 2>/dev/null || true
     touch "\$OWNER_MENTIONS"
     exec 9>>"\$OWNER_MENTIONS.lock"
@@ -371,7 +506,12 @@ else:
     # picked back up as if it were untouched. Without this, only the rank-3
     # "new work" path skipped an agent's own comment; a claimed-unfinished
     # ticket (rank 1) had no such guard and got reprocessed every tick.
-    if OUT="\$(hypertask --token "\$TOKEN" "\$@")"; then
+    if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
+      POST_ARGS=(comment add "\$REF" --text "\$TEXT")
+    else
+      POST_ARGS=("\$@")
+    fi
+    if OUT="\$(hypertask --token "\$TOKEN" "\${POST_ARGS[@]}")"; then
       RC=0
     else
       RC=\$?
@@ -1430,24 +1570,19 @@ unpushed: this working directory is thrown away when the process exits.
 
 ${AGENT_ADVISOR_GUIDANCE:+$AGENT_ADVISOR_GUIDANCE
 
-}THREE COMMENTS, MAXIMUM, for this whole run. A ticket a human has to scroll is
-a ticket nobody reads.
+}Ticket comments have exactly four allowed kinds. Start one with \`Question:\`
+only when a human must answer; name what you need and end it with a question
+mark. Start one with \`Decision:\` for a fact the owner must know. Start one
+with \`Handoff:\` and name the receiving agent. Start one with \`Done:\` as a
+single line containing the pull request link. Claims, plans, progress, checks,
+retries, blockers, costs, and gate ledgers are run activity, not comments.
+The board wrapper redirects any unmarked comment to activity.
 
-1. One claim comment, which is also the only place you list the skills you are
-   about to follow. Do not post the route and the claim separately: take the
-   ROUTE: line from $route_sh and pass it to $claim_sh with --skills, or post
-   the single merged comment yourself and skip the script's own.
-2. One result comment at the end: the pull request link, or what stopped you
-   and why. The cost line goes in this comment, not a comment of its own. A
-   gates ledger goes in this comment too, or is kept up to date in place with
-   \`$board_cli comment update <id>\`, never appended as a new comment each pass.
-3. A reply, only if somebody asks you something.
-
-Anything else you want to say belongs in the pull request body or the run log.
-Write as $agent_name, in HTML block tags, with
-\`$board_cli comment add $ref --text '<p>...</p>'\`. Never write in Valentin's
-name. A run that ends with nothing on the ticket is a run nobody can see, so
-the result comment is not optional, including when you are blocked.
+When QUIET is on, never @mention the board owner. Move the ticket to the review
+lane for attention. The wrapper strips and logs an owner mention before posting.
+The existing maximum of three comments per ticket per day and one reminder per
+day remains. Write as $agent_name, in HTML block tags, with
+\`$board_cli comment add $ref --text '<p>Done: https://github.com/org/repo/pull/1</p>'\`.
 
 Do not ask for permission and do not stop halfway.
 

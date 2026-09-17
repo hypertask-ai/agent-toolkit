@@ -17,19 +17,21 @@ Anything specific to this repo's code belongs in `.claude/skills/`, not here.
 ## One ticket at a time
 
 An agent owns one ticket from start to hand-off. Do not pick up a second while
-the first is open. A ticket somebody else has claimed is theirs: a claim
-comment plus the in-progress column means in flight, do not touch.
+the first is open. A ticket somebody else has claimed is theirs: its assignment
+and in-progress column mean it is in flight, so do not touch.
 
-## Three comments, maximum
+## Four comment kinds
 
-Per ticket, per day: a claim, a question if you genuinely need one, and a
-hand-off. That is the cap unless a human writes in between. A run that wants a
-fourth comment is a run that is narrating instead of working. Say the thing
-once.
+A ticket comment starts with `Question:`, `Decision:`, `Handoff:`, or `Done:`.
+A question names what a human must provide and ends with a question mark. A
+decision is a fact the owner must know. A handoff names the receiving agent.
+Done is one line with the pull request link. Claims, plans, progress, checks,
+retries, blockers, and costs are run activity, not comments.
 
-A reminder or status line is posted once and then edited in place with
-`hypertask comment update <id>`, never re-posted. Post at most one reminder
-comment per ticket per day. A due-date countdown is one edited comment.
+The existing limit remains three comments and one reminder per ticket per day
+unless a human writes in between. Post a reminder once and edit it in place.
+With quiet mode on, never mention the board owner; move the ticket to review to
+request attention.
 
 Every comment is HTML block tags: `<p>`, `<ul><li>`, `<strong>`. Never bare
 text and never a run of `<br>` tags. Bare text renders in the wrong font and
