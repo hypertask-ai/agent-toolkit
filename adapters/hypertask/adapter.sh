@@ -806,84 +806,177 @@ print(json.dumps(row))
 }
 
 # adapter_new_comments_on_owned <token-file> <board-id> <agent-id> <agent-name>
-# Optional: core calls this only if it is defined (declare -F), the same way
-# it calls adapter_pick_rank. Prints one row per ticket, same shape as
-# adapter_list_candidates plus "trigger": "new_comment", for every ticket this
-# agent owns whose newest comment is external -- in any section, not only
-# WATCH_SECTIONS, because a ticket this agent claimed can move to a review
-# column the poll never watches, and a reply there would otherwise be
-# invisible. Bounded by OWNED_COMMENT_READ_CAP (default 40) comments reads
-# PER BOARD per tick, assigned tickets checked first, and within the
-# comment-only ones, most recently updated first: an agent with more owned
-# tickets than the cap allows still surfaces a fresh human reply the same
-# tick it lands, instead of a reply on whichever ticket happens to sort
-# first getting starved forever behind an always-checked-first stale one.
+# Optional: reads each board's recently updated ticket comments until it reaches
+# the last comment id this agent saw there. The cursor avoids rereading a fixed
+# window of ticket histories, and the per-tick ceiling bounds a genuine backlog
+# without emitting one warning per skipped ticket.
 adapter_new_comments_on_owned() {
   local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4"
-  local one json rows cand cand_id reads cap="${OWNED_COMMENT_READ_CAP:-40}"
+  local one status tasks rows task task_id comments page_stats page_count page_max
+  local page_caught page_cursor comments_cursor remaining direct offset returned
+  local cursor_file last_seen max_seen read_count hit_ceiling ceiling_board page_has_new comments_file
+  local ceiling="${OWNED_COMMENT_READ_CEILING:-500}"
+  read_count=0
+  hit_ceiling="no"
+  ceiling_board=""
+
   for one in $(printf '%s' "$board_id" | tr ',' ' '); do
     [ -n "$one" ] || continue
-    # Each board gets its own budget of $cap reads: a board with more owned
-    # tickets than the cap must not spend the next board's allowance too,
-    # which is how a warning could once fire "on board 5156" without this
-    # function ever having looked at board 5156 at all.
-    reads=0
-    json="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&limit=100")"
-    rows="$(printf '%s' "$json" | BOARD="$one" AID="$agent_id" python3 -c '
+    cursor_file="$STATE_DIR/$SLUG.comment-cursor.$one"
+    last_seen=0
+    if [ -r "$cursor_file" ]; then
+      read -r last_seen < "$cursor_file" || last_seen=0
+    fi
+    [[ "$last_seen" =~ ^[0-9]+$ ]] || last_seen=0
+    max_seen="$last_seen"
+
+    # Archived tickets are a separate API status, not a board column. Scan
+    # both feeds so a human can address the agent after a ticket was archived.
+    for status in Normal Archive; do
+      offset=0
+      while [ "$read_count" -lt "$ceiling" ]; do
+        tasks="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&status=${status}&sort_by=updatedAt&sort_order=desc&limit=100&offset=${offset}")"
+        rows="$(printf '%s' "$tasks" | BOARD="$one" python3 -c '
 import json, os, sys
 board = os.environ["BOARD"]
-aid = os.environ["AID"]
-doc = json.load(sys.stdin)
-assigned_rows, commented_rows = [], []
-for task in doc.get("tasks") or []:
-    section = str(task.get("section") or "")
-    if section.casefold() in ("done", "archive", "shipped"):
+for task in json.load(sys.stdin).get("tasks") or []:
+    if not (task.get("commentCount") or 0):
         continue
-    agent_ids = []
     assignees = task.get("assignees") or []
+    agent_ids = []
     for who in assignees:
-        a = who.get("agent") if isinstance(who, dict) else None
-        if isinstance(a, dict) and a.get("id"):
-            agent_ids.append(str(a["id"]))
+        agent = who.get("agent") if isinstance(who, dict) else None
+        if isinstance(agent, dict) and agent.get("id"):
+            agent_ids.append(str(agent["id"]))
     labels = []
     for label in task.get("labels") or []:
-        if isinstance(label, dict):
-            name = label.get("name") or label.get("title") or label.get("label") or ""
-        else:
-            name = str(label)
+        name = (label.get("name") or label.get("title") or label.get("label") or "") if isinstance(label, dict) else str(label)
         if name:
             labels.append(str(name).strip().casefold())
     ref = str(task.get("ticketNumber") or "")
     index = ref.rsplit("-", 1)[-1] if "-" in ref else str(task.get("id"))
-    row = {
-        "id": task.get("id"), "ref": ref, "section": section,
+    print(json.dumps({
+        "id": task.get("id"), "ref": ref, "section": str(task.get("section") or ""),
         "title": task.get("title") or "", "description": task.get("description") or "",
         "agent_ids": agent_ids, "assignee_count": len(assignees), "labels": labels,
         "comment_count": task.get("commentCount") or 0, "board": board,
         "url": "https://app.hypertask.ai/detail/project-%s/%s" % (board, index),
-    }
-    if aid in agent_ids:
-        assigned_rows.append(row)
-    elif row["comment_count"] > 0:
-        commented_rows.append((task.get("updatedAt") or "", row))
-# Assigned tickets first (this agent owns the outcome outright), then the
-# merely-commented-on ones newest-activity-first, so a cap that has to skip
-# some skips the stalest, not whichever loaded first from the API.
-commented_rows.sort(key=lambda pair: pair[0], reverse=True)
-for row in assigned_rows + [row for _, row in commented_rows]:
-    print(json.dumps(row))
+    }))
 ')"
-    while IFS= read -r cand; do
-      [ -n "$cand" ] || continue
-      if [ "$reads" -ge "$cap" ]; then
-        warn "adapter_new_comments_on_owned: hit OWNED_COMMENT_READ_CAP=$cap on board $one, the rest wait for the next tick"
-        break
-      fi
-      reads=$((reads + 1))
-      cand_id="$(ROW="$cand" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["id"])')"
-      _ht_owned_row "$token_file" "$cand_id" "$cand" "$one" "$agent_id"
-    done <<< "$rows"
+        returned="$(printf '%s' "$tasks" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("tasks") or []))')"
+        [ "$returned" -gt 0 ] || break
+        page_has_new="no"
+
+        while IFS= read -r task; do
+          [ -n "$task" ] || continue
+          [ "$read_count" -lt "$ceiling" ] || { hit_ceiling="yes"; break; }
+          task_id="$(ROW="$task" python3 -c 'import json,os; print(json.loads(os.environ["ROW"])["id"])')"
+          comments_file="${TMPDIR:-/tmp}/agent-board-comments.$$.$one.$task_id"
+          : > "$comments_file"
+          comments_cursor=""
+
+          while [ "$read_count" -lt "$ceiling" ]; do
+            remaining=$((ceiling - read_count))
+            [ "$remaining" -le 100 ] || remaining=100
+            comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${one}&limit=${remaining}${comments_cursor:+&cursor=${comments_cursor}}" 2>/dev/null)" || break
+            page_stats="$(printf '%s' "$comments" | LAST="$last_seen" OUT="$comments_file" python3 -c '
+import json, os, sys
+doc = json.load(sys.stdin)
+last = int(os.environ["LAST"])
+comments = doc.get("comments") or []
+new = [c for c in comments if int(c.get("id") or 0) > last]
+with open(os.environ["OUT"], "a", encoding="utf-8") as handle:
+    for comment in new:
+        handle.write(json.dumps(comment) + "\n")
+maximum = max([int(c.get("id") or 0) for c in new] or [last])
+caught = any(int(c.get("id") or 0) <= last for c in comments) or not doc.get("nextCursor")
+print("%d\t%d\t%s\t%s" % (len(new), maximum, "yes" if caught else "no", doc.get("nextCursor") or ""))
+')"
+            IFS=$'\t' read -r page_count page_max page_caught page_cursor <<< "$page_stats"
+            read_count=$((read_count + page_count))
+            [ "$page_max" -le "$max_seen" ] || max_seen="$page_max"
+            [ "$page_count" -eq 0 ] || page_has_new="yes"
+            if [ "$page_caught" = "yes" ]; then break; fi
+            comments_cursor="$page_cursor"
+          done
+
+          if [ -s "$comments_file" ]; then
+            direct="$(ROW="$task" COMMENTS="$comments_file" AID="$agent_id" ANAME="$agent_name" MENTION="agent-$agent_id" python3 -c '
+import html, json, os, re
+row = json.loads(os.environ["ROW"])
+with open(os.environ["COMMENTS"], encoding="utf-8") as handle:
+    comments = [json.loads(line) for line in handle if line.strip()]
+
+def key(c):
+    return (str(c.get("createdAt") or ""), int(c.get("id") or 0))
+
+def actor(c):
+    agent = c.get("agent") if isinstance(c.get("agent"), dict) else None
+    creator = c.get("creator") if isinstance(c.get("creator"), dict) else {}
+    return agent, (agent or creator).get("displayName") or ""
+
+def body(c):
+    return c.get("text") or c.get("commentText") or c.get("html") or ""
+
+latest_own = None
+addressed = []
+for comment in comments:
+    agent, author = actor(comment)
+    own = (agent and str(agent.get("id") or "") == os.environ["AID"]) or (
+        not agent and author.strip().casefold() == os.environ["ANAME"].strip().casefold())
+    if own:
+        if latest_own is None or key(comment) > key(latest_own):
+            latest_own = comment
+        continue
+    if agent:
+        continue
+    text = body(comment)
+    plain = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    if os.environ["MENTION"] in text or "?" in plain:
+        addressed.append(comment)
+if addressed:
+    trigger = max(addressed, key=key)
+    if latest_own is None or key(trigger) > key(latest_own):
+        _, author = actor(trigger)
+        row["trigger"] = "reply_only"
+        row["trigger_comment"] = {
+            "id": trigger.get("id"), "html": body(trigger),
+            "author": author, "agent_id": "",
+        }
+        print(json.dumps(row))
+')"
+            if [ -n "$direct" ]; then
+              printf '%s\n' "$direct"
+            else
+              _ht_owned_row "$token_file" "$task_id" "$task" "$one" "$agent_id"
+            fi
+          fi
+          rm -f "$comments_file"
+          if [ "$read_count" -ge "$ceiling" ]; then hit_ceiling="yes"; break; fi
+        done <<< "$rows"
+
+        [ "$hit_ceiling" = "no" ] || break
+        # Tickets are updated newest first. Once a whole page has no comment
+        # newer than the board cursor, older task pages are already caught up.
+        [ "$page_has_new" = "yes" ] || break
+        [ "$returned" -eq 100 ] || break
+        offset=$((offset + returned))
+      done
+      [ "$hit_ceiling" = "no" ] || break
+    done
+
+    if [ "$max_seen" -gt "$last_seen" ]; then
+      printf '%s\n' "$max_seen" > "$cursor_file.new"
+      mv "$cursor_file.new" "$cursor_file"
+    fi
+    if [ "$hit_ceiling" = "yes" ]; then
+      ceiling_board="$one"
+      break
+    fi
   done
+  if [ "$hit_ceiling" = "yes" ]; then
+    warn "adapter_new_comments_on_owned: hit comment read ceiling $ceiling on board $ceiling_board; remaining comments wait for the next tick"
+  fi
 }
 
 # The marker an @mention of this agent leaves in stored comment HTML:
@@ -1462,6 +1555,7 @@ for comment in reversed(comments):
         break
 
 done = section in {"done", "archive", "shipped"}
+reply_only = "reply_only" in reason.split("+")
 
 prs = json.loads(os.environ["PR_JSON"]) or []
 # gh --search is a full-text search, so keep only the pull requests that
@@ -1472,7 +1566,10 @@ merged = any(str(p.get("state") or "").upper() == "MERGED" for p in prs)
 open_pr = [p for p in prs if str(p.get("state") or "").upper() == "OPEN"]
 pr_known = os.environ["HAVE_PR_VIEW"] == "yes"
 
-if done:
+if reply_only:
+    print("-3 %s has a human direct mention or question, so it is a reply-only candidate in %s"
+          % (ref, section))
+elif done:
     print("0 %s is %s, nothing left to do" % (ref, section))
 elif qa_fail and worked:
     print("2 %s was sent back by QA on work this agent did, so it comes before any new ticket" % ref)

@@ -1,3 +1,14 @@
+## 3.26.0 - 2026-09-17
+
+- Human questions and direct mentions now become reply-only runs in every
+  ticket state, including Done and archived tickets.
+- Reply-only runs answer without code changes, claims, pull requests, or column
+  moves, and rank ahead of normal ticket work and pull-request debt.
+- Owned-comment discovery now advances a per-board comment cursor through
+  paginated reads, with a 500-comment tick ceiling and one warning per tick.
+- ACTION: run `agent-template update --keep-timers` so current agents answer
+  old-ticket questions promptly without changing timer state.
+
 ## 3.25.0 - 2026-09-17
 
 - Question and Decision comments now receive the pospeak, unslop, and

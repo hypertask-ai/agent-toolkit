@@ -557,7 +557,7 @@ rank_order() {
 }
 
 # Candidates that passed every gate, waiting to be ranked against each other.
-ELIGIBLE=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=(); E_REASON=(); E_PR_FIX=()
+ELIGIBLE=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=(); E_REASON=(); E_PR_FIX=(); E_REPLY_ONLY=()
 
 # ---------- one tick at a time ----------
 # The systemd unit is Type=oneshot, so systemd already refuses a second run
@@ -669,6 +669,8 @@ for line in sys.stdin:
     if key in rows:
         if row.get("trigger") and not rows[key].get("trigger"):
             rows[key]["trigger"] = row["trigger"]
+            if row.get("trigger_comment"):
+                rows[key]["trigger_comment"] = row["trigger_comment"]
         continue
     rows[key] = row
     order.append(key)
@@ -705,32 +707,14 @@ while IFS= read -r row; do
   section="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["section"])')"
   description="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["description"])')"
   assigned="$(ROW="$row" AID="$AGENT_ID" python3 -c 'import json,os;print("yes" if os.environ["AID"] in json.loads(os.environ["ROW"])["agent_ids"] else "no")')"
-  # An excluded label is a hard stop, whatever else is true of the ticket. A
-  # label like "valentin" means a person is working it; an agent that takes it
-  # anyway because it was also assigned or mentioned does the damage the label
-  # exists to prevent.
+  trigger="$(row_field "$row" trigger)"
+  is_pr_fix="no"
+  [ "$trigger" = "pr_fix" ] && is_pr_fix="yes"
   hit="$(ROW="$row" EXCL="$EXCLUDE_LABELS" python3 -c '
 import json, os
 row = json.loads(os.environ["ROW"])
 excluded = {s.strip().casefold() for s in os.environ["EXCL"].split(",") if s.strip()}
 print(",".join(sorted(set(row.get("labels") or []) & excluded)))')"
-  if [ -n "$hit" ]; then
-    explain "skip  $(row_field "$row" ref): carries the label $hit, which this agent stays away from"
-    continue
-  fi
-  trigger="$(row_field "$row" trigger)"
-  is_pr_fix="no"
-  [ "$trigger" = "pr_fix" ] && is_pr_fix="yes"
-  if [ -n "$PR_GATE" ] && [ "$is_pr_fix" = "no" ]; then
-    if [ "$PR_GATE_COUNT" -gt 1 ]; then
-      explain "skip  $ref: $PR_GATE_COUNT owned PRs are not live, so only oldest PR #$PR_GATE_NUMBER may run"
-      continue
-    fi
-    case ",$(row_labels "$row")," in
-      *,emergency,*) : ;;
-      *) explain "skip  $ref: PR #$PR_GATE_NUMBER is not live, so only that PR or an emergency may run"; continue ;;
-    esac
-  fi
   # A ticket is free only if nobody at all is on it: a name on a ticket, human
   # or agent, means it already belongs to somebody.
   unclaimed="$(ROW="$row" python3 -c '
@@ -742,17 +726,23 @@ print("yes" if json.loads(os.environ["ROW"]).get("assignee_count", 1) == 0 else 
   board="$(row_field "$row" board)"
   [ -n "$board" ] || board="${BOARD_ID%%,*}"
 
-  # The newest comment decides two things: whether an @mention addressed this
-  # agent, and the state key, so a reply on an old ticket counts as new work.
+  # The addressed comment may come from the board cursor scan rather than be
+  # the ticket's newest comment. Preserve that exact human question or mention
+  # so a later unrelated comment cannot hide what this run must answer.
   comment_id=0
   comment_text=""
   comment_is_own="no"
+  comment_is_human="no"
   mentioned="no"
   if [ "$is_pr_fix" = "yes" ]; then
     comment_json=""
     comment_text="$(row_field "$row" pr_feedback)"
   else
-    comment_json="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$board")"
+    comment_json="$(ROW="$row" python3 -c '
+import json, os
+value = json.loads(os.environ["ROW"]).get("trigger_comment")
+print(json.dumps(value) if value else "")')"
+    [ -n "$comment_json" ] || comment_json="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$board")"
   fi
   if [ -n "$comment_json" ]; then
     comment_id="$(CJ="$comment_json" python3 -c 'import json,os;print(json.loads(os.environ["CJ"]).get("id") or 0)')"
@@ -768,32 +758,59 @@ author = str(doc.get("author") or "").strip().casefold()
 own = agent_id == os.environ["AID"] or (not agent_id and author == os.environ["NAME"].strip().casefold())
 sys.exit(0 if own else 1)'; then
       comment_is_own="yes"
-    elif CJ="$comment_json" M="$MENTION" python3 -c '
+    else
+      if CJ="$comment_json" python3 -c 'import json,os,sys;sys.exit(0 if not json.loads(os.environ["CJ"]).get("agent_id") else 1)'; then
+        comment_is_human="yes"
+      fi
+      if CJ="$comment_json" M="$MENTION" python3 -c '
 import json, os, sys
 sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or "") else 1)'; then
-      mentioned="yes"
+        mentioned="yes"
+      fi
     fi
   fi
 
-  # A row from adapter_new_comments_on_owned carries its own trigger, because
-  # deciding it needed the full comment history, not just the newest comment
-  # this loop already has. Core does not recompute that; it only reads the
-  # verdict and folds it in like any other reason.
-  trigger="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get("trigger") or "")')"
-
-  reason=""
-  if [ "$assigned" = "yes" ]; then reason="assigned"; fi
-  if [ "$mentioned" = "yes" ]; then reason="${reason:+$reason+}mentioned"; fi
-  if [ -z "$reason" ] && [ "$CLAIM_UNASSIGNED" = "yes" ] && [ "$unclaimed" = "yes" ]; then
-    reason="unclaimed"
+  is_reply_only="no"
+  if [ "$trigger" = "reply_only" ]; then
+    is_reply_only="yes"
+  elif [ "$comment_is_human" = "yes" ] && { [ "$mentioned" = "yes" ] || [[ "$comment_text" == *\?* ]]; }; then
+    is_reply_only="yes"
   fi
-  if [ -n "$trigger" ]; then reason="${reason:+$reason+}$trigger"; fi
+
   # An agent-authored comment is never a wake-up from that same agent, even
   # when an old assignment or QA state would otherwise give the ticket a rank.
   if [ "$comment_is_own" = "yes" ]; then
     explain "skip  $ref: newest comment $comment_id is by this agent's own identity, so it cannot trigger another run"
     continue
   fi
+
+  # Human questions and direct mentions are answers, not ticket pickup. They
+  # bypass ownership labels and pull-request debt because the run cannot claim,
+  # move, or change the ticket's code. Every other run keeps the hard gates.
+  if [ "$is_reply_only" = "no" ] && [ -n "$hit" ]; then
+    explain "skip  $ref: carries the label $hit, which this agent stays away from"
+    continue
+  fi
+  if [ "$is_reply_only" = "no" ] && [ -n "$PR_GATE" ] && [ "$is_pr_fix" = "no" ]; then
+    if [ "$PR_GATE_COUNT" -gt 1 ]; then
+      explain "skip  $ref: $PR_GATE_COUNT owned PRs are not live, so only oldest PR #$PR_GATE_NUMBER may run"
+      continue
+    fi
+    case ",$(row_labels "$row")," in
+      *,emergency,*) : ;;
+      *) explain "skip  $ref: PR #$PR_GATE_NUMBER is not live, so only that PR or an emergency may run"; continue ;;
+    esac
+  fi
+
+  reason=""
+  if [ "$assigned" = "yes" ]; then reason="assigned"; fi
+  if [ "$mentioned" = "yes" ]; then reason="${reason:+$reason+}mentioned"; fi
+  if [ "$is_reply_only" = "yes" ]; then
+    reason="${reason:+$reason+}reply_only"
+  elif [ -z "$reason" ] && [ "$CLAIM_UNASSIGNED" = "yes" ] && [ "$unclaimed" = "yes" ]; then
+    reason="unclaimed"
+  fi
+  if [ -n "$trigger" ] && [ "$trigger" != "reply_only" ]; then reason="${reason:+$reason+}$trigger"; fi
   if [ -z "$reason" ]; then
     # Nothing about this ticket made it eligible for this agent (not
     # assigned, not mentioned, and either claimed already or this agent does
@@ -843,10 +860,12 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
   # mechanism: no process is stopped for either label tonight, a dev already
   # mid-run on something else finishes it first and picks the emergency or
   # urgent ticket on its next tick.
-  case ",$(row_labels "$row")," in
-    *,emergency,*) rank=-2; why="$why (emergency: preempts urgent and everything else)" ;;
-    *,urgent,*) rank=-1; why="$why (urgent: ranks above this agent's own unfinished work)" ;;
-  esac
+  if [ "$is_reply_only" = "no" ]; then
+    case ",$(row_labels "$row")," in
+      *,emergency,*) rank=-2; why="$why (emergency: preempts urgent and everything else)" ;;
+      *,urgent,*) rank=-1; why="$why (urgent: ranks above this agent's own unfinished work)" ;;
+    esac
+  fi
 
   key="$task_id:$comment_id"
   if [ "$is_pr_fix" = "no" ] && grep -qxF "$key" "$SEEN"; then
@@ -870,7 +889,7 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
   fi
 
   tries=0
-  if [ "$is_pr_fix" = "no" ]; then
+  if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
     tries="$(attempts_recent "$task_id")"
     if [ "$tries" -ge "$RETRY_LIMIT" ]; then
       explain "skip  $ref: $tries attempts already in the last $RETRY_WINDOW_SECONDS seconds"
@@ -890,6 +909,7 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
   E_TRIES+=("$tries")
   E_REASON+=("$reason")
   E_PR_FIX+=("$is_pr_fix")
+  E_REPLY_ONLY+=("$is_reply_only")
 done <<< "$CANDIDATES"
 
 # Pending checks and merged-but-not-deployed PRs deliberately consume the tick.
@@ -922,7 +942,9 @@ if [ "$DRY_RUN" = "yes" ]; then
     # candidate means a comments read and a gh query each, dozens of API calls
     # for an answer about tickets this tick was never going to touch, and the
     # board's host starts answering with a bot challenge.
-    if [ "${E_PR_FIX[$i]}" = "yes" ]; then
+    if [ "${E_REPLY_ONLY[$i]}" = "yes" ]; then
+      echo "    reply-only: answer the human; no code, claim, pull request, or column move"
+    elif [ "${E_PR_FIX[$i]}" = "yes" ]; then
       echo "    pull-request fix: no ticket attempts, triage, or escalation; ticket cooldown still applies"
     elif [ "$TRIAGE" = "yes" ] && [ "$shown" -le "$MAX_CONCURRENT_RUNS" ]; then
       row_board="$(row_field "$row" board)"; [ -n "$row_board" ] || row_board="${BOARD_ID%%,*}"
@@ -949,7 +971,7 @@ if [ "$DRY_RUN" = "yes" ]; then
 fi
 
 for i in $(rank_order); do
-  if [ "$started" -ge "$MAX_CONCURRENT_RUNS" ]; then
+  if [ "$started" -ge "$MAX_CONCURRENT_RUNS" ] && [ "${E_REPLY_ONLY[$i]}" = "no" ]; then
     log "hit MAX_CONCURRENT_RUNS=$MAX_CONCURRENT_RUNS, leaving the rest for the next tick"
     break
   fi
@@ -959,6 +981,7 @@ for i in $(rank_order); do
   why="${E_WHY[$i]}"
   reason="${E_REASON[$i]}"
   is_pr_fix="${E_PR_FIX[$i]}"
+  is_reply_only="${E_REPLY_ONLY[$i]}"
   task_id="$(row_field "$row" id)"
   ref="$(row_field "$row" ref)"
   title="$(row_field "$row" title)"
@@ -991,7 +1014,7 @@ print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:120
   # model, and whether the agent has to plan first) have to be settled before
   # the first token is spent.
   TRIAGE_THIS="easy"
-  if [ "$TRIAGE" = "yes" ] && [ "$is_pr_fix" = "no" ]; then
+  if [ "$TRIAGE" = "yes" ] && [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
     triage_verdict="$(triage_score "$ref" "$task_id" "$board" "$title" "$description" \
                         "$(row_labels "$row")")"
     IFS='|' read -r TRIAGE_THIS triage_origin triage_reason <<< "$triage_verdict"
@@ -1067,6 +1090,25 @@ $AGENT_ADVISOR_GUIDANCE
 Keep fixing this PR until it merges and is live."
   fi
 
+  if [ "$is_reply_only" = "yes" ]; then
+    PROMPT="You are $AGENT_NAME in a reply-only run for $ref.
+
+Ticket $url: $title
+
+Human comment to answer: ${comment_text:-none}
+
+REPLY-ONLY CONTRACT: A direct mention or question from a human must always get
+an answer in this tick, regardless of whether the ticket is done, archived, in
+QA, or in any other column. Answer only that comment. Do not edit files, run a
+code change, claim or assign the ticket, move its column, open or update a pull
+request, or change any board state except posting the answer. With quiet mode
+on, post one concise \`Decision:\` comment in HTML block tags and do not
+@mention the board owner. If the configured comment policy permits a plain
+answer, that is also valid. Use:
+\`$BOARD_CLI comment add $ref --text '<p>Decision: concise answer</p>'\`.
+Then stop."
+  fi
+
   # A hard ticket gets two things the default path does not: a stronger model,
   # and an instruction to say what it is about to do before it does it. The
   # plan is the cheapest place to catch a wrong root cause, and it is a comment
@@ -1085,7 +1127,7 @@ Then do the work. Progress and plans are run activity, not ticket comments.
 $PROMPT"
   fi
 
-  if [ "${MANAGER:-off}" = "on" ]; then
+  if [ "${MANAGER:-off}" = "on" ] && [ "$is_reply_only" = "no" ]; then
     PROMPT="$PROMPT
 
 MANAGER COMMANDS:
@@ -1104,10 +1146,17 @@ COMMENT CONTRACT: A ticket comment must start with exactly one of these four mar
 
 $PLAIN_LANGUAGE_PROMPT
 
-QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any ticket comment. The board wrapper strips and logs an owner mention before posting. Attention comes from moving the ticket to the review column."
+QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any ticket comment. The board wrapper strips and logs an owner mention before posting."
+  if [ "$is_reply_only" = "yes" ]; then
+    PROMPT="$PROMPT
+
+This reply-only run must leave the ticket in its current column."
+  else
+    PROMPT="$PROMPT Attention comes from moving the ticket to the review column."
+  fi
 
   RUN_DIR="${AGENT_REPO:-}"
-  if [ "$WORKDIR_MODE" = "per-run" ]; then
+  if [ "$WORKDIR_MODE" = "per-run" ] && [ "$is_reply_only" = "no" ]; then
     RUN_DIR="$(core_workdir_create "${AGENT_REPO:-}" "$WORKDIR_ROOT" "$SLUG-$ref" 2>>"$LOG")" || {
       log "run FAILED $ref: could not make a working directory under $WORKDIR_ROOT"
       if [ "$is_pr_fix" = "no" ]; then
@@ -1128,8 +1177,12 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any 
   runtime_run_id="local"
   if declare -F adapter_run_open >/dev/null 2>&1; then
     runtime_run_id="$(adapter_run_open "$TOKEN_FILE" "$task_id" "$LOG")"
-    adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "claimed $ref"
-    adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "started $ref"
+    if [ "$is_reply_only" = "yes" ]; then
+      adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "started reply-only $ref"
+    else
+      adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "claimed $ref"
+      adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "started $ref"
+    fi
     if [ "$tries" -gt 0 ] || [ "$is_pr_fix" = "yes" ]; then
       adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "retrying $ref"
     fi
@@ -1158,7 +1211,7 @@ print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
   log "$SKILLS_LINE"
   started=$((started + 1))
   OPEN_PRS_BEFORE=""
-  if [ "$is_pr_fix" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
+  if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
     OPEN_PRS_BEFORE="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
   fi
   set +e
@@ -1208,7 +1261,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
   rc=$?
   set -e
   cat "$ERRFILE" >> "$LOG" 2>/dev/null || true
-  if [ "$is_pr_fix" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
+  if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
     OPEN_PRS_AFTER="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
     while IFS= read -r opened_number; do
       [ -n "$opened_number" ] || continue
@@ -1234,7 +1287,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
   # newest-comment key as untouched and reprocessed a ticket this agent had
   # already answered, over and over until the attempt budget stopped it.
   if [ "$rc" -ne 0 ]; then
-    if [ "$is_pr_fix" = "no" ]; then
+    if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
       printf '%s %s %s failed\n' "$task_id" "$(date +%s)" "$RUN_MODEL_RUNG" >> "$ATTEMPTS"
     fi
     # A failed run must not alter the ticket or mark its trigger handled. The
@@ -1247,7 +1300,10 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" error "blocked $ref: model exited $rc"
       adapter_run_stop "$TOKEN_FILE" "$runtime_run_id" "$LOG" failed
     fi
-    if [ "$is_pr_fix" = "yes" ]; then
+    if [ "$is_reply_only" = "yes" ]; then
+      printf 'ERROR: the reply-only run for %s exited %s. Do this next: read %s; the same human comment retries after the ticket cooldown\n' \
+        "$ref" "$rc" "$LOG" >&2
+    elif [ "$is_pr_fix" = "yes" ]; then
       printf 'ERROR: the PR-fix run for %s exited %s. Do this next: read %s; this PR has no attempt limit and retries after the ticket cooldown\n' \
         "$ref" "$rc" "$LOG" >&2
     else
@@ -1283,9 +1339,11 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
   # made along the way is checked and pushed on its own: it lives in the
   # skills repo, not this ticket's worktree, and its fate is not this
   # ticket's fate. Guarded: this must never fail the tick, only its own step.
-  push_skill_commits "$ref" \
-    || log "skill push commits step failed for $ref, continuing the tick"
-  if [ "$WORKDIR_MODE" = "per-run" ]; then
+  if [ "$is_reply_only" = "no" ]; then
+    push_skill_commits "$ref" \
+      || log "skill push commits step failed for $ref, continuing the tick"
+  fi
+  if [ "$WORKDIR_MODE" = "per-run" ] && [ "$is_reply_only" = "no" ]; then
     core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
   fi
 done
