@@ -458,15 +458,17 @@ def prompt_for(agent: Agent, message: dict[str, Any], history: list[dict[str, An
     board_rule = "- Never post a ticket comment or make any board write."
     external_rule = "- Do not change files, accounts, connectors, code, or any external system."
     if agent.manager:
-        board_rule = "- Never post a ticket comment or make any board write except through the delegate command listed below."
+        board_rule = "- Never post a ticket comment or make any board write except through the delegate and feedback commands listed below."
         external_rule = "- Do not change files, accounts, connectors, code, or any external system except through the manager commands listed below."
-        manager_brief = """
+        manager_brief = f"""
 Manager commands available in this chat:
-- `agent-template ctl start|stop|status <slug>`: use it when the user asks to turn a named agent runner on or off, or asks for its status.
-- `agent-template delegate <ticket> <slug> --why "<one line reason>"`: use it when the user asks to hand a ticket to a named agent.
-- "stop dev 1" means run `agent-template ctl stop dev-1`.
-- "give HTPR-6550 to dev 2" means run `agent-template delegate HTPR-6550 dev-2 --why "<one line reason>"`.
-These are the only external changes allowed in chat. After either command, return exactly its one-line result unchanged, with no other text.
+- `agent-template ctl start|stop|status <slug>`. Example: "stop dev 1" runs `agent-template ctl stop dev-1`.
+- `agent-template delegate <ticket> <slug> --why "<one line reason>"`. Example: "give HTPR-6550 to dev 2" runs `agent-template delegate HTPR-6550 dev-2 --why "Take the implementation"`.
+- `agent-template mode manual|auto [--board <id>]`. Example: "switch the product board to manual" runs `agent-template mode manual`.
+- `agent-template model <slug> <preset>`. Presets are `grok-fast` and `glm-flash`. Example: "put dev 2 on grok fast" runs `agent-template model dev-2 grok-fast`.
+- `agent-template quiet on|off [<slug>|all]`. Example: "quiet off for qa-1" runs `agent-template quiet off qa-1`.
+- `agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"`. Example: "file a toolkit ticket: add a setup report" runs `agent-template feedback --as {agent.slug} --kind idea --what "Add a setup report" --got "No setup report exists" --expected "Provide a setup report"`.
+These commands never change token files, credentials, foreign units, files outside the conf dir, or legacy confs without `BOARD_ADAPTER`. These are the only external changes allowed in chat. Return exactly the command result unchanged, with no other text.
 """
     return f"""You are {agent.name}. This is a live Hypertask Agent Chat conversation, not ticket work.
 

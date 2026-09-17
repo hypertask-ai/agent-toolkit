@@ -54,9 +54,16 @@ assert "agent-template ctl" not in regular_prompt
 assert "agent-template delegate" not in regular_prompt
 assert "agent-template ctl start|stop|status <slug>" in manager_prompt
 assert 'agent-template delegate <ticket> <slug> --why "<one line reason>"' in manager_prompt
-assert "agent-template ctl stop dev-1" in manager_prompt
-assert "agent-template delegate HTPR-6550 dev-2" in manager_prompt
-assert "return exactly its one-line result unchanged" in manager_prompt
+assert "agent-template mode manual|auto [--board <id>]" in manager_prompt
+assert "agent-template model <slug> <preset>" in manager_prompt
+assert "agent-template quiet on|off [<slug>|all]" in manager_prompt
+assert "agent-template feedback --as <slug>" in manager_prompt
+assert "switch the product board to manual" in manager_prompt
+assert "put dev 2 on grok fast" in manager_prompt
+assert "quiet off for qa-1" in manager_prompt
+assert "file a toolkit ticket:" in manager_prompt
+assert "agent-template mode" not in regular_prompt
+assert "Return exactly the command result unchanged" in manager_prompt
 print("PASS agent-chat-manager-command-contract")
 
 

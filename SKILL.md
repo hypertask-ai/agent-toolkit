@@ -470,23 +470,37 @@ See `CONF.md` for the complete schema.
 
 ## Manager agents
 
-`MANAGER="on"` gives that agent two commands. All other agents are refused and
-do not receive these commands in runner or chat prompts.
+`MANAGER="on"` gives that agent the commands below. All other agents are
+refused and do not receive them in runner or chat prompts.
 
 ```sh
 agent-template ctl start|stop|status <slug>
 agent-template delegate <ticket> <slug> --why "<one line reason>"
+agent-template mode manual|auto [--board <id>]
+agent-template model <slug> <preset>
+agent-template quiet on|off [<slug>|all]
+agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --got "<context>" --expected "<result>"
 ```
 
-`ctl` starts a runner timer, stops its timer and current service, or reports
-both states. It accepts only a current-schema agent slug. `delegate` uses the
-manager's own `BOARD_CLI`, assigns the target agent UUID, and posts one handoff
-comment. It refuses the board owner's tickets and userId 6. Every attempted
-manager action is recorded in
-`~/.local/state/agent-board-poll/manager-actions.log`.
+`mode` sets `CLAIM_UNASSIGNED` to `no` for manual or `yes` for auto on every
+dev and QA conf matching the selected board. An omitted board uses the
+manager's `BOARD_ID`. `model` accepts only the named `grok-fast` and
+`glm-flash` presets and writes their exact template policy command, never text
+supplied as a command. `quiet` sets `QUIET` for one current agent or all current
+agents. Each changed conf is first copied to `<conf>.bak-<timestamp>`, and the
+one-line result names every changed conf.
 
-A session can file feedback with an explicit identity using `agent-template
-feedback --as <slug> ...`, or with a wrapper using `--board-cli <path>`.
+`ctl` starts a runner timer, stops its timer and current service, or reports
+both states. `delegate` uses the manager's own `BOARD_CLI`, assigns the target
+agent UUID, and posts one handoff comment. `feedback --as` reads `BOARD_CLI`
+from that manager's conf and files the toolkit ticket as that identity. Direct
+feedback with `--board-cli` remains available outside the manager command path.
+
+Manager commands reject token or credential settings, foreign unit names,
+paths outside the configured conf directory, and confs without the
+`BOARD_ADAPTER` schema marker. Delegation also refuses the board owner's
+tickets and userId 6. Every accepted or refused manager action is recorded in
+`~/.local/state/agent-board-poll/manager-actions.log`.
 
 ## How hard is this ticket
 

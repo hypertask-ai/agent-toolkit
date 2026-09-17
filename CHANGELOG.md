@@ -1,3 +1,14 @@
+## 3.24.0 - 2026-09-17
+
+- AGTE-11 adds manager-only mode, model preset, quiet, and identity-bound
+  feedback commands with one-line results naming changed confs.
+- Config writes make timestamped backups and refuse free-form model commands,
+  credentials, foreign units, paths outside the conf directory, and legacy confs.
+- Runner and chat prompts list exact command syntax and plain-language examples
+  only for agents with `MANAGER="on"`.
+- ACTION: run `agent-template update --keep-timers` on the manager host, then
+  confirm only dev-1, dev-2, qa-1, and product-bot timers remain enabled.
+
 ## 3.23.0 - 2026-09-17
 
 - Runtime ticket work now opens an app run, streams lifecycle progress as run

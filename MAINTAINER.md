@@ -52,12 +52,24 @@ manager's current-schema conf. Missing or any other value means off.
   `agent-board-poll@<slug>.timer` and `.service` for a current-schema conf.
 - `agent-template delegate <ticket> <slug> --why "<one line reason>"` uses the
   manager's `BOARD_CLI`, assigns the target agent UUID, and posts the handoff.
+- `agent-template mode manual|auto [--board <id>]` changes
+  `CLAIM_UNASSIGNED` for every dev and QA conf on that board. The manager's
+  board is the default.
+- `agent-template model <slug> <preset>` accepts `grok-fast` or `glm-flash`
+  and writes only that preset's exact `MODEL_CLI` command.
+- `agent-template quiet on|off [<slug>|all]` writes `QUIET` to one or every
+  current conf.
+- `agent-template feedback --as <slug> ...` reads `BOARD_CLI` from the calling
+  manager's conf and files a toolkit ticket as that identity.
+- Every changed conf is backed up as `<conf>.bak-<timestamp>` before the write.
+- Commands refuse token and credential settings, foreign units, paths outside
+  the conf directory, and confs without the `BOARD_ADAPTER` schema marker.
 - Delegation refuses userId 6 and a ticket explicitly held by its board owner.
 - Every accepted or refused call is logged with caller, command, and timestamp
   in `~/.local/state/agent-board-poll/manager-actions.log`.
 
 Runner and chat prompts expose these commands only when `MANAGER="on"`. A chat
-reply after either command must be exactly the command's one-line result.
+reply after a command must be exactly the command's result.
 
 ## Channels
 

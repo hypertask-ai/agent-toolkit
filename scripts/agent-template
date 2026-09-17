@@ -7,6 +7,12 @@
 #
 #   agent-template delegate <ticket> <slug> --why "<one line reason>"
 #
+#   agent-template mode manual|auto [--board <id>]
+#
+#   agent-template model <slug> <preset>
+#
+#   agent-template quiet on|off [<slug>|all]
+#
 #   agent-template feedback --kind bug|change|idea \
 #       --what "<summary>" --got "<current behavior or context>" \
 #       --expected "<desired behavior>" \
@@ -149,7 +155,10 @@ case "$1" in
   version) cat "$CORE_ROOT/VERSION"; exit 0 ;;
   ctl) shift; SUBCOMMAND="ctl" ;;
   delegate) shift; SUBCOMMAND="delegate" ;;
-  feedback) shift ;;
+  mode) shift; SUBCOMMAND="mode" ;;
+  model) shift; SUBCOMMAND="model" ;;
+  quiet) shift; SUBCOMMAND="quiet" ;;
+  feedback) shift; SUBCOMMAND="feedback" ;;
   report) shift; SUBCOMMAND="report" ;;
   update) shift; SUBCOMMAND="update" ;;
   promote) shift; SUBCOMMAND="promote" ;;
@@ -190,24 +199,105 @@ manager_refuse() {
   exit 1
 }
 manager_current_conf() {
-  local slug="$1" conf
+  local slug="$1" config_dir conf resolved
   case "$slug" in
     ''|*[!a-z0-9-]*) return 1 ;;
   esac
-  conf="$(core_find_conf "$slug" 2>/dev/null)" || return 1
-  [ "$(basename "$conf")" = "$slug.conf" ] || return 1
+  config_dir="$(readlink -f "$(core_config_dir)")" || return 1
+  conf="$config_dir/$slug.conf"
+  [ -f "$conf" ] && [ ! -L "$conf" ] || return 1
+  resolved="$(readlink -f "$conf")" || return 1
+  [ "$(dirname "$resolved")" = "$config_dir" ] || return 1
+  [ "$(basename "$resolved")" = "$slug.conf" ] || return 1
   grep -q '^BOARD_ADAPTER=' "$conf" || return 1
   grep -qvE '^\s*(#.*)?$|^[A-Z][A-Z0-9_]*=' "$conf" && return 1
   printf '%s' "$conf"
 }
 manager_conf_value() {
-  local conf="$1" key="$2"
-  (
-    unset "$key"
-    # shellcheck disable=SC1090
-    . "$conf"
-    printf '%s' "${!key:-}"
-  )
+  python3 - "$1" "$2" <<'PYEOF'
+import re, shlex, sys
+path, wanted = sys.argv[1:]
+value = ""
+with open(path, encoding="utf-8") as handle:
+    for raw in handle:
+        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", raw.rstrip("\n"))
+        if not match or match.group(1) != wanted:
+            continue
+        try:
+            parsed = shlex.split(match.group(2), posix=True)
+        except ValueError:
+            raise SystemExit(1)
+        value = parsed[0] if parsed else ""
+print(value, end="")
+PYEOF
+}
+manager_set_conf_value() {
+  local conf="$1" key="$2" value="$3" backup
+  case "$key" in
+    CLAIM_UNASSIGNED|MODEL_CLI|QUIET) ;;
+    *) manager_refuse "$SUBCOMMAND refused: $key is not a manager-editable setting" ;;
+  esac
+  grep -q '^BOARD_ADAPTER=' "$conf" \
+    || manager_refuse "$SUBCOMMAND refused: $(basename "$conf") has no schema marker"
+  [ "$(manager_conf_value "$conf" "$key")" != "$value" ] || return 1
+  backup="$conf.bak-${MANAGER_TIMESTAMP:?}"
+  cp -a "$conf" "$backup"
+  CONF_KEY="$key" CONF_VALUE="$value" python3 - "$conf" <<'PYEOF'
+import os, re, stat, tempfile
+from pathlib import Path
+
+path = Path(__import__("sys").argv[1])
+key = os.environ["CONF_KEY"]
+value = os.environ["CONF_VALUE"]
+escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+replacement = f'{key}="{escaped}"\n'
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+found = False
+for index, line in enumerate(lines):
+    if re.match(rf"^{re.escape(key)}=", line):
+        lines[index] = replacement
+        found = True
+if not found:
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    lines.append(replacement)
+mode = stat.S_IMODE(path.stat().st_mode)
+fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+    os.chmod(temporary, mode)
+    os.replace(temporary, path)
+finally:
+    try:
+        os.unlink(temporary)
+    except FileNotFoundError:
+        pass
+PYEOF
+}
+manager_board_matches() {
+  local conf="$1" wanted="$2" board
+  board="$(manager_conf_value "$conf" BOARD_ID)"
+  case ",$board," in
+    *",$wanted,"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+manager_changed_reply() {
+  local action="$1"
+  shift
+  if [ "$#" -eq 0 ]; then
+    echo "$action: no confs changed"
+  else
+    echo "$action: changed $(printf '%s\n' "$@" | paste -sd, -)"
+  fi
+}
+manager_model_command() {
+  case "$1" in
+    grok-fast) printf '%s' 'cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust' ;;
+    glm-flash) printf '%s' 'pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash' ;;
+    *) return 1 ;;
+  esac
 }
 manager_authorize() {
   local conf
@@ -312,6 +402,87 @@ PYEOF
   "$MANAGER_BOARD_CLI" comment add "$ticket" --text "$handoff" >/dev/null 2>&1 \
     || manager_refuse "delegate failed: $ticket was assigned but the handoff comment failed"
   echo "$handoff"
+  exit 0
+fi
+
+if [ "${SUBCOMMAND:-feedback}" = "mode" ]; then
+  manager_authorize "$@"
+  [ "$#" -eq 1 ] || { [ "$#" -eq 3 ] && [ "$2" = "--board" ]; } \
+    || manager_refuse "mode refused: use agent-template mode manual|auto [--board <id>]"
+  mode="$1"
+  case "$mode" in
+    manual) claim="no" ;;
+    auto) claim="yes" ;;
+    *) manager_refuse "mode refused: mode must be manual or auto" ;;
+  esac
+  board="${3:-$(manager_conf_value "$MANAGER_CONF" BOARD_ID)}"
+  case "$board" in ''|*[!0-9]*) manager_refuse "mode refused: board id must be one number" ;; esac
+  MANAGER_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%N)"
+  changed=()
+  config_dir="$(readlink -f "$(core_config_dir)")"
+  shopt -s nullglob
+  for candidate in "$config_dir"/*.conf; do
+    slug="$(basename "$candidate" .conf)"
+    conf="$(manager_current_conf "$slug" 2>/dev/null)" || continue
+    kind="$(manager_conf_value "$conf" AGENT_KIND)"
+    case "$kind" in dev|qa) ;; *) continue ;; esac
+    manager_board_matches "$conf" "$board" || continue
+    if manager_set_conf_value "$conf" CLAIM_UNASSIGNED "$claim"; then
+      changed+=("$(basename "$conf")")
+    fi
+  done
+  shopt -u nullglob
+  manager_changed_reply "mode $mode board $board" "${changed[@]}"
+  exit 0
+fi
+
+if [ "${SUBCOMMAND:-feedback}" = "model" ]; then
+  manager_authorize "$@"
+  [ "$#" -eq 2 ] \
+    || manager_refuse "model refused: use agent-template model <slug> <preset>"
+  target="$1"
+  preset="$2"
+  target_conf="$(manager_current_conf "$target")" \
+    || manager_refuse "model refused: $target is not a current agent slug in the conf dir"
+  command="$(manager_model_command "$preset")" \
+    || manager_refuse "model refused: preset must be grok-fast or glm-flash"
+  MANAGER_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%N)"
+  if manager_set_conf_value "$target_conf" MODEL_CLI "$command"; then
+    manager_changed_reply "model $target $preset" "$(basename "$target_conf")"
+  else
+    manager_changed_reply "model $target $preset"
+  fi
+  exit 0
+fi
+
+if [ "${SUBCOMMAND:-feedback}" = "quiet" ]; then
+  manager_authorize "$@"
+  [ "$#" -ge 1 ] && [ "$#" -le 2 ] \
+    || manager_refuse "quiet refused: use agent-template quiet on|off [<slug>|all]"
+  setting="$1"
+  case "$setting" in on|off) ;; *) manager_refuse "quiet refused: setting must be on or off" ;; esac
+  target="${2:-all}"
+  MANAGER_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%N)"
+  changed=()
+  if [ "$target" = "all" ]; then
+    config_dir="$(readlink -f "$(core_config_dir)")"
+    shopt -s nullglob
+    for candidate in "$config_dir"/*.conf; do
+      slug="$(basename "$candidate" .conf)"
+      conf="$(manager_current_conf "$slug" 2>/dev/null)" || continue
+      if manager_set_conf_value "$conf" QUIET "$setting"; then
+        changed+=("$(basename "$conf")")
+      fi
+    done
+    shopt -u nullglob
+  else
+    conf="$(manager_current_conf "$target")" \
+      || manager_refuse "quiet refused: $target is not a current agent slug in the conf dir"
+    if manager_set_conf_value "$conf" QUIET "$setting"; then
+      changed+=("$(basename "$conf")")
+    fi
+  fi
+  manager_changed_reply "quiet $setting $target" "${changed[@]}"
   exit 0
 fi
 
@@ -900,12 +1071,14 @@ if [ "$#" -eq 0 ]; then
   exit 0
 fi
 
+FEEDBACK_MANAGER_ARGS="$*"
 WHAT=""
 GOT=""
 EXPECTED=""
 ADAPTER=""
 KIND="bug"
 SLUG=""
+FEEDBACK_AS_CONF=""
 BOARD_CLI_ARG=""
 DRY_RUN="no"
 OPT_OUT="no"
@@ -929,6 +1102,19 @@ while [ $# -gt 0 ]; do
     *) die "unknown option $1" "run agent-template feedback --help" ;;
   esac
 done
+
+if [ -n "$SLUG" ]; then
+  MANAGER_CALLER="$(manager_caller_slug)"
+  manager_log_call "$MANAGER_CALLER" "feedback $FEEDBACK_MANAGER_ARGS"
+  [ -n "$MANAGER_CALLER" ] \
+    || manager_refuse "feedback refused: no calling agent identity"
+  [ "$MANAGER_CALLER" = "$SLUG" ] \
+    || manager_refuse "feedback refused: --as $SLUG does not match caller $MANAGER_CALLER"
+  FEEDBACK_AS_CONF="$(manager_current_conf "$SLUG")" \
+    || manager_refuse "feedback refused: $SLUG is not a current agent slug in the conf dir"
+  [ "$(manager_conf_value "$FEEDBACK_AS_CONF" MANAGER)" = "on" ] \
+    || manager_refuse "feedback refused: caller $SLUG is not a manager"
+fi
 
 [ -n "$WHAT" ] || die "--what is missing" \
   "pass --what \"<one sentence saying what went wrong or should change>\""
@@ -961,9 +1147,7 @@ AGENT_NAME="${AGENT_NAME:-}"
 BOARD_CLI="${AGENT_BOARD_CLI:-${BOARD_CLI:-}}"
 BOARD_ADAPTER="${BOARD_ADAPTER:-}"
 if [ -n "$SLUG" ]; then
-  CONF="$(core_find_conf "$SLUG")" || die "no conf found for agent '$SLUG'" \
-    "check the slug, or drop --as and let the environment supply the name"
-  core_read_conf "$CONF"
+  core_read_conf "$FEEDBACK_AS_CONF"
 fi
 [ -z "$BOARD_CLI_ARG" ] || BOARD_CLI="$BOARD_CLI_ARG"
 [ -n "$AGENT_NAME" ] || AGENT_NAME="unknown"
