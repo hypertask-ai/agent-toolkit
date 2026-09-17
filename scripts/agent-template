@@ -310,6 +310,7 @@ manager_model_command() {
   case "$1" in
     grok-fast) printf '%s' 'cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust' ;;
     glm-flash) printf '%s' 'pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash' ;;
+    codex-sol) printf '%s' '/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p' ;;
     *) return 1 ;;
   esac
 }
@@ -516,7 +517,7 @@ if [ "${SUBCOMMAND:-feedback}" = "model" ]; then
   target_conf="$(manager_current_conf "$target")" \
     || manager_refuse "model refused: $target is not a current agent slug in the conf dir"
   command="$(manager_model_command "$preset")" \
-    || manager_refuse "model refused: preset must be grok-fast or glm-flash"
+    || manager_refuse "model refused: preset must be grok-fast, glm-flash, or codex-sol"
   MANAGER_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%N)"
   if manager_set_conf_value "$target_conf" MODEL_CLI "$command"; then
     manager_changed_reply "model $target $preset" "$(basename "$target_conf")"

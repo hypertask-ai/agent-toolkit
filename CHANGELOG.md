@@ -1,3 +1,10 @@
+## 3.31.0 - 2026-09-17
+
+- AGTE-8 adds the `codex-sol` manager model preset for the Codex subscription.
+- Manager commands write the exact high-effort GPT-5.6 Sol command into `MODEL_CLI`.
+- Offline coverage verifies the preset command and configuration update.
+- ACTION: run `agent-template update --keep-timers` to install the new preset.
+
 ## 3.30.0 - 2026-09-17
 
 - AGTE-23 records successful run completion as mechanical action activity and

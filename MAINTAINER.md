@@ -56,8 +56,8 @@ and adds the setup commands below. Missing or any other value means off.
 - `agent-template mode manual|auto [--board <id>]` changes
   `CLAIM_UNASSIGNED` for every dev and QA conf on that board. The manager's
   board is the default.
-- `agent-template model <slug> <preset>` accepts `grok-fast` or `glm-flash`
-  and writes only that preset's exact `MODEL_CLI` command.
+- `agent-template model <slug> <preset>` accepts `grok-fast`, `glm-flash`, or
+  `codex-sol` and writes only that preset's exact `MODEL_CLI` command.
 - `agent-template quiet on|off [<slug>|all]` writes `QUIET` to one or every
   current conf.
 - `agent-template feedback --as <slug> ...` reads `BOARD_CLI` from the calling

@@ -499,8 +499,8 @@ agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --
 
 `mode` sets `CLAIM_UNASSIGNED` to `no` for manual or `yes` for auto on every
 dev and QA conf matching the selected board. An omitted board uses the
-manager's `BOARD_ID`. `model` accepts only the named `grok-fast` and
-`glm-flash` presets and writes their exact template policy command, never text
+manager's `BOARD_ID`. `model` accepts only the named `grok-fast`, `glm-flash`,
+and `codex-sol` presets and writes their exact template policy command, never text
 supplied as a command. `quiet` sets `QUIET` for one current agent or all current
 agents. Each changed conf is first copied to `<conf>.bak-<timestamp>`, and the
 one-line result names every changed conf.

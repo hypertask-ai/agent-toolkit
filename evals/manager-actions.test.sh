@@ -227,6 +227,17 @@ else
   bad model-uses-named-preset "output=$model value=$(sed -n 's/^MODEL_CLI=//p' "$CONF_DIR/worker.conf")"
 fi
 
+worker_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' | wc -l)"
+model="$(AGENT_SLUG=manager run_template model worker codex-sol)"
+worker_backups_after="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' | wc -l)"
+if [ "$model" = 'model worker codex-sol: changed worker.conf' ] \
+   && grep -q '^MODEL_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"$' "$CONF_DIR/worker.conf" \
+   && [ "$worker_backups_after" -eq $((worker_backups_before + 1)) ]; then
+  ok model-uses-codex-sol "MODEL_CLI changed to the exact Codex subscription command"
+else
+  bad model-uses-codex-sol "output=$model value=$(sed -n 's/^MODEL_CLI=//p' "$CONF_DIR/worker.conf")"
+fi
+
 qa_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'qa.conf.bak-*' | wc -l)"
 quiet="$(AGENT_SLUG=manager run_template quiet off qa)"
 qa_backups_after="$(find "$CONF_DIR" -maxdepth 1 -name 'qa.conf.bak-*' | wc -l)"
@@ -250,9 +261,9 @@ else
 fi
 
 before="$(sha256sum "$CONF_DIR"/*.conf "$CONF_DIR"/credentials/* | sha256sum)"
-assert_refused_without_change model-refuses-free-command 'model refused: preset must be grok-fast or glm-flash' "$before" \
+assert_refused_without_change model-refuses-free-command 'model refused: preset must be grok-fast, glm-flash, or codex-sol' "$before" \
   model worker 'sh -c touch /tmp/no'
-assert_refused_without_change model-refuses-token-setting 'model refused: preset must be grok-fast or glm-flash' "$before" \
+assert_refused_without_change model-refuses-token-setting 'model refused: preset must be grok-fast, glm-flash, or codex-sol' "$before" \
   model worker 'TOKEN_FILE=/tmp/replacement'
 assert_refused_without_change model-refuses-path-slug 'model refused: ../outside is not a current agent slug in the conf dir' "$before" \
   model ../outside grok-fast
@@ -335,6 +346,7 @@ fi
 if grep -qF 'if { [ "${MANAGER:-off}" = "on" ] || [ "$MAINTAINER" = "on" ]; }' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template mode manual|auto [--board <id>]' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template model <slug> <preset>' "$ROOT/scripts/agent-board-poll" \
+   && grep -qF 'codex-sol' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template quiet on|off [<slug>|all]' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template feedback --as <slug>' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'switch the product board to manual' "$ROOT/scripts/agent-board-poll" \
