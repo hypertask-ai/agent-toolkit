@@ -109,13 +109,14 @@ exit code, and stderr in the run log.
 
 `instruct` is the advisor's only identity-free entry point. It still refuses a
 target without `MAINTAINER="on"`, writes one JSON item under
-`<slug>-instructions/`, and logs the action. The target's next tick launches the
-oldest item with `source=advisor` in a unique transient systemd unit and returns.
-A later tick reads the unit result, logs the reply, posts it when `--ticket` is
-present, and removes the instruction state. A reply that already begins with a
-quiet-mode comment prefix is posted from its output file without rewriting it.
-A running instruction or build does not prevent a reply-only owner question from
-starting on the next tick.
+`<slug>-instructions/`, and logs the action. It then uses the target's own board
+CLI to create an HTML ticket on board 5500, assigns the target agent with
+`task assign --self`, records the ticket id under
+`agent-template/instruction-tickets/`, and removes the transport JSON. A board
+failure returns non-zero with the API error and keeps the JSON for install to
+retry. Install uses the ticket-id record to avoid duplicate migrations. Tickets
+created by hand on board 5500 and assigned to Product Bot use the same normal
+run, build, and completion-comment path.
 
 Maintainer prompts require a four-part build spec: Ticket, What, Done when, and
 Guardrails. They forbid direct model-harness launches and answer questions

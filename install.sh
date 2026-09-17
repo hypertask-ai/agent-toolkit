@@ -136,6 +136,41 @@ done
 
 # shellcheck disable=SC1091
 . "$SRC/scripts/lib/feedback.sh"
+# shellcheck disable=SC1091
+. "$SRC/scripts/lib/instructions.sh"
+
+migrate_queued_instructions() {
+  local state_root queue queue_status parent slug conf candidate
+  state_root="${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll"
+  [ -d "$state_root" ] || return 0
+  shopt -s nullglob
+  for queue in "$state_root"/*-instructions/*.json; do
+    if instruction_file_is_queued "$queue"; then
+      :
+    else
+      queue_status=$?
+      [ "$queue_status" -eq 1 ] && continue
+      fail "queued instruction $queue is not valid JSON" \
+        "repair the queue file, then run install.sh again"
+    fi
+    parent="$(basename "$(dirname "$queue")")"
+    slug="${parent%-instructions}"
+    conf=""
+    for candidate in "$AGENT_CONF_DIR/$slug.conf" \
+      "$HOME/.config/agents/$slug.conf" "$HOME/.config/hypertask-agents/$slug.conf"; do
+      [ -f "$candidate" ] || continue
+      conf="$candidate"
+      break
+    done
+    [ -n "$conf" ] || fail "queued instruction $queue has no agent conf" \
+      "restore the conf, then run install.sh again"
+    echo "instruction migration: $(basename "$queue") -> board $INSTRUCTION_BOARD_ID"
+    instruction_publish_file "$queue" "$conf" \
+      || fail "queued instruction $queue could not be migrated" \
+              "fix the board API error above, then run install.sh again"
+  done
+  shopt -u nullglob
+}
 
 # Decide, once, whether this run is allowed to touch the live systemd unit
 # dir. Real install (default --dest and --bin) or an explicit --unit-dir:
@@ -295,6 +330,8 @@ printf '{"title":"x","description":"y","comments":[]}' \
   | bash "$DEST/scripts/triage.sh" --rules-only >/dev/null \
   || fail "the installed triage scorer does not run" \
           "run $DEST/scripts/triage.sh --help and check python3 is present"
+
+migrate_queued_instructions
 
 # The shared agent-board-poll@ unit pair is refreshed on every install, not
 # only when a new agent is provisioned, so a fix to the unit (like the

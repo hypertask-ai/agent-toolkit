@@ -283,6 +283,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/maintainer-actions.test.sh" ]; then
   echo "-- maintainer action behavioural checks --"
   bash "$HERE/maintainer-actions.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/instruction-tickets.test.sh" ]; then
+  echo ""
+  echo "-- instruction ticket behavioural checks --"
+  bash "$HERE/instruction-tickets.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/feedback-loop.test.sh" ]; then
   echo ""
   echo "-- feedback loop behavioural checks --"

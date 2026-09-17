@@ -32,7 +32,9 @@ cat > "$TMP/bin/board" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$BOARD_LOG"
 case "$*" in
-  task\ create*) printf '%s\n' '{"task":{"ticketNumber":"AGTE-101","projectId":5500,"uniqueIndex":101}}' ;;
+  '--json project show 5500') printf '%s\n' '{"project":{"defaultSections":["Inbox"],"sections":[{"section_title":"Inbox"}]}}' ;;
+  task\ create*) printf '%s\n' '{"task":{"id":"task-101","ticketNumber":"AGTE-101","projectId":5500,"uniqueIndex":101}}' ;;
+  'task assign AGTE-101 --self') printf '%s\n' '{}' ;;
 esac
 EOF
 chmod +x "$TMP/bin/board"
@@ -55,12 +57,13 @@ fi
 
 instruction="$(run_template instruct "$slug" 'Review the adapter config fallback')"
 instruction_file="$(find "$TMP/state/agent-board-poll/$slug-instructions" -name '*.json' -print -quit 2>/dev/null || true)"
-if [[ "$instruction" == instruction\ queued:* ]] \
-   && [ -n "$instruction_file" ] \
-   && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["instruction"])' "$instruction_file")" = 'Review the adapter config fallback' ]; then
-  ok instruct-adapter-conf-fallback 'instruct finds only the Hypertask default conf'
+marker="$(find "$TMP/state/agent-template/instruction-tickets" -name '*.json' -print -quit 2>/dev/null || true)"
+if [[ "$instruction" == 'instruction filed: AGTE-101 '* ]] \
+   && [ -z "$instruction_file" ] && [ -n "$marker" ] \
+   && grep -q '^task assign AGTE-101 --self$' "$TMP/board.log"; then
+  ok instruct-adapter-conf-fallback 'instruct finds the Hypertask conf and its agent board CLI'
 else
-  bad instruct-adapter-conf-fallback "output=$instruction file=${instruction_file:-missing}"
+  bad instruct-adapter-conf-fallback "output=$instruction file=${instruction_file:-none} marker=${marker:-missing}"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

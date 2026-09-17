@@ -554,6 +554,9 @@ run_advisor_instruction() {
   instruction="$(row_field "$row" instruction)"
   ticket="$(row_field "$row" ticket)"
   status="$(row_field "$row" status)"
+  # Queued files are transport for board tickets now. Only finish an instruction
+  # that an older release had already launched before the upgrade.
+  [ "$status" = "running" ] || return 1
 
   if [ "$DRY_RUN" = "yes" ]; then
     if [ "$status" = "running" ]; then

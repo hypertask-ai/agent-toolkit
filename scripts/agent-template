@@ -113,6 +113,8 @@ CORE_ROOT="${AGENT_TEMPLATE_CORE_ROOT:-$(dirname "$(dirname "$SELF")")}"
 . "$CORE_ROOT/scripts/lib/core.sh"
 # shellcheck disable=SC1091
 . "$CORE_ROOT/scripts/lib/feedback.sh"
+# shellcheck disable=SC1091
+. "$CORE_ROOT/scripts/lib/instructions.sh"
 
 # Where corrections land. Overridable so a fork can point at its own board
 # without editing this file.
@@ -848,8 +850,9 @@ if [ "${SUBCOMMAND:-feedback}" = "instruct" ]; then
   mkdir -p "$instruction_dir"
   chmod 700 "$instruction_dir"
   instruction_id="advisor-$(date -u +%Y%m%dT%H%M%S)-$$"
+  instruction_file="$instruction_dir/$instruction_id.json"
   INSTRUCTION_ID="$instruction_id" INSTRUCTION_TEXT="$instruction" TICKET="$ticket" \
-  CREATED="$(date -Is)" python3 - "$instruction_dir/$instruction_id.json" <<'PYEOF'
+  CREATED="$(date -Is)" python3 - "$instruction_file" <<'PYEOF'
 import json
 import os
 import sys
@@ -859,12 +862,16 @@ temporary = path + ".new"
 with open(temporary, "w", encoding="utf-8") as handle:
     json.dump({"id": os.environ["INSTRUCTION_ID"], "source": "advisor",
                "instruction": os.environ["INSTRUCTION_TEXT"],
-               "ticket": os.environ["TICKET"], "created": os.environ["CREATED"]}, handle)
+               "ticket": os.environ["TICKET"], "created": os.environ["CREATED"],
+               "status": "queued"}, handle)
     handle.write("\n")
 os.chmod(temporary, 0o600)
 os.replace(temporary, path)
 PYEOF
-  echo "instruction queued: $instruction_id"
+  if ! instruction_publish_file "$instruction_file" "$conf"; then
+    printf 'instruct failed: instruction kept at %s\n' "$instruction_file" >&2
+    exit 1
+  fi
   exit 0
 fi
 

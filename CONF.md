@@ -65,4 +65,4 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 
 On this maintainer host, set `ANSWERER_FALLBACK="product-bot"` in the agent confs so Product Bot handles owner questions only when the first three answerer ranks do not apply. This is host configuration, not a runner default.
 
-A maintainer reads `repos.allow` beside its conf. Each CSV row is `key,path,github slug,base branch`; paths and pull requests outside that file are refused. Build history is stored at `~/.local/state/agent-board-poll/<slug>-builds.json`, and queued advisor instructions are stored under `<slug>-instructions/` in the same state directory.
+A maintainer reads `repos.allow` beside its conf. Each CSV row is `key,path,github slug,base branch`; paths and pull requests outside that file are refused. Build history is stored at `~/.local/state/agent-board-poll/<slug>-builds.json`. Advisor instructions use `<slug>-instructions/` only as transport to an assigned board 5500 ticket, with created ticket ids under `~/.local/state/agent-template/instruction-tickets/` for idempotent install migration.

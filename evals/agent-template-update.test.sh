@@ -17,6 +17,7 @@ FAKE_REPO="$TMP/repo"
 TEMPLATE="$FAKE_REPO/templates/agent-skills/create-agent"
 mkdir -p "$CONF_DIR" "$TEMPLATE/scripts" "$TEMPLATE/evals" "$TMP/bin" "$TMP/units" "$TMP/state"
 printf 'test-version\n' > "$TEMPLATE/VERSION"
+printf '%s\n' '- ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-agents/product-bot.conf`.' > "$TEMPLATE/CHANGELOG.md"
 
 cat > "$TEMPLATE/install.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -87,9 +88,10 @@ status=$?
 set -e
 if [ "$status" -eq 0 ] \
    && grep -q '^BOARD_ADAPTER="hypertask"$' "$CONF_DIR/old-worker.conf" \
+   && grep -q 'ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-agents/product-bot.conf`\.' "$TMP/stable.out" \
    && grep -q 'checkout --detach stable' "$TMP/git.log" \
    && ! grep -q 'checkout --detach origin/main' "$TMP/git.log"; then
-  ok stable-host-stays-on-tag "stable update checks out stable, never main"
+  ok stable-host-stays-on-tag "stable update checks out stable, prints the host action, and never follows main"
 else
   bad stable-host-stays-on-tag "status=$status output=$(cat "$TMP/stable.out") git=$(cat "$TMP/git.log")"
 fi

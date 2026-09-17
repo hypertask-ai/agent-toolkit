@@ -1,3 +1,13 @@
+## 3.32.0 - 2026-09-17
+
+- AGTE-25 turns queued advisor instructions into visible toolkit board tickets
+  assigned to Product Bot through its own identity.
+- Failed board writes retain the transport file, while install migration records
+  ticket ids and avoids duplicate tickets on repeated runs.
+- Product Bot handles assigned board 5500 tickets through its normal build and
+  completion-comment path, including tickets created by hand.
+- ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-agents/product-bot.conf`, then run `agent-template update --keep-timers`.
+
 ## 3.31.0 - 2026-09-17
 
 - AGTE-8 adds the `codex-sol` manager model preset for the Codex subscription.

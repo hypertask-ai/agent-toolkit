@@ -97,6 +97,16 @@ else
   "$AGENT_BOARD_CLI" comment add OWNER-9 --text '<p><strong>Decision: The instruction is still running.</strong></p><p>Next: wait for its result.</p>'
 fi
 EOF
+cat > "$BIN/board" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$BOARD_NATIVE_LOG"
+case "$*" in
+  '--json project show 5500') printf '%s\n' '{"project":{"defaultSections":["Inbox"],"sections":[{"section_title":"Inbox"}]}}' ;;
+  task\ create*) printf '%s\n' '{"task":{"id":"task-4","ticketNumber":"AGTE-4","projectId":5500,"uniqueIndex":4}}' ;;
+  'task assign AGTE-4 --self') printf '%s\n' '{}' ;;
+  *) printf 'unexpected board call: %s\n' "$*" >&2; exit 2 ;;
+esac
+EOF
 cat > "$BIN/hypertask" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$BOARD_NATIVE_LOG"
@@ -245,12 +255,14 @@ else
 fi
 
 instruction="$(AGENT_SLUG= run_template instruct maintainer 'Review the setup and report back' --ticket https://app.hypertask.ai/detail/project-1/4)"
-instruction_file="$(find "$STATE_DIR/agent-board-poll/maintainer-instructions" -name '*.json' -print -quit)"
-if [[ "$instruction" == instruction\ queued:* ]] \
-   && [ "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); print(r["source"],r["instruction"],r["ticket"])' "$instruction_file")" = 'advisor Review the setup and report back https://app.hypertask.ai/detail/project-1/4' ]; then
-  ok instruct-queues-advisor-run "identity-free advisor entry targets maintainer only"
+instruction_file="$(find "$STATE_DIR/agent-board-poll/maintainer-instructions" -name '*.json' -print -quit 2>/dev/null || true)"
+marker="$(find "$STATE_DIR/agent-template/instruction-tickets" -name '*.json' -print -quit 2>/dev/null || true)"
+if [[ "$instruction" == 'instruction filed: AGTE-4 '* ]] \
+   && [ -z "$instruction_file" ] && [ -n "$marker" ] \
+   && grep -q '^task assign AGTE-4 --self$' "$TMP/board-native.log"; then
+  ok instruct-files-board-ticket "identity-free advisor entry creates assigned visible work"
 else
-  bad instruct-queues-advisor-run "output=$instruction file=${instruction_file:-missing}"
+  bad instruct-files-board-ticket "output=$instruction file=${instruction_file:-none} marker=${marker:-missing}"
 fi
 
 run_poll() {
@@ -261,15 +273,6 @@ run_poll() {
     GH_LOG="$TMP/gh.log" MODEL_RUN_LOG="$TMP/model-runs.log" MODEL_DELAY="${MODEL_DELAY:-6}" \
     "$ROOT/scripts/agent-board-poll" "$@" maintainer
 }
-
-dry="$(run_poll --dry-run)"
-if printf '%s' "$dry" | grep -q 'would run instruction .* source=advisor.* nothing was started' \
-   && [ -f "$instruction_file" ] \
-   && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["status"])' "$record")" = running ]; then
-  ok instruction-dry-run-pickup "next instruction is shown without consuming state"
-else
-  bad instruction-dry-run-pickup "output=$dry"
-fi
 
 failed_dir="$STATE_DIR/agent-board-poll/maintainer-builds/failed-build"
 inflight_dir="$STATE_DIR/agent-board-poll/maintainer-builds/inflight-build"
@@ -296,42 +299,24 @@ with open(path, "w", encoding="utf-8") as handle:
     handle.write("\n")
 PYEOF
 
-started_at="$(date +%s)"
-run_poll >"$TMP/launch.out" 2>"$TMP/launch.err"
-launch_seconds=$(( $(date +%s) - started_at ))
-instruction_status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$instruction_file")"
-instruction_pid="$(cat "$TMP/instruction.pid")"
-if [ "$launch_seconds" -lt 5 ] && [ "$instruction_status" = running ] \
-   && kill -0 "$instruction_pid" 2>/dev/null \
-   && grep -q -- '--unit=advisor-maintainer-.* -p MemoryMax=3G .* --instruction-worker ' "$TMP/systemd-run.log"; then
-  ok instruction-detaches-fast "tick returned in ${launch_seconds}s while a unique transient unit kept running"
-else
-  bad instruction-detaches-fast "seconds=$launch_seconds status=$instruction_status systemd=$(cat "$TMP/systemd-run.log")"
-fi
-
-run_poll >"$TMP/reply.out" 2>"$TMP/reply.err"
+run_poll >"$TMP/first-poll.out" 2>"$TMP/first-poll.err"
+run_poll >"$TMP/second-poll.out" 2>"$TMP/second-poll.err"
+run_poll >"$TMP/third-poll.out" 2>"$TMP/third-poll.err"
 if grep -q '^reply-only$' "$TMP/model-runs.log" \
    && grep -q ' comment add OWNER-9 ' "$TMP/board-native.log"; then
-  ok reply-only-bypasses-inflight-work "owner question started on the next tick while the instruction and build records were in flight"
+  ok reply-only-bypasses-inflight-work "owner question ran while build records were in flight"
 else
   bad reply-only-bypasses-inflight-work "models=$(cat "$TMP/model-runs.log") board=$(cat "$TMP/board-native.log")"
 fi
 
-timeout 10 tail --pid="$instruction_pid" -f /dev/null
-printf 'Decision: The detached instruction completed exactly.\nSecond line stays unchanged.\n' > "$TMP/expected-advisor-post"
-run_poll >"$TMP/complete.out" 2>"$TMP/complete.err"
 done_count="$(grep -c ' comment add ONE-2 ' "$TMP/board-native.log" || true)"
 failed_count="$(grep -c ' comment add ONE-3 ' "$TMP/board-native.log" || true)"
-advisor_count="$(grep -c ' comment add ONE-4 ' "$TMP/board-native.log" || true)"
 states="$(python3 -c 'import json,sys; print(" ".join(r["status"] for r in json.load(open(sys.argv[1]))))' "$record")"
-if [ "$done_count" -eq 1 ] && [ "$advisor_count" -eq 1 ] \
-   && [ ! -f "$instruction_file" ] && [ "$states" = 'done comment-failed running' ] \
-   && cmp -s "$TMP/expected-advisor-post" "$TMP/advisor-post" \
-   && grep -q '^--user show advisor-maintainer-' "$TMP/systemctl.log" \
+if [ "$done_count" -eq 1 ] && [ "$states" = 'done comment-failed running' ] \
    && ! grep -qE ' comment add https://app\.hypertask\.ai/' "$TMP/board-native.log"; then
-  ok later-tick-reports-completion "later tick read unit state, converted both URLs, posted quiet output verbatim, and cleaned instruction state"
+  ok later-tick-reports-completion "later ticks resolved ticket URLs and closed completed builds"
 else
-  bad later-tick-reports-completion "done=$done_count advisor=$advisor_count states=$states board=$(cat "$TMP/board-native.log")"
+  bad later-tick-reports-completion "done=$done_count states=$states board=$(cat "$TMP/board-native.log")"
 fi
 
 if [ "$failed_count" -eq 2 ] \
