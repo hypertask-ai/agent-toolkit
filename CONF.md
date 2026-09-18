@@ -55,6 +55,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `REVIEW_SECTION` | Destination after the run opens a pull request, default `AI Review`. |
 | `QA_FAIL_SECTION` | QA failure destination. Defaults to the board's first intake column. Failed QA also clears every assignee. |
 | `QA_BLOCKED_SECTION` | Blocked or cannot-test destination, default `Agent Blocked (Infra)`. |
+| `QA_TURNAROUND_HOURS` | Hours a ticket may remain in QA without an agent verdict before it becomes eligible again, default `4`. |
 | `SKILLS_INDEX` | Optional comma-separated extra indexes. |
 | `MAX_CONCURRENT_RUNS` | Runs started per tick, default 1. |
 | `RETRY_LIMIT` | Total failed attempts allowed per window. By default this is three plus the number of `LADDER` commands. |

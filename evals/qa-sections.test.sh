@@ -42,7 +42,7 @@ cat > "$TMP/bin/curl" <<'EOF'
 url="${!#}"
 case "$url" in
   *'/mcp/tasks?'*) cat "$TASKS_JSON"; printf '\n200' ;;
-  *'/mcp/comments?'*) printf '%s\n200' '{"comments":[]}' ;;
+  *'/mcp/comments?'*) cat "$COMMENTS_JSON"; printf '\n200' ;;
   *) printf '%s\n200' '{}' ;;
 esac
 EOF
@@ -61,6 +61,7 @@ chmod +x "$TMP/board" "$TMP/bin/curl" "$TMP/bin/gh" "$TMP/bin/hypertask"
 cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-26","ticketNumber":"AGTE-26","section":"QA","title":"Verify the fix","description":"Ready for QA","assignees":[{"agent":{"id":"agent-qa"}}],"labels":[],"commentCount":0}]}
 EOF
+printf '{"comments":[]}\n' > "$TMP/comments.json"
 cat > "$TMP/config/qa-runner.conf" <<EOF
 AGENT_ID="agent-qa"
 AGENT_NAME="QA Runner"
@@ -80,13 +81,56 @@ CLAIM_UNASSIGNED="no"
 FLEET_PROGRESS_SUPERVISOR="off"
 EOF
 
-output="$(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
-  COMPANY_SKILLS_DIR="$TMP/company" TASKS_JSON="$TMP/tasks.json" PATH="$TMP/bin:$PATH" \
-  "$ROOT/scripts/agent-board-poll" --once --dry-run qa-runner)"
+run_qa_dry() {
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+    COMPANY_SKILLS_DIR="$TMP/company" TASKS_JSON="$TMP/tasks.json" \
+    COMMENTS_JSON="$TMP/comments.json" PATH="$TMP/bin:$PATH" \
+    "$ROOT/scripts/agent-board-poll" --once --dry-run --explain qa-runner
+}
+
+output="$(run_qa_dry)"
 if printf '%s\n' "$output" | grep -q '^would pick up AGTE-26 '; then
   ok qa-column-ticket-eligible "an assigned ticket in QA is eligible for the QA agent"
 else
   bad qa-column-ticket-eligible "output=$output"
+fi
+
+old="$(date -u -d '5 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+cat > "$TMP/tasks.json" <<EOF
+{"tasks":[{"id":"task-26","ticketNumber":"AGTE-26","section":"QA","sectionEnteredAt":"$old","updatedAt":"$old","title":"Verify the fix","description":"Ready for QA","assignees":[{"agent":{"id":"agent-qa"}}],"labels":[],"commentCount":1}]}
+EOF
+cat > "$TMP/comments.json" <<EOF
+{"comments":[{"id":26,"createdAt":"$old","agent":{"id":"agent-qa","displayName":"QA Runner"},"text":"<p>Decision: QA started but no verdict was recorded.</p>"}]}
+EOF
+printf 'task-26:26\n' > "$TMP/state/agent-board-poll/qa-runner.seen"
+printf 'AGTE-26\t%s\t26\n' "$(date +%s)" > "$TMP/state/agent-board-poll/qa-runner.ticket-runs"
+output="$(run_qa_dry)"
+if printf '%s\n' "$output" | grep -q '^would pick up AGTE-26 '; then
+  ok stale-qa-ignores-own-comment "stale QA bypasses its own newest comment, seen key, and cooldown"
+else
+  bad stale-qa-ignores-own-comment "output=$output"
+fi
+
+cat > "$TMP/comments.json" <<EOF
+{"comments":[{"id":27,"createdAt":"$old","agent":{"id":"agent-builder","displayName":"Builder Bot"},"text":"<p>Done: The build is ready for QA.</p>"}]}
+EOF
+printf 'task-26:27\n' > "$TMP/state/agent-board-poll/qa-runner.seen"
+printf 'AGTE-26\t%s\t27\n' "$(date +%s)" > "$TMP/state/agent-board-poll/qa-runner.ticket-runs"
+output="$(run_qa_dry)"
+if printf '%s\n' "$output" | grep -q '^would pick up AGTE-26 '; then
+  ok stale-qa-ignores-bot-marker "stale QA bypasses another bot's newest status marker"
+else
+  bad stale-qa-ignores-bot-marker "output=$output"
+fi
+
+cat > "$TMP/comments.json" <<EOF
+{"comments":[{"id":28,"createdAt":"$old","agent":{"id":"agent-qa","displayName":"QA Runner"},"text":"<p>Done: QA passed.</p>"}]}
+EOF
+output="$(run_qa_dry)"
+if ! printf '%s\n' "$output" | grep -q '^would pick up AGTE-26 '; then
+  ok stale-qa-verdict-stays-closed "an own QA verdict prevents stale eligibility"
+else
+  bad stale-qa-verdict-stays-closed "output=$output"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

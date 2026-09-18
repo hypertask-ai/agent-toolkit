@@ -107,7 +107,7 @@ SKILLS_INDEX=""
 MODEL_CLI="claude --print"
 PR_REPO="example/repo"
 TRIAGE="no"
-CLAIM_UNASSIGNED="no"
+CLAIM_UNASSIGNED="yes"
 GRAFT="off"
 EOF
 run_product_dry() {
@@ -131,15 +131,35 @@ else
   bad own-comment-never-triggers "output=$output"
 fi
 
+cat > "$TMP/comments.json" <<'EOF'
+{"comments":[{"id":3,"createdAt":"2026-01-01T00:01:00Z","agent":{"id":"agent-builder","displayName":"Builder Bot"},"text":"<p>Done: The build is ready.</p>"}]}
+EOF
+output="$(run_dry)"
+if printf '%s\n' "$output" | grep -qF "newest comment 3 is another bot's status marker" \
+   && ! printf '%s\n' "$output" | grep -q '^would pick up TEST-1 '; then
+  ok owned-rerun-gates-bot-marker 'an assigned ticket still rejects another bot status marker'
+else
+  bad owned-rerun-gates-bot-marker "output=$output"
+fi
+
+cat > "$TMP/product-comments.json" <<'EOF'
+{"comments":[{"id":5,"createdAt":"2026-01-01T00:01:00Z","agent":{"id":"agent-product","displayName":"Product Bot"},"text":"<p>Decision: Queue note.</p>"}]}
+EOF
+output="$(run_product_dry)"
+if printf '%s\n' "$output" | grep -q '^would pick up TEST-2 '; then
+  ok first-pickup-ignores-own-comment 'an unassigned queue ticket ignores its own newest comment'
+else
+  bad first-pickup-ignores-own-comment "output=$output"
+fi
+
 cat > "$TMP/product-comments.json" <<'EOF'
 {"comments":[{"id":6,"createdAt":"2026-01-01T00:01:00Z","agent":{"id":"agent-builder","displayName":"Builder Bot"},"text":"<p>Done: The quiet-mode fixes shipped. Did it work?</p>"}]}
 EOF
 output="$(run_product_dry)"
-if printf '%s\n' "$output" | grep -qF "newest comment 6 is another bot's status marker and does not address this agent" \
-   && ! printf '%s\n' "$output" | grep -q '^would pick up TEST-2 '; then
-  ok other-bot-done-does-not-trigger "another bot's Done is status, not new Product Bot work"
+if printf '%s\n' "$output" | grep -q '^would pick up TEST-2 '; then
+  ok first-pickup-ignores-bot-marker "an unassigned queue ticket ignores another bot's status marker"
 else
-  bad other-bot-done-does-not-trigger "output=$output"
+  bad first-pickup-ignores-bot-marker "output=$output"
 fi
 
 cat > "$TMP/product-comments.json" <<'EOF'

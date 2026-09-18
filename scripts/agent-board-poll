@@ -147,6 +147,7 @@ IN_PROGRESS_SECTION="${IN_PROGRESS_SECTION:-In Progress}"
 REVIEW_SECTION="${REVIEW_SECTION:-AI Review}"
 QA_FAIL_SECTION="${QA_FAIL_SECTION:-}"
 QA_BLOCKED_SECTION="${QA_BLOCKED_SECTION:-Agent Blocked (Infra)}"
+QA_TURNAROUND_HOURS="${QA_TURNAROUND_HOURS:-4}"
 case "$AGENT_KIND" in
   dev) TRIAGE_DEFAULT="yes" ;;
   *)   TRIAGE_DEFAULT="no" ;;
@@ -514,6 +515,14 @@ log() {
   if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
 }
 
+log_once_per_day() {
+  local key="$1" message="$2" marker_dir="$STATE_DIR/daily-log"
+  mkdir -p "$marker_dir"
+  if mkdir "$marker_dir/$key-$(date -u +%F)" 2>/dev/null; then
+    log "$message"
+  fi
+}
+
 report_board_health() {
   local board="$1" message="$2" health_ref
   health_ref="$(BOARD="$board" python3 - "$STATE_DIR/board-health.json" <<'PYEOF'
@@ -526,7 +535,7 @@ print(((row.get("boards") or {}).get(os.environ["BOARD"]) or {}).get("ref") or "
 PYEOF
 )"
   if [ -n "$health_ref" ] && AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$health_ref" \
-      --text "<p><strong>Decision: $message</strong></p>" >>"$LOG" 2>&1; then
+      --text "<p><strong>Decision: $message</strong></p><p>Next: Check the run log and restore the board move.</p>" >>"$LOG" 2>&1; then
     return 0
   fi
   log "board health: $message"
@@ -736,6 +745,49 @@ elif os.environ["OWNER"] and os.environ["OWNER"] in {str(value) for value in row
 '
 }
 
+qa_is_stale_without_verdict() {
+  local row="$1" comments="$2"
+  ROW="$row" COMMENTS="${comments:-[]}" AID="$AGENT_ID" NAME="$AGENT_NAME" \
+    HOURS="$QA_TURNAROUND_HOURS" NOW="$(date +%s)" python3 -c '
+import datetime, html, json, os, re, sys
+row = json.loads(os.environ["ROW"])
+if str(row.get("section") or "").strip().casefold() != "qa":
+    raise SystemExit(1)
+raw = str(row.get("section_entered_at") or row.get("updated_at") or "")
+try:
+    entered = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    if entered.tzinfo is None:
+        entered = entered.replace(tzinfo=datetime.timezone.utc)
+    old_enough = int(os.environ["NOW"]) - int(entered.timestamp()) >= float(os.environ["HOURS"]) * 3600
+except (TypeError, ValueError):
+    old_enough = False
+if not old_enough:
+    raise SystemExit(1)
+try:
+    comments = json.loads(os.environ["COMMENTS"] or "[]")
+except json.JSONDecodeError:
+    comments = []
+for comment in comments:
+    agent_id = str(comment.get("agent_id") or "")
+    author = str(comment.get("author") or "").strip().casefold()
+    own = agent_id == os.environ["AID"] or (not agent_id and author == os.environ["NAME"].strip().casefold())
+    if not own:
+        continue
+    try:
+        created = datetime.datetime.fromisoformat(str(comment.get("createdAt") or "").replace("Z", "+00:00"))
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=datetime.timezone.utc)
+        if created < entered:
+            continue
+    except ValueError:
+        pass
+    plain = html.unescape(re.sub(r"<[^>]+>", " ", str(comment.get("html") or "")))
+    if re.match(r"\s*(Done|Handoff|Question):", plain, re.I):
+        raise SystemExit(1)
+raise SystemExit(0)
+'
+}
+
 qa_verdict_info() {
   local comment="$1"
   CJ="$comment" AID="$AGENT_ID" NAME="$AGENT_NAME" NOW="$(date +%s)" python3 -c '
@@ -772,7 +824,7 @@ qa_apply_verdict() {
   ref="$(row_field "$row" ref)"
   protection="$(qa_protection_reason "$row" "$board")"
   if [ -n "$protection" ]; then
-    log "QA move skipped for $ref: $protection"
+    log_once_per_day "$SLUG-$board-$ref-qa-protected" "QA move skipped for $ref: $protection"
     return 0
   fi
   case "$marker" in
@@ -819,6 +871,7 @@ qa_apply_verdict() {
     log "QA move skipped for $ref by the board safety guard"
     return 0
   fi
+  report_board_health "$board" "QA lifecycle could not move $ref to $target after two attempts."
   log "QA lifecycle failed for $ref: move to $target failed"
   return 1
 }
@@ -1679,6 +1732,12 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
     fi
   fi
 
+  stale_qa="no"
+  if [ "$AGENT_KIND" = "qa" ] && [ "$comments_available" = "yes" ] \
+     && qa_is_stale_without_verdict "$row" "$comments_json"; then
+    stale_qa="yes"
+  fi
+
   is_reply_only="no"
   if [ "$trigger" = "reply_only" ]; then
     is_reply_only="yes"
@@ -1800,7 +1859,7 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     qa_protection="$(qa_protection_reason "$row" "$board")"
     if [ -n "$qa_protection" ]; then
       explain "skip  $ref: QA move skipped because of $qa_protection"
-      log "QA move skipped for $ref: $qa_protection"
+      log_once_per_day "$SLUG-$board-$ref-qa-protected" "QA move skipped for $ref: $qa_protection"
       continue
     fi
   fi
@@ -1813,17 +1872,17 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
       --board "$board" --ticket "$ref" --url "$url" --kind "$reply_kind"
   fi
 
-  # An agent-authored comment is never a wake-up from that same agent, even
-  # when an old assignment or QA state would otherwise give the ticket a rank.
-  if [ "$comment_is_own" = "yes" ]; then
+  # Last-comment authorship only guards work this agent already owns. A free,
+  # unlabelled queue ticket is first pickup, not a comment-triggered rerun.
+  # Stale QA has its own turnaround gate and must not remain stuck behind an
+  # old agent status comment.
+  if [ "$assigned" = "yes" ] && [ "$stale_qa" = "no" ] && [ "$comment_is_own" = "yes" ]; then
     explain "skip  $ref: newest comment $comment_id is by this agent's own identity, so it cannot trigger another run"
     continue
   fi
 
-  # Completion and coordination markers from another bot are status, not new
-  # work for every assigned agent. A direct mention or question still wakes the
-  # addressed agent.
-  if [ "$comment_is_other_bot_marker" = "yes" ] \
+  if [ "$assigned" = "yes" ] && [ "$stale_qa" = "no" ] \
+     && [ "$comment_is_other_bot_marker" = "yes" ] \
      && [ "$mentioned" = "no" ] && [ "$comment_has_addressed_question" = "no" ]; then
     explain "skip  $ref: newest comment $comment_id is another bot's status marker and does not address this agent"
     continue
@@ -1849,6 +1908,7 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
 
   reason=""
   if [ "$assigned" = "yes" ]; then reason="assigned"; fi
+  if [ "$stale_qa" = "yes" ]; then reason="${reason:+$reason+}stale_qa"; fi
   if [ "$mentioned" = "yes" ]; then reason="${reason:+$reason+}mentioned"; fi
   if [ "$is_reply_only" = "yes" ]; then
     reason="${reason:+$reason+}reply_only"
@@ -1913,7 +1973,7 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
   fi
 
   key="$task_id:$comment_id"
-  if [ "$is_pr_fix" = "no" ] && grep -qxF "$key" "$SEEN"; then
+  if [ "$is_pr_fix" = "no" ] && [ "$stale_qa" = "no" ] && grep -qxF "$key" "$SEEN"; then
     explain "skip  $ref: already handled at this point in its history ($key)"
     continue
   fi
@@ -1927,7 +1987,7 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     if [ "$comment_id" != "0" ] && [ "$comment_id" != "${last_run_comment:-0}" ]; then
       fresh_external="yes"
     fi
-    if [ "$age" -lt "$RUN_COOLDOWN_SECONDS" ] && [ "$fresh_external" = "no" ]; then
+    if [ "$stale_qa" = "no" ] && [ "$age" -lt "$RUN_COOLDOWN_SECONDS" ] && [ "$fresh_external" = "no" ]; then
       explain "skip  $ref: last run was ${age}s ago; no new human or other-agent comment bypasses the ${RUN_COOLDOWN_SECONDS}s ticket cooldown"
       continue
     fi
