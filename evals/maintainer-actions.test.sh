@@ -70,7 +70,7 @@ MANAGER="off"
 MAINTAINER="off"
 EOF
 cat > "$CONF_DIR/repos.allow" <<EOF
-allowed,$REPO,example/allowed,main
+allowed,$REPO,example/allowed,main,7G
 EOF
 printf 'Ticket: https://app.hypertask.ai/detail/project-1/2\nWhat: change one file\nDone when: checks pass\nGuardrails: no board writes\n' > "$TMP/spec.md"
 
@@ -152,7 +152,9 @@ EOF
 cat > "$BIN/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
-if find "$XDG_STATE_HOME/agent-board-poll/maintainer-instructions" -name '*.result' -size +0c -print -quit 2>/dev/null | grep -q .; then
+if [[ "$*" = *'codex-allowed-oom'* ]]; then
+  printf 'LoadState=loaded\nActiveState=failed\nSubState=failed\nResult=oom-kill\nExecMainStatus=9\n'
+elif find "$XDG_STATE_HOME/agent-board-poll/maintainer-instructions" -name '*.result' -size +0c -print -quit 2>/dev/null | grep -q .; then
   printf 'LoadState=loaded\nActiveState=inactive\nSubState=dead\nResult=success\nExecMainStatus=0\n'
 else
   printf 'LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainStatus=0\n'
@@ -240,7 +242,8 @@ if [ "$build" = "build started: $build_id" ] \
    && grep -q 'Summary for non-engineers' "$prompt" \
    && grep -q 'change one file' "$prompt" \
    && grep -q -- '--provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session' "$TMP/hax.log" \
-   && grep -q -- '--collect -p MemoryMax=3G --setenv=PATH=' "$TMP/systemd-run.log" \
+   && grep -q -- '-p MemoryMax=7G --setenv=PATH=' "$TMP/systemd-run.log" \
+   && ! grep -q -- '--collect' "$TMP/systemd-run.log" \
    && [ "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))[0]; print(r["status"],r["unit"])' "$record")" = "running codex-allowed-${build_id#allowed-}" ]; then
   ok build-records-guarded-job "prompt, unit, output, and running state recorded"
 else
@@ -368,6 +371,55 @@ if [ "$failed_count" -eq 2 ] \
   ok comment-failure-stops-at-two "build comment stopped permanently after two attempts with command, exit code, and exact stderr logged"
 else
   bad comment-failure-stops-at-two "attempts=$failed_count log=$(cat "$STATE_DIR/agent-board-poll/maintainer.log")"
+fi
+
+oom_dir="$STATE_DIR/agent-board-poll/maintainer-builds/oom-build"
+mkdir -p "$oom_dir"
+: > "$oom_dir/out"
+OOM_OUT="$oom_dir/out" python3 - "$record" <<'PYEOF'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+rows = json.load(open(path, encoding="utf-8"))
+rows.append({"id": "oom-build", "repo": "allowed",
+             "ticket": "https://app.hypertask.ai/detail/project-1/4",
+             "unit": "codex-allowed-oom", "started": "2026-01-01T00:00:00Z",
+             "out": os.environ["OOM_OUT"], "status": "running"})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(rows, handle)
+    handle.write("\n")
+PYEOF
+AGENT_SLUG=maintainer run_template build reconcile
+oom_state="$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))[-1]; print(r["status"],r["result"],r["rc"])' "$record")"
+oom_comments="$(grep -c 'comment add ONE-4 --text <p><strong>Decision: build failed: out of memory.</strong>' "$TMP/board-native.log" || true)"
+if [ "$oom_state" = 'failed oom-kill 9' ] && [ "$oom_comments" -eq 1 ] \
+   && grep -q '^systemd result=oom-kill$' "$oom_dir/out" \
+   && grep -q '^hax rc=9$' "$oom_dir/out"; then
+  ok oom-unit-fails-and-comments "oom-kill was closed and explained in one reconciliation tick"
+else
+  bad oom-unit-fails-and-comments "state=$oom_state comments=$oom_comments board=$(cat "$TMP/board-native.log")"
+fi
+
+printf 'default,%s,example/allowed,main\n' "$REPO" >> "$CONF_DIR/repos.allow"
+mem_kb="$(sed -n 's/^MemTotal:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' /proc/meminfo | head -n1)"
+if [ "$mem_kb" -gt 33554432 ]; then default_cap=12G; else default_cap="$((mem_kb / 2))K"; fi
+AGENT_SLUG=maintainer run_template build --repo default \
+  --ticket https://app.hypertask.ai/detail/project-1/2 --spec "$TMP/spec.md" >/dev/null
+if tail -n1 "$TMP/systemd-run.log" | grep -q -- "-p MemoryMax=$default_cap --setenv=PATH="; then
+  ok build-default-memory-cap "host RAM selected MemoryMax=$default_cap"
+else
+  bad build-default-memory-cap "expected=$default_cap launch=$(tail -n1 "$TMP/systemd-run.log")"
+fi
+
+units="$TMP/systemd-user"
+bash -c '. "$1"; core_write_poll_units "$2" "$3"' _ "$ROOT/scripts/lib/core.sh" "$units" "$BIN"
+if grep -q '^Environment=AGENT_SLUG=%i$' "$units/agent-board-poll@.service" \
+   && grep -q "^ExecStartPre=$BIN/agent-template build reconcile$" "$units/agent-board-poll@.service"; then
+  ok build-reconcile-precedes-tick "the timer service checks failed units before polling"
+else
+  bad build-reconcile-precedes-tick "unit=$(cat "$units/agent-board-poll@.service")"
 fi
 
 if grep -q $'who=maintainer\twhat=build --repo allowed' "$STATE_DIR/agent-board-poll/manager-actions.log" \

@@ -457,6 +457,8 @@ Type=oneshot
 # directory a board CLI or model CLI can live in explicitly.
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=%h
+Environment=AGENT_SLUG=%i
+ExecStartPre=$bin_dir/agent-template build reconcile
 ExecStart=$bin_dir/agent-board-poll --once %i
 EOF
   cat > "$timer" <<EOF

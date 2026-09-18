@@ -1,3 +1,10 @@
+## 3.51.0 - 2026-09-18
+
+- AGTE-29 adds optional per-repository build memory caps and reconciles OOM-killed systemd units before each runner tick.
+- Hosts with more than 32 GB of RAM default builds to 12 GB; smaller hosts use half of RAM.
+- OOM-killed builds are recorded failed and receive a `Decision: build failed: out of memory` comment even when no exit marker was written.
+- ACTION: run `agent-template update --keep-timers` so current agents receive the new build cap and pre-tick reconciliation without changing timer state.
+
 ## 3.50.0 - 2026-09-18
 
 - AGTE-18 adds a ticket-ack lane to `agent-chat.service` so a busy agent

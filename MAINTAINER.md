@@ -93,21 +93,28 @@ agent-template instruct <slug> <text|-> [--ticket <url>]
 ```
 
 `repos.allow` beside the agent conf is CSV with `key,path,github slug,base
-branch`. On first install, the slug and branch are discovered from each
-checkout's `origin` and `origin/HEAD`; updates never overwrite host policy.
-Build refuses a checkout whose current origin differs from its allowlist row,
-and build and merge refuse anything outside the file.
+branch,memory cap`; the last field is optional. It defaults to 12 GB when the
+host has more than 32 GB of RAM and half of RAM otherwise. On first install,
+the slug and branch are discovered from each checkout's `origin` and
+`origin/HEAD`; updates never overwrite host policy. Build refuses a checkout
+whose current origin differs from its allowlist row, and build and merge
+refuse anything outside the file. The shipped file contains the six approved
+repositories and is installed only when the host has no allowlist, so host
+policy is never overwritten by an update.
 
 A build writes its guarded prompt and output under
-`~/.local/state/agent-board-poll/<slug>-builds/`, launches a 3 GB systemd user
-unit, and records durable state in `<slug>-builds.json`. The prompt requires a
-scratch worktree, the non-engineer pull request body, green checks, squash
-merge, timer-preserving toolkit update, cleanup, and a report under ten lines.
-`build status` returns the exit marker and the last twelve output lines.
+`~/.local/state/agent-board-poll/<slug>-builds/`, launches a memory-capped
+systemd user unit, and records durable state in `<slug>-builds.json`. The prompt
+requires a scratch worktree, the non-engineer pull request body, green checks,
+squash merge, timer-preserving toolkit update, cleanup, and a report under ten
+lines. `build status` returns the exit marker and the last twelve output lines.
 
-Each tick closes completed records once. Success posts one `Done:` line with
-the pull request URL. Failure posts one plain-language `Decision: build failed:`
-comment. A stored ticket URL is resolved to its board reference through the
+Before each tick, the service checks completed build units and records any
+non-success result as failed even when no exit marker was written. An OOM kill
+posts `Decision: build failed: out of memory` in that tick. Successful builds
+post one `Done:` line with the pull request URL, and other failures post one
+plain-language `Decision: build failed:` comment. A stored ticket URL is
+resolved to its board reference through the
 adapter first. A failed comment stops after two attempts and records the command,
 exit code, and stderr in the run log.
 

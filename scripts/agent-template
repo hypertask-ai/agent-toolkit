@@ -18,6 +18,7 @@
 #   agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]
 #   agent-template build status [id]
 #   agent-template build list
+#   agent-template build reconcile
 #
 #   agent-template merge <pr-url>
 #
@@ -374,11 +375,23 @@ wanted = os.environ["REPO_KEY"]
 with open(os.environ["ALLOW_FILE"], encoding="utf-8", newline="") as handle:
     for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#")):
         row = [value.strip() for value in row]
-        if len(row) == 4 and row[0] == wanted:
-            print("\t".join(row))
+        if len(row) in (4, 5) and row[0] == wanted:
+            print("\t".join(row + [""] * (5 - len(row))))
             raise SystemExit(0)
 raise SystemExit(1)
 PYEOF
+}
+
+maintainer_default_memory_max() {
+  local mem_kb half_kb
+  mem_kb="$(sed -n 's/^MemTotal:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*kB$/\1/p' /proc/meminfo | head -n1)"
+  [ -n "$mem_kb" ] || manager_refuse "build refused: could not read host memory"
+  if [ "$mem_kb" -gt 33554432 ]; then
+    printf '12G\n'
+  else
+    half_kb=$((mem_kb / 2))
+    printf '%sK\n' "$half_kb"
+  fi
 }
 
 maintainer_repo_by_slug() {
@@ -393,8 +406,8 @@ wanted = os.environ["REPO_SLUG"]
 with open(os.environ["ALLOW_FILE"], encoding="utf-8", newline="") as handle:
     for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#")):
         row = [value.strip() for value in row]
-        if len(row) == 4 and row[2] == wanted:
-            print("\t".join(row))
+        if len(row) in (4, 5) and row[2] == wanted:
+            print("\t".join(row + [""] * (5 - len(row))))
             raise SystemExit(0)
 raise SystemExit(1)
 PYEOF
@@ -613,9 +626,110 @@ if [ "${SUBCOMMAND:-feedback}" = "quiet" ]; then
 fi
 
 if [ "${SUBCOMMAND:-feedback}" = "build" ]; then
+  if [ "${1:-}" = "reconcile" ]; then
+    reconcile_caller="$(manager_caller_slug)"
+    reconcile_conf="$(manager_current_conf "$reconcile_caller" 2>/dev/null || true)"
+    if [ -n "$reconcile_conf" ] && [ "$(manager_conf_value "$reconcile_conf" MAINTAINER)" != "on" ]; then
+      exit 0
+    fi
+  fi
   maintainer_authorize "$@"
   BUILD_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll"
   BUILD_STATE="$BUILD_STATE_DIR/$MANAGER_CALLER-builds.json"
+
+  if [ "${1:-}" = "reconcile" ]; then
+    [ "$#" -eq 1 ] || manager_refuse "build refused: use agent-template build reconcile"
+    [ -f "$BUILD_STATE" ] || exit 0
+    board_adapter="$(manager_conf_value "$MANAGER_CONF" BOARD_ADAPTER)"
+    token_file="$(manager_conf_value "$MANAGER_CONF" TOKEN_FILE)"
+    board_api_url="$(manager_conf_value "$MANAGER_CONF" BOARD_API_URL)"
+    [ -n "$board_api_url" ] || board_api_url="$(manager_conf_value "$MANAGER_CONF" HT_API_URL)"
+    [ -z "$board_api_url" ] || export BOARD_API_URL="$board_api_url"
+    core_load_adapter "$board_adapter"
+    while IFS=$'\t' read -r build_id ticket unit out_file; do
+      [ -n "$build_id" ] && [ -n "$unit" ] || continue
+      unit_state="$(systemctl --user show "$unit" \
+        --property=LoadState --property=ActiveState --property=SubState \
+        --property=Result --property=ExecMainStatus 2>/dev/null || true)"
+      load_state="$(sed -n 's/^LoadState=//p' <<< "$unit_state")"
+      active_state="$(sed -n 's/^ActiveState=//p' <<< "$unit_state")"
+      unit_result="$(sed -n 's/^Result=//p' <<< "$unit_state")"
+      unit_rc="$(sed -n 's/^ExecMainStatus=//p' <<< "$unit_state")"
+      case "$active_state" in active|activating|deactivating|reloading) continue ;; esac
+      [ "$load_state" = "loaded" ] || continue
+      [ -n "$unit_result" ] && [ "$unit_result" != "success" ] || continue
+      case "$unit_rc" in ''|*[!0-9]*) unit_rc=1 ;; esac
+      if [ "$unit_result" = "oom-kill" ]; then
+        [ "$unit_rc" -ne 0 ] || unit_rc=137
+        failure="out of memory"
+      else
+        [ "$unit_rc" -ne 0 ] || unit_rc=1
+        failure="The job stopped before it opened a pull request"
+      fi
+      mkdir -p "$(dirname "$out_file")"
+      printf 'systemd result=%s\nhax rc=%s\n' "$unit_result" "$unit_rc" >> "$out_file"
+      message="<p><strong>Decision: build failed: $failure.</strong></p><p>Next: Review the build log.</p>"
+      comment_status="failed"
+      ref="$(adapter_ticket_ref "$token_file" "$ticket" 2>>"$BUILD_STATE_DIR/$MANAGER_CALLER.log" || true)"
+      if [ -z "$ref" ] || [[ "$ref" =~ ^https?:// ]]; then
+        comment_status="comment-failed"
+      else
+        comment_error="$(mktemp "$BUILD_STATE_DIR/.build-comment.XXXXXX")"
+        comment_ok="no"
+        for attempt in 1 2; do
+          if "$MANAGER_BOARD_CLI" comment add "$ref" --text "$message" \
+            >>"$BUILD_STATE_DIR/$MANAGER_CALLER.log" 2>"$comment_error"; then
+            comment_ok="yes"
+            break
+          fi
+        done
+        if [ "$comment_ok" != "yes" ]; then
+          comment_status="comment-failed"
+          cat "$comment_error" >> "$BUILD_STATE_DIR/$MANAGER_CALLER.log"
+        fi
+        rm -f "$comment_error"
+      fi
+      touch "$BUILD_STATE.lock"
+      exec 8>>"$BUILD_STATE.lock"
+      flock 8
+      BUILD_ID="$build_id" BUILD_RC="$unit_rc" BUILD_STATUS="$comment_status" \
+      BUILD_RESULT="$unit_result" COMPLETED="$(date -Is)" python3 - "$BUILD_STATE" <<'PYEOF'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+rows = json.load(open(path, encoding="utf-8"))
+for row in rows:
+    if row.get("id") == os.environ["BUILD_ID"] and row.get("status") == "running":
+        row.update(status=os.environ["BUILD_STATUS"], rc=int(os.environ["BUILD_RC"]),
+                   result=os.environ["BUILD_RESULT"], completed=os.environ["COMPLETED"])
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(rows, handle, indent=2)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+      flock -u 8
+      systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+      printf '%s build completion %s status=%s rc=%s result=%s ticket=%s\n' \
+        "$(date -Is)" "$build_id" "$comment_status" "$unit_rc" "$unit_result" "$ticket" \
+        >> "$BUILD_STATE_DIR/$MANAGER_CALLER.log"
+    done < <(python3 - "$BUILD_STATE" <<'PYEOF'
+import json
+import sys
+
+try:
+    rows = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    rows = []
+for row in rows:
+    if row.get("status") == "running":
+        print("\t".join(str(row.get(key) or "") for key in ("id", "ticket", "unit", "out")))
+PYEOF
+)
+    exit 0
+  fi
 
   if [ "${1:-}" = "list" ]; then
     [ "$#" -eq 1 ] || manager_refuse "build refused: use agent-template build list"
@@ -703,9 +817,12 @@ PYEOF
 
   repo_row="$(maintainer_repo_row "$repo_key")" \
     || manager_refuse "build refused: repository $repo_key is not in repos.allow"
-  IFS=$'\t' read -r _ repo_path github_slug base_branch <<< "$repo_row"
+  IFS=$'\t' read -r _ repo_path github_slug base_branch memory_max <<< "$repo_row"
   case "$github_slug" in */*) ;; *) manager_refuse "build refused: invalid GitHub slug for $repo_key in repos.allow" ;; esac
   case "$base_branch" in ''|*[!A-Za-z0-9._/-]*) manager_refuse "build refused: invalid base branch for $repo_key in repos.allow" ;; esac
+  [ -n "$memory_max" ] || memory_max="$(maintainer_default_memory_max)"
+  [[ "$memory_max" =~ ^[1-9][0-9]*[KMGT]$ ]] \
+    || manager_refuse "build refused: invalid memory cap for $repo_key in repos.allow"
   [ -d "$repo_path/.git" ] || git -C "$repo_path" rev-parse --git-dir >/dev/null 2>&1 \
     || manager_refuse "build refused: allowlisted path $repo_path is not a git checkout"
   checkout_origin="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
@@ -811,7 +928,7 @@ PYEOF
   printf -v q_err '%q' "$err_file"
   run_command=": > $q_out; : > $q_err; cd $q_repo; rc=\$?; if [ \"\$rc\" -eq 0 ]; then hax --provider=codex --model=gpt-5.6-sol --effort=$effort --no-session -p \"\$(cat $q_prompt)\" > $q_out 2> $q_err; rc=\$?; else echo \"could not enter the allowlisted checkout\" > $q_err; fi; echo \"hax rc=\$rc\" >> $q_out; exit \"\$rc\""
   set +e
-  systemd-run --user --unit="$unit" --collect -p MemoryMax=3G --setenv=PATH="$PATH" \
+  systemd-run --user --unit="$unit" -p "MemoryMax=$memory_max" --setenv=PATH="$PATH" \
     bash -c "$run_command" >/dev/null 2>&1
   launch_rc=$?
   set -e
@@ -834,7 +951,7 @@ if [ "${SUBCOMMAND:-feedback}" = "merge" ]; then
   fi
   repo_row="$(maintainer_repo_by_slug "$github_slug")" \
     || manager_refuse "merge refused: repository $github_slug is not in repos.allow"
-  IFS=$'\t' read -r _ _ _ base_branch <<< "$repo_row"
+  IFS=$'\t' read -r _ _ _ base_branch _ <<< "$repo_row"
   view="$(gh pr view "$pr_url" --json isDraft,state,baseRefName,statusCheckRollup 2>/dev/null)" \
     || manager_refuse "merge refused: could not read $pr_url"
   reason="$(PR_VIEW="$view" BASE_BRANCH="$base_branch" python3 - <<'PYEOF'

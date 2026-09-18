@@ -614,18 +614,23 @@ agent-template update --keep-timers
 agent-template instruct <slug> <text|-> [--ticket <url>]
 ```
 
-`repos.allow` beside the conf supplies `key,path,github slug,base branch` CSV
-rows. A first install discovers the slug and default branch from each checkout's
-`origin`; a build outside the file or whose checkout origin differs is refused.
-An accepted build writes the standard worktree, pull request, check,
-squash-merge, deployment, cleanup, and reporting
-guardrails into a prompt, starts a memory-capped systemd user job, and records
-its paths and status in `<slug>-builds.json`. Status prints the exit marker and
-twelve output lines; list is the source for answering what the agent did.
+`repos.allow` beside the conf supplies `key,path,github slug,base branch,memory
+cap` CSV rows, with the memory cap optional. Its default is 12 GB on hosts with
+more than 32 GB of RAM and half of RAM otherwise. A first install discovers the
+slug and default branch from each checkout's `origin`; a build outside the
+file or whose checkout origin differs is refused. An accepted build writes the
+standard worktree, pull request, check, squash-merge, deployment, cleanup, and
+reporting guardrails into a prompt, starts the capped systemd user job, and
+records its paths and status in `<slug>-builds.json`. Status prints the exit
+marker and twelve output lines; list is the source for answering what the
+agent did.
 
-The runner checks build records every tick. It posts exactly one `Done:` line
-with the pull request URL on success or one checked `Decision: build failed:`
-comment on failure, then closes the record. Ticket URLs are resolved through the
+Before each runner tick, the service reconciles completed systemd build units.
+It records any non-success result as failed, including jobs killed before they
+could write an exit marker. An OOM kill posts `Decision: build failed: out of
+memory` in that tick. The runner posts exactly one `Done:` line with the pull
+request URL on success or one checked `Decision: build failed:` comment on other
+failures, then closes the record. Ticket URLs are resolved through the
 board adapter before posting. Comment failures stop after two attempts and log
 the command, exit code, and stderr. `merge` accepts only an allowlisted,
 non-draft pull request whose checks are all green and always uses squash merge.
