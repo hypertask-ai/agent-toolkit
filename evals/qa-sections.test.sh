@@ -52,7 +52,10 @@ printf '[]\n'
 EOF
 cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
-printf '{}\n'
+case " $* " in
+  *' project show '*) printf '%s\n' '{"project":{"id":5500,"ownerId":6,"sections":[{"name":"Bugs"},{"name":"QA"},{"name":"Done"},{"name":"HT Manager Review"}]}}' ;;
+  *) printf '{}\n' ;;
+esac
 EOF
 chmod +x "$TMP/board" "$TMP/bin/curl" "$TMP/bin/gh" "$TMP/bin/hypertask"
 cat > "$TMP/tasks.json" <<'EOF'

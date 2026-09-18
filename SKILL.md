@@ -532,6 +532,8 @@ See `CONF.md` for the complete schema.
 | `TOKEN_FILE` | absolute path to the 0600 token file |
 | `BOARD_CLI` | the wrapper that runs board writes as this agent |
 | `WATCH_SECTIONS` | comma-separated columns to watch |
+| `QA_FAIL_SECTION` | optional failed-QA destination; defaults to the board's first intake column |
+| `QA_BLOCKED_SECTION` | optional cannot-test destination; defaults to `HT Manager Review` when present |
 | `SKILLS_INDEX` | the indexes the agent reads first, comma separated, **company pack first, bot pack last** |
 | `MODEL_CLI` | required full command for normal ticket work |
 | `LADDER` | optional `\|`-separated escalation commands, one per failure after three |
@@ -667,6 +669,21 @@ overrule it by changing it. A `hard` ticket runs on `TRIAGE_HARD_CLI` when
 configured, otherwise `MODEL_CLI`, and has to post a numbered plan (root cause, files, how it will verify) as its first
 comment, which counts toward its three. An `easy` ticket changes nothing. QA
 agents are never scored: they verify somebody else's work.
+
+## QA completion
+
+A QA run has one terminal verdict and one matching board transition. Pass posts
+one `Done:` comment and moves to Done. Fail posts one `Handoff:` comment whose
+single line names the failing step, clears every assignee, and moves to
+`QA_FAIL_SECTION`, or the board's first intake column when that key is empty. Cannot test posts one
+`Question:` and moves to `QA_BLOCKED_SECTION`, or `HT Manager Review` when it
+exists; with neither column configured it stays in QA.
+
+The runner enforces this contract after the model exits. It parses `Done:`,
+`Handoff:`, or `Question:` from the verdict comment and supplies a missing move.
+On every tick it also backfills QA tickets whose newest comment is that agent's
+verdict and is at least ten minutes old. A ticket labelled `valentin` or
+directly assigned to the board owner is skipped and never moved.
 
 When `RESEARCH_CLI` exists, an agent stuck mid-run can use `agent-advisor
 "<one precise question>"`. It receives the ticket, last ten comments and current

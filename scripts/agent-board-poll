@@ -132,6 +132,8 @@ RUN_COOLDOWN_SECONDS="${RUN_COOLDOWN_SECONDS:-1800}"
 # verifies somebody else's work and the difficulty of the fix is not its
 # problem.
 AGENT_KIND="${AGENT_KIND:-dev}"
+QA_FAIL_SECTION="${QA_FAIL_SECTION:-}"
+QA_BLOCKED_SECTION="${QA_BLOCKED_SECTION:-}"
 case "$AGENT_KIND" in
   dev) TRIAGE_DEFAULT="yes" ;;
   *)   TRIAGE_DEFAULT="no" ;;
@@ -340,6 +342,8 @@ SEEN="$STATE_DIR/$SLUG.seen"
 # tick as if it were someone else's: the state key is the newest comment id,
 # which becomes this agent's own reply's id the moment the run finishes.
 POSTED="$STATE_DIR/$SLUG.posted-comments"
+# Successful QA moves this run, one "<ref><tab><section>" row per move.
+MOVED="$STATE_DIR/$SLUG.moved-tickets"
 # One current row per ticket: <ticket-ref> <run-start-epoch> <trigger-comment-id>.
 # A run start, including a failed one, spends the ticket's 30-minute slot.
 RUNS="$STATE_DIR/$SLUG.ticket-runs"
@@ -385,7 +389,7 @@ PROGRESS_ELIGIBLE_COUNT=0
 PROGRESS_ELIGIBLE_TICKET=""
 PROGRESS_ELIGIBLE_URL=""
 PROGRESS_COLLECTION_COMPLETE="no"
-touch "$SEEN" "$ATTEMPTS" "$POSTED" "$OPENED_PRS" "$RUNS"
+touch "$SEEN" "$ATTEMPTS" "$POSTED" "$MOVED" "$OPENED_PRS" "$RUNS"
 
 # ticket_run_state <ticket-ref>: newest "<epoch> <comment-id>" row, if any.
 ticket_run_state() {
@@ -589,6 +593,140 @@ post_ticket_comment() {
   done
   rm -f "$err_file"
   return 1
+}
+
+qa_config_field() {
+  local board="$1" field="$2"
+  printf '%s\n' "$QA_BOARD_CONFIG" | BOARD="$board" FIELD="$field" python3 -c '
+import json, os, sys
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    if str(row.get("board") or "") == os.environ["BOARD"]:
+        print(row.get(os.environ["FIELD"]) or "")
+        break
+'
+}
+
+qa_protection_reason() {
+  local row="$1" board="$2" owner
+  owner="$(qa_config_field "$board" owner_id)"
+  ROW="$row" OWNER="$owner" python3 -c '
+import json, os
+row = json.loads(os.environ["ROW"])
+if "valentin" in {str(value).strip().casefold() for value in row.get("labels") or []}:
+    print("label valentin")
+elif os.environ["OWNER"] and os.environ["OWNER"] in {str(value) for value in row.get("human_assignee_ids") or []}:
+    print("board owner assignment")
+'
+}
+
+qa_verdict_info() {
+  local comment="$1"
+  CJ="$comment" AID="$AGENT_ID" NAME="$AGENT_NAME" NOW="$(date +%s)" python3 -c '
+import datetime, html, json, os, re
+try:
+    row = json.loads(os.environ["CJ"])
+except json.JSONDecodeError:
+    raise SystemExit
+agent_id = str(row.get("agent_id") or "")
+author = str(row.get("author") or "").strip().casefold()
+if not (agent_id == os.environ["AID"] or (not agent_id and author == os.environ["NAME"].strip().casefold())):
+    raise SystemExit
+plain = html.unescape(re.sub(r"<[^>]+>", " ", str(row.get("html") or "")))
+plain = " ".join(plain.split())
+match = re.match(r"(Done|Handoff|Question):", plain, re.I)
+if not match:
+    raise SystemExit
+try:
+    created = datetime.datetime.fromisoformat(str(row.get("createdAt") or "").replace("Z", "+00:00"))
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=datetime.timezone.utc)
+    age = max(0, int(os.environ["NOW"]) - int(created.timestamp()))
+except ValueError:
+    age = 0
+print("%s\t%s\t%s" % (match.group(1).title(), row.get("id") or "", age))
+'
+}
+
+# Apply a parsed QA verdict. The existing verdict comment is authoritative, so
+# backfill moves it without adding another comment.
+qa_apply_verdict() {
+  local row="$1" marker="$2" source="$3" board ref target protection moved="no"
+  board="$(row_field "$row" board)"; [ -n "$board" ] || board="${BOARD_ID%%,*}"
+  ref="$(row_field "$row" ref)"
+  protection="$(qa_protection_reason "$row" "$board")"
+  if [ -n "$protection" ]; then
+    log "QA move skipped for $ref: $protection"
+    return 0
+  fi
+  case "$marker" in
+    Done) target="Done" ;;
+    Handoff) target="$(qa_config_field "$board" fail_section)" ;;
+    Question) target="$(qa_config_field "$board" blocked_section)" ;;
+    *) log "QA lifecycle skipped for $ref: no verdict marker"; return 1 ;;
+  esac
+  if [ "$marker" = "Question" ] && [ -z "$target" ]; then
+    log "QA blocked verdict for $ref left in place: board $board has no QA_BLOCKED_SECTION or HT Manager Review column"
+    return 0
+  fi
+  if [ -z "$target" ]; then
+    log "QA lifecycle failed for $ref: board $board has no intake column; set QA_FAIL_SECTION"
+    return 1
+  fi
+  if [ "$marker" = "Handoff" ]; then
+    if [ "$DRY_RUN" = "yes" ]; then
+      log "QA $source would clear assignees on $ref"
+    elif ! adapter_clear_assignees "$BOARD_CLI" "$ref"; then
+      log "QA lifecycle failed for $ref: could not clear assignees"
+      return 1
+    fi
+  fi
+  if [ "$source" = "run fallback" ] \
+     && awk -F '\t' -v ref="$ref" -v section="$target" \
+          '$1 == ref && tolower($2) == tolower(section) { found=1 } END { exit !found }' "$MOVED"; then
+    moved="yes"
+  fi
+  if [ "$moved" = "yes" ]; then
+    log "QA verdict $marker for $ref already moved the ticket to $target"
+    return 0
+  fi
+  if [ "$DRY_RUN" = "yes" ]; then
+    log "QA $source would move $ref to $target from verdict $marker"
+    return 0
+  fi
+  if AGENT_QA_MOVE=yes adapter_move_task "$BOARD_CLI" "$ref" "$target" >>"$LOG" 2>&1; then
+    if awk -F '\t' -v ref="$ref" -v section="$target" \
+         '$1 == ref && tolower($2) == tolower(section) { found=1 } END { exit !found }' "$MOVED"; then
+      log "QA $source moved $ref to $target from verdict $marker"
+      return 0
+    fi
+    log "QA move skipped for $ref by the board safety guard"
+    return 0
+  fi
+  log "QA lifecycle failed for $ref: move to $target failed"
+  return 1
+}
+
+qa_backfill() {
+  local rows row task_id board ref latest info marker comment_id age
+  [ "$AGENT_KIND" = "qa" ] || return 0
+  rows="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "QA")" || return 1
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    task_id="$(row_field "$row" id)"
+    board="$(row_field "$row" board)"; [ -n "$board" ] || board="${BOARD_ID%%,*}"
+    ref="$(row_field "$row" ref)"
+    latest="$(adapter_latest_comment "$TOKEN_FILE" "$task_id" "$board" 2>>"$LOG")" || continue
+    [ -n "$latest" ] || continue
+    info="$(qa_verdict_info "$latest")"
+    [ -n "$info" ] || continue
+    IFS=$'\t' read -r marker comment_id age <<< "$info"
+    [ "${age:-0}" -ge 600 ] || continue
+    qa_apply_verdict "$row" "$marker" "backfill comment $comment_id" \
+      || log "QA backfill could not finish $ref from comment $comment_id"
+  done <<< "$rows"
 }
 
 # A reply model can read the checkout, runner logs, its Codex credential, and
@@ -1140,6 +1278,27 @@ if [ "$DRY_RUN" = "yes" ]; then
   echo "$SKILLS_LINE"
 fi
 
+QA_BOARD_CONFIG=""
+if [ "$AGENT_KIND" = "qa" ]; then
+  declare -F adapter_qa_board_config >/dev/null 2>&1 || die \
+    "adapter $BOARD_ADAPTER cannot resolve QA lifecycle columns" \
+    "implement adapter_qa_board_config before running a QA agent"
+  QA_BOARD_CONFIG="$(adapter_qa_board_config "$BOARD_CLI" "$BOARD_ID" \
+    "$QA_FAIL_SECTION" "$QA_BLOCKED_SECTION" 2>>"$LOG")" || die \
+    "could not read QA lifecycle configuration for board $BOARD_ID" \
+    "check board access, or set QA_FAIL_SECTION and QA_BLOCKED_SECTION"
+  while IFS= read -r qa_board; do
+    [ -n "$qa_board" ] || continue
+    [ -n "$(qa_config_field "$qa_board" owner_id)" ] || die \
+      "board $qa_board has no owner id, so QA move safety cannot be verified" \
+      "restore project metadata access before running QA"
+    [ -n "$(qa_config_field "$qa_board" fail_section)" ] || die \
+      "board $qa_board has no intake column for failed QA" \
+      "set QA_FAIL_SECTION in $CONF"
+  done < <(printf '%s' "$BOARD_ID" | tr ',' '\n' | sed '/^[[:space:]]*$/d')
+  qa_backfill || log "QA verdict backfill did not complete"
+fi
+
 if run_advisor_instruction; then
   exit 0
 fi
@@ -1496,6 +1655,17 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     fi
   fi
 
+  # Reserved owner tickets never enter QA work. The same guard also runs in
+  # the board wrapper so a model cannot bypass it with a direct move command.
+  if [ "$AGENT_KIND" = "qa" ]; then
+    qa_protection="$(qa_protection_reason "$row" "$board")"
+    if [ -n "$qa_protection" ]; then
+      explain "skip  $ref: QA move skipped because of $qa_protection"
+      log "QA move skipped for $ref: $qa_protection"
+      continue
+    fi
+  fi
+
   # An agent-authored comment is never a wake-up from that same agent, even
   # when an old assignment or QA state would otherwise give the ticket a rank.
   if [ "$comment_is_own" = "yes" ]; then
@@ -1824,6 +1994,22 @@ never do X) goes into the skill file. If you are unsure which: would it still
 be true for a different customer? Yes is a rule, no is a fact."
   fi
 
+  if [ "$AGENT_KIND" = "qa" ] && [ "$is_reply_only" = "no" ]; then
+    qa_fail_target="$(qa_config_field "$board" fail_section)"
+    qa_blocked_target="$(qa_config_field "$board" blocked_section)"
+    PROMPT="$PROMPT
+
+QA VERDICT CONTRACT:
+- PASS: post exactly one \`Done:\` comment, then move $ref to \`Done\`.
+- FAIL: post exactly one \`Handoff:\` comment whose single line names the failing step, then move $ref to \`$qa_fail_target\`. The runner clears every assignee.
+- CANNOT TEST: post exactly one \`Question:\` comment naming what is needed, then ${qa_blocked_target:+move $ref to \`$qa_blocked_target\`}${qa_blocked_target:-leave it in place because this board has no manager review column}.
+- Never use \`Decision:\` for a QA verdict. Never post more than one verdict comment.
+- Never move a ticket labelled \`valentin\` or directly assigned to the board owner.
+
+A successful process must finish the comment and move before it exits. If you
+post the verdict but miss the move, the runner applies the move from the marker."
+  fi
+
   if [ "$is_pr_fix" = "yes" ]; then
     pr_branch="$(row_field "$row" pr_branch)"
     PROMPT="Read $SKILLS_INDEX_SENTENCE first, in that order, then fix the existing pull request $url for $ref.
@@ -1980,9 +2166,10 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any 
 
   ERRFILE="$STATE_DIR/$SLUG.stderr"
   # Cleared before every run: the wrapper appends to it as this run posts
-  # comments, and only this run's own posts belong to what gets read back
-  # below once it finishes.
+  # comments and moves, and only this run's own writes belong to the lifecycle
+  # enforcement below once it finishes.
   : > "$POSTED"
+  : > "$MOVED"
   run_started_epoch="$(date +%s)"
   record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
   runtime_run_id="local"
@@ -2086,6 +2273,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
       PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}" \
       AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
+      AGENT_QA_MOVE="$([ "$AGENT_KIND" = "qa" ] && printf yes || printf no)" \
       GRAFT="$GRAFT" GRAFT_MCP_COMMAND="$GRAFT_MCP_COMMAND" GRAFT_MCP_CONFIG="$GRAFT_MCP_CONFIG" \
       AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base" \
       AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" \
@@ -2098,6 +2286,34 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
   fi
   set -e
   cat "$ERRFILE" >> "$LOG" 2>/dev/null || true
+  if [ "$AGENT_KIND" = "qa" ] && [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
+    qa_posted_ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
+    if [ -z "$qa_posted_ids" ]; then
+      printf 'QA run ended without one verdict comment\n' >> "$ERRFILE"
+      [ "$rc" -ne 0 ] || rc=65
+      log "QA lifecycle failed for $ref: run ended without one verdict comment"
+    else
+      qa_comments="$(adapter_ticket_comments "$TOKEN_FILE" "$task_id" "$board" 2>>"$LOG" || printf '[]')"
+      qa_comment="$(COMMENTS="$qa_comments" IDS="$qa_posted_ids" python3 -c '
+import json, os
+ids = set(os.environ["IDS"].split())
+rows = [row for row in json.loads(os.environ["COMMENTS"]) if str(row.get("id") or "") in ids]
+if rows:
+    print(json.dumps(max(rows, key=lambda row: (row.get("createdAt") or "", row.get("id") or 0))))
+')"
+      qa_info="$(qa_verdict_info "$qa_comment")"
+      if [ -z "$qa_info" ]; then
+        printf 'QA verdict comment must start with Done:, Handoff:, or Question:\n' >> "$ERRFILE"
+        [ "$rc" -ne 0 ] || rc=65
+        log "QA lifecycle failed for $ref: posted comment had no QA verdict marker"
+      else
+        IFS=$'\t' read -r qa_marker _ _ <<< "$qa_info"
+        if ! qa_apply_verdict "$row" "$qa_marker" "run fallback"; then
+          [ "$rc" -ne 0 ] || rc=74
+        fi
+      fi
+    fi
+  fi
   if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
     OPEN_PRS_AFTER="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
     while IFS= read -r opened_number; do

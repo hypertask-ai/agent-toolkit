@@ -1,0 +1,181 @@
+#!/usr/bin/env bash
+# QA lifecycle checks use isolated board and model stubs; no board is contacted.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+pass=0
+fail=0
+ok() { printf 'PASS %-36s %s\n' "$1" "$2"; pass=$((pass + 1)); }
+bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
+
+mkdir -p "$TMP/home" "$TMP/config" "$TMP/bin" "$TMP/repo" "$TMP/company" "$TMP/state"
+printf '# company skills\n' > "$TMP/company/INDEX.md"
+printf 'test\n' > "$TMP/company/VERSION"
+printf 'token\n' > "$TMP/token"
+
+cat > "$TMP/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+url="${!#}"
+case "$url" in
+  *'/mcp/tasks?'*) cat "$MOCK_TASKS"; printf '\n200' ;;
+  *'/mcp/comments?'*) cat "$MOCK_COMMENTS"; printf '\n200' ;;
+  *) printf '{}\n404' ;;
+esac
+EOF
+cat > "$TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '[]\n'
+EOF
+cat > "$TMP/bin/model" <<'EOF'
+#!/usr/bin/env bash
+printf 'model ran\n' >> "$MOCK_MODEL_LOG"
+case "$MOCK_VERDICT" in
+  Done) text='<p><strong>Done: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>' ;;
+  Handoff) text='<p><strong>Handoff: Dev must fix the failing payment step.</strong></p><p>Next: Fix the payment step.</p>' ;;
+  Question) text='<p><strong>Question: QA needs test credentials.</strong></p><p>Can the manager provide them?</p>' ;;
+esac
+"$AGENT_BOARD_CLI" comment add TEST-1 --text "$text" >/dev/null
+EOF
+cat > "$TMP/bin/hypertask" <<'EOF'
+#!/usr/bin/env bash
+args=" $* "
+case "$args" in
+  *' project show '*)
+    printf '%s\n' '{"project":{"id":15,"ownerId":6,"sections":[{"name":"Bugs","isIntake":true},{"name":"QA"},{"name":"Done"},{"name":"HT Manager Review"}]}}'
+    ;;
+  *' task get '*) cat "$MOCK_TASKS" ;;
+  *' comment list '*) cat "$MOCK_COMMENTS" ;;
+  *' comment add '*)
+    text=""
+    argv=("$@")
+    for ((i = 0; i < ${#argv[@]}; i++)); do
+      [ "${argv[$i]}" = "--text" ] && text="${argv[$((i + 1))]:-}"
+    done
+    TEXT="$text" python3 - "$MOCK_COMMENTS" <<'PYEOF'
+import datetime, json, os, sys
+path = sys.argv[1]
+try:
+    doc = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    doc = {"comments": []}
+rows = doc.get("comments") or []
+rows.append({"id": 100 + len(rows), "createdAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+             "agent": {"id": "agent-qa", "displayName": "QA Runner"}, "text": os.environ["TEXT"]})
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump({"comments": rows}, handle)
+PYEOF
+    printf 'comment added\n'
+    ;;
+  *' task move '*)
+    section=""
+    argv=("$@")
+    for ((i = 0; i < ${#argv[@]}; i++)); do
+      [ "${argv[$i]}" = "--section" ] && section="${argv[$((i + 1))]:-}"
+    done
+    printf 'move TEST-1 %s\n' "$section" >> "$MOCK_BOARD_LOG"
+    ;;
+  *' task unassign '*)
+    assignee=""
+    argv=("$@")
+    for ((i = 0; i < ${#argv[@]}; i++)); do
+      [ "${argv[$i]}" = "--assignee" ] && assignee="${argv[$((i + 1))]:-}"
+    done
+    printf 'unassign TEST-1 %s\n' "$assignee" >> "$MOCK_BOARD_LOG"
+    ;;
+  *) printf '{}\n' ;;
+esac
+EOF
+chmod +x "$TMP/bin/curl" "$TMP/bin/gh" "$TMP/bin/model" "$TMP/bin/hypertask"
+
+cat > "$TMP/config/qa-runner.conf" <<EOF
+AGENT_ID="agent-qa"
+AGENT_NAME="QA Runner"
+AGENT_KIND="qa"
+AGENT_REPO="$TMP/repo"
+AGENT_SLUG="qa-runner"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$TMP/board"
+WATCH_SECTIONS="QA"
+MODEL_CLI="$TMP/bin/model"
+PR_REPO="example/repo"
+TRIAGE="no"
+CLAIM_UNASSIGNED="no"
+FLEET_PROGRESS_SUPERVISOR="off"
+EOF
+
+run_case() {
+  local verdict="$1" labels="$2" comments="$3" assignees
+  if [ "$#" -ge 4 ]; then
+    assignees="$4"
+  else
+    assignees='[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
+  fi
+  rm -rf "$TMP/state"; mkdir -p "$TMP/state"
+  : > "$TMP/board.log"; : > "$TMP/model.log"
+  cat > "$TMP/tasks.json" <<EOF
+{"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"QA","title":"Verify checkout","description":"Test every acceptance step","assignees":$assignees,"labels":$labels,"commentCount":1}]}
+EOF
+  printf '%s\n' "$comments" > "$TMP/comments.json"
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+    COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT="$verdict" \
+    MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
+    MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
+    "$ROOT/scripts/agent-board-poll" --once qa-runner > "$TMP/out" 2>&1 || true
+}
+
+run_case Done '[]' '{"comments":[]}'
+if grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
+   && grep -qF 'QA run fallback moved TEST-1 to Done from verdict Done' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-pass-fallback-move 'a Done verdict without a model move is moved to Done'
+else
+  bad qa-pass-fallback-move "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
+fi
+
+run_case Handoff '[]' '{"comments":[]}'
+if grep -qxF 'move TEST-1 Bugs' "$TMP/board.log" \
+   && grep -qxF 'unassign TEST-1 agent-dev' "$TMP/board.log" \
+   && grep -qxF 'unassign TEST-1 agent-qa' "$TMP/board.log"; then
+  ok qa-fail-intake-unassigned 'a Handoff verdict returns to first intake with no assignees'
+else
+  bad qa-fail-intake-unassigned "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
+fi
+
+run_case Question '[]' '{"comments":[]}'
+if grep -qxF 'move TEST-1 HT Manager Review' "$TMP/board.log" \
+   && ! grep -q '^unassign ' "$TMP/board.log"; then
+  ok qa-blocked-manager-review 'a Question verdict moves to the manager review column'
+else
+  bad qa-blocked-manager-review "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
+fi
+
+run_case Done '[{"name":"valentin"}]' '{"comments":[]}'
+if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
+   && grep -qF 'QA move skipped for TEST-1: label valentin' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-valentin-label-skip 'a valentin-labelled ticket is not run or moved'
+else
+  bad qa-valentin-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+
+run_case Done '[]' '{"comments":[]}' '[{"id":6},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
+if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
+   && grep -qF 'QA move skipped for TEST-1: board owner assignment' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-board-owner-skip 'a board-owner-assigned ticket is not run or moved'
+else
+  bad qa-board-owner-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+
+old="$(date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+run_case Done '[]' "{\"comments\":[{\"id\":90,\"createdAt\":\"$old\",\"agent\":{\"id\":\"agent-qa\",\"displayName\":\"QA Runner\"},\"text\":\"<p><strong>Done: QA passed.</strong></p><p>Next: Release.</p>\"}]}"
+if grep -qxF 'move TEST-1 Done' "$TMP/board.log" && [ ! -s "$TMP/model.log" ] \
+   && grep -qF 'QA backfill comment 90 moved TEST-1 to Done from verdict Done' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-verdict-backfill 'an own verdict older than ten minutes is moved without another run'
+else
+  bad qa-verdict-backfill "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+
+printf '\n%d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]

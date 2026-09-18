@@ -51,6 +51,8 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `TOKEN_FILE` | Absolute path to the 0600 token file. |
 | `BOARD_CLI` | Agent-authenticated board wrapper. |
 | `WATCH_SECTIONS` | Comma-separated watched columns. QA agents include `QA` by default and on template update. |
+| `QA_FAIL_SECTION` | QA failure destination. Defaults to the board's first intake column. Failed QA also clears every assignee. |
+| `QA_BLOCKED_SECTION` | Cannot-test destination. Defaults to `HT Manager Review` when that column exists; otherwise the ticket stays in QA. |
 | `SKILLS_INDEX` | Optional comma-separated extra indexes. |
 | `MAX_CONCURRENT_RUNS` | Runs started per tick, default 1. |
 | `RETRY_LIMIT` | Total failed attempts allowed per window. By default this is three plus the number of `LADDER` commands. |
