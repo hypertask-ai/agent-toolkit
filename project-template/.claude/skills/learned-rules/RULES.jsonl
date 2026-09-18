@@ -1,0 +1,5 @@
+# This repo's learned rules. One JSON object per line, written by
+# scripts/agent-rules (see SKILL.md in this folder). Blank lines and lines
+# starting with "#" are ignored. Do not hand-edit a row's JSON; use
+# agent-rules add / promote / confirm / decay / archive so the confidence
+# math and the never-delete rule stay correct.

@@ -1,3 +1,21 @@
+## 3.47.0 - 2026-09-18
+
+- AGTE-10 adds learned rules: a correction to a provisioned repo becomes a
+  scored rule in that repo's `.claude/skills/learned-rules/RULES.jsonl`,
+  proposed via `agent-rules add`, held at `proposed` until a human merges the
+  pull request that promotes it, then loaded by every later run in that repo.
+- `agent-rules confirm` raises a rule's confidence when a run follows it and
+  its pull request passes first time, and revives an archived rule that earns
+  a confirmation again; `agent-rules decay` lowers confidence after 30 days
+  unused and archives anything that falls below the floor. Archived rules are
+  never deleted.
+- `sync-project.sh` lays the `learned-rules` skill and an empty `RULES.jsonl`
+  into every synced repo, and never rewrites `RULES.jsonl` once a first rule
+  has been added.
+- ACTION: run `agent-template update --keep-timers`, which re-syncs every
+  known `PR_REPO`, so existing repos get `.claude/skills/learned-rules/`
+  without a timer restart.
+
 ## 3.46.0 - 2026-09-18
 
 - AGTE-7: a merged pull request whose base branch history was rewritten (so its

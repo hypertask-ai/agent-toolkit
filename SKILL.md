@@ -277,6 +277,7 @@ core
                                update: pull, reinstall, convert old-schema confs
   scripts/agent-template-feedback  judge and close feedback every four hours
   scripts/agent-template-weekly    compatibility alias for agent-template-feedback
+  scripts/agent-rules         a repo's learned rules: add, promote, confirm, decay, archive
   scripts/lib/core.sh         slug, conf files, secrets, adapter loading, poll units
 adapters/
   hypertask/adapter.sh        everything that talks to a Hypertask board
@@ -285,6 +286,8 @@ adapters/
 evals/
   cases.jsonl                 one line per correction anyone has made
   run-evals.sh                replays them all; non-zero on any failure
+project-template/.claude/skills/learned-rules/  the skill and RULES.jsonl store
+                               sync-project.sh lays into every synced repo
 repo-skeleton/                 what create-agent.sh --pr-repo pushes to a new
                                memory repo: README, board.yml, scripts/,
                                reports/, CHANGELOG.md, a pr-title check
@@ -406,6 +409,14 @@ date, a path — goes into the repo's docs or the ticket, never into a skill. A
 rule — always or never do X — goes into the skill file. If it is unclear
 which: would it still be true for a different customer? Yes means rule, no
 means fact.
+
+The paragraphs above are about correcting this template's own skill file. A
+correction made on a *project* a provisioned agent works — the repos
+`sync-project.sh` lays the standard layout into — goes through
+`.claude/skills/learned-rules/` in that project instead: `scripts/agent-rules`
+turns the correction into a scored rule, proposed as a pull request for a
+human to veto, then loaded by every later run in that repo and faded out if
+it stops mattering. See `project-template/.claude/skills/learned-rules/SKILL.md`.
 
 ## Feedback
 

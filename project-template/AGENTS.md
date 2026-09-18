@@ -11,7 +11,10 @@ Anything specific to this repo's code belongs in `.claude/skills/`, not here.
    by the runner and points at the installed `company-skills` plugin, or the
    `~/projects/company-skills` clone.
 2. `.claude/skills/INDEX.md`, this repo's own skills.
-3. The skill whose trigger matches the ticket. If none matches, say so and
+3. `.claude/skills/learned-rules/RULES.jsonl`, always, per that skill's own
+   `SKILL.md`. It holds this repo's own history of corrections that became
+   rules; it is not one you pick because a trigger matched.
+4. The skill whose trigger matches the ticket. If none matches, say so and
    stop. Do not improvise a workflow.
 
 ## One ticket at a time

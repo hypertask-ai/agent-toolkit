@@ -117,11 +117,17 @@ render() {
 # The index is seeded with whatever skills the repo already has, so a repo that
 # already carries skills gets a true index rather than an empty one.
 render_index() {
-  local rows="" d name
+  local rows="" d name trigger
   for d in "$TARGET"/.claude/skills/*/; do
     [ -f "$d/SKILL.md" ] || continue
     name="$(basename "$d")"
-    rows="$rows| $name | describe when this skill fires | .claude/skills/$name/SKILL.md |
+    trigger="describe when this skill fires"
+    # learned-rules is template-owned and always applies, unlike a project's
+    # own skills, so it gets a real trigger instead of the usual placeholder
+    # a human is expected to fill in.
+    [ "$name" = "learned-rules" ] && \
+      trigger="Always, before any other skill, and whenever a human corrects this bot's work here"
+    rows="$rows| $name | $trigger | .claude/skills/$name/SKILL.md |
 "
   done
   # A repo with no skills yet gets a header-only table. An empty placeholder row
@@ -149,6 +155,18 @@ sync_one() { # sync_one <relative path>
   # (the runner reads it with head -n1), and once a repo owns a skill pack the
   # version of that pack is the repo's to bump, not the template's.
   if [ "$rel" = ".claude/skills/VERSION" ]; then
+    if [ -f "$dest" ]; then unchanged=$((unchanged + 1)); return 0; fi
+    added=$((added + 1))
+    [ "$DRY_RUN" = "yes" ] && return 0
+    mkdir -p "$(dirname "$dest")"
+    cat "$TEMPLATE_DIR/$rel" > "$dest"
+    return 0
+  fi
+  # RULES.jsonl carries no marker either: it is the repo's own learned-rules
+  # store, appended to by scripts/agent-rules the moment a first rule lands,
+  # and a store that sync silently rewrote would lose confidence scores and
+  # confirmations the template has no business touching once they exist.
+  if [ "$rel" = ".claude/skills/learned-rules/RULES.jsonl" ]; then
     if [ -f "$dest" ]; then unchanged=$((unchanged + 1)); return 0; fi
     added=$((added + 1))
     [ "$DRY_RUN" = "yes" ] && return 0
@@ -213,6 +231,8 @@ sync_one() { # sync_one <relative path>
 FILES="
 AGENTS.md
 board.yml
+.claude/skills/learned-rules/SKILL.md
+.claude/skills/learned-rules/RULES.jsonl
 .claude/skills/INDEX.md
 .claude/skills/RULE-MAP.md
 .claude/skills/VERSION

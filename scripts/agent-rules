@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# agent-rules: a repo's learned rules, one JSON line each, scored over time.
+#
+# A correction a human made once should not have to be made twice. When
+# somebody corrects a run (an owner comment that contradicts it, a review
+# comment that led to a fix round, a QA rejection, or a feedback-board
+# ticket), the correction becomes a rule row in this repo's
+# .claude/skills/learned-rules/RULES.jsonl, read by the skill of the same
+# name before any later ticket. See that SKILL.md for when to call which
+# subcommand; this script only holds the store's shape and its math.
+#
+# Usage:
+#   agent-rules add     --file <path> --text "<rule>" --source "<https url>" [--now YYYY-MM-DD]
+#   agent-rules promote --file <path> --id <rule id> [--now YYYY-MM-DD]
+#   agent-rules confirm --file <path> --id <rule id> [--now YYYY-MM-DD]
+#   agent-rules decay   --file <path> [--now YYYY-MM-DD]
+#   agent-rules archive --file <path> --id <rule id> --why "<reason>" [--now YYYY-MM-DD]
+#   agent-rules list    --file <path> [--status proposed|active|archived|all]
+#   agent-rules -h|--help
+#
+# Row shape, one JSON object per line, blank lines and lines starting with
+# "#" ignored:
+#   id              short slug, unique within the file
+#   text            the rule, one sentence
+#   source          full https URL of the ticket the correction came from
+#   status          proposed | active | archived
+#   confidence      0.0-1.0, starts at 0.5
+#   confirmations   how many times a run followed it and the PR passed first time
+#   created         YYYY-MM-DD
+#   last_confirmed  YYYY-MM-DD, bumped only by confirm: the last time a run
+#                   actually followed this rule and its pull request passed
+#   last_decayed    YYYY-MM-DD, bumped only by decay, so a repeated decay run
+#                   does not have to re-read last_confirmed to know it already
+#                   penalized this idle stretch
+#   archived_reason null, or one line, set when status becomes archived
+#
+# `add` writes status "proposed": a new rule is a proposal, not yet load-bearing.
+# `promote` is the human veto point (the feedback fixer proposes a rule as a
+# pull request to the skills repo; a human merging it is the veto that has to
+# happen before `promote` runs) and moves it to "active".
+# `confirm` raises confidence when a run followed the rule and its pull
+# request passed on the first try; it also un-archives a rule that earns a
+# confirmation again.
+# `decay` lowers confidence for any active or proposed rule unused for 30
+# days, measured from the later of `last_confirmed` and `last_decayed` (or
+# `created` if neither has ever been set), and archives anything that drops
+# below the floor (0.2).
+# Archived rows are never deleted, only marked, so a rule that stops mattering
+# stays readable instead of disappearing.
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+usage() { sed -n '2,40p' "$SELF" | sed 's/^# \{0,1\}//'; }
+
+die() { printf 'ERROR: %s\n  Do this next: %s\n' "$1" "${2:-}" >&2; exit 1; }
+
+[ $# -ge 1 ] || { usage; exit 1; }
+SUBCOMMAND="$1"; shift
+case "$SUBCOMMAND" in
+  add|promote|confirm|decay|archive|list) ;;
+  -h|--help) usage; exit 0 ;;
+  *) die "unknown subcommand $SUBCOMMAND" "run agent-rules --help" ;;
+esac
+
+FILE=""
+ID=""
+TEXT=""
+SOURCE=""
+WHY=""
+STATUS="active"
+NOW=""
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --file)   FILE="${2:?--file needs a path}"; shift 2 ;;
+    --id)     ID="${2:?--id needs a rule id}"; shift 2 ;;
+    --text)   TEXT="${2:?--text needs the rule text}"; shift 2 ;;
+    --source) SOURCE="${2:?--source needs a full https URL}"; shift 2 ;;
+    --why)    WHY="${2:?--why needs a reason}"; shift 2 ;;
+    --status) STATUS="${2:?--status needs proposed, active, archived, or all}"; shift 2 ;;
+    --now)    NOW="${2:?--now needs a YYYY-MM-DD date}"; shift 2 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown option $1" "run agent-rules --help" ;;
+  esac
+done
+
+[ -n "$FILE" ] || die "no --file given" "run agent-rules --help"
+core_require_abs() { case "$1" in /*) : ;; *) die "$2 must be an absolute path, got '$1'" "pass the full path"; esac; }
+core_require_abs "$FILE" "--file"
+
+case "$SUBCOMMAND" in
+  add|promote|confirm|archive)
+    mkdir -p "$(dirname "$FILE")"
+    [ -f "$FILE" ] || : > "$FILE"
+    ;;
+  decay|list)
+    [ -f "$FILE" ] || die "no rules file at $FILE" \
+      "run agent-rules add --file $FILE --text ... --source ... first"
+    ;;
+esac
+
+case "$SUBCOMMAND" in
+  add)     [ -n "$TEXT" ] || die "add needs --text" "run agent-rules add --help"
+           [ -n "$SOURCE" ] || die "add needs --source, a full https URL" "run agent-rules add --help"
+           case "$SOURCE" in https://*) : ;; *) die "--source must be a full https:// URL, got '$SOURCE'" "link the ticket the correction came from" ;; esac ;;
+  promote|confirm|archive)
+           [ -n "$ID" ] || die "$SUBCOMMAND needs --id" "run agent-rules list --file $FILE to see ids" ;;
+  archive) [ -n "$WHY" ] || die "archive needs --why" "run agent-rules archive --help" ;;
+esac
+
+[ -n "$NOW" ] || NOW="$(date -u +%Y-%m-%d)"
+case "$NOW" in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+  *) die "--now must be YYYY-MM-DD, got '$NOW'" "pass a plain date, no time" ;;
+esac
+
+SUBCOMMAND="$SUBCOMMAND" FILE="$FILE" ID="$ID" TEXT="$TEXT" SOURCE="$SOURCE" \
+WHY="$WHY" STATUS="$STATUS" NOW="$NOW" python3 <<'PYEOF'
+import datetime
+import json
+import os
+import re
+import sys
+
+sub = os.environ["SUBCOMMAND"]
+path = os.environ["FILE"]
+now = os.environ["NOW"]
+floor = 0.2
+window_days = 30
+step = 0.15
+gain = 0.1
+
+
+def die(what, do_next):
+    print("ERROR: %s\n  Do this next: %s" % (what, do_next), file=sys.stderr)
+    sys.exit(1)
+
+
+def read_rows():
+    rows = []
+    with open(path, encoding="utf-8") as handle:
+        for lineno, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            try:
+                rows.append(json.loads(stripped))
+            except json.JSONDecodeError as error:
+                die("%s line %d is not JSON: %s" % (path, lineno, error), "fix or remove that line")
+    return rows
+
+
+def write_rows(rows):
+    with open(path, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def days_between(a, b):
+    return (datetime.date.fromisoformat(b) - datetime.date.fromisoformat(a)).days
+
+
+def slug(text):
+    base = re.sub(r"[^a-z0-9]+", "-", text.strip().casefold()).strip("-")[:40] or "rule"
+    return base
+
+
+if sub == "add":
+    rows = read_rows()
+    existing_ids = {row["id"] for row in rows}
+    base = slug(os.environ["TEXT"])
+    new_id = base
+    n = 2
+    while new_id in existing_ids:
+        new_id = "%s-%d" % (base, n)
+        n += 1
+    rows.append({
+        "id": new_id,
+        "text": os.environ["TEXT"],
+        "source": os.environ["SOURCE"],
+        "status": "proposed",
+        "confidence": 0.5,
+        "confirmations": 0,
+        "created": now,
+        "last_confirmed": now,
+        "last_decayed": now,
+        "archived_reason": None,
+    })
+    write_rows(rows)
+    print("added %s (proposed, confidence 0.50)" % new_id)
+
+elif sub in ("promote", "confirm", "archive"):
+    rows = read_rows()
+    rule_id = os.environ["ID"]
+    match = next((row for row in rows if row["id"] == rule_id), None)
+    if match is None:
+        die("no rule %r in %s" % (rule_id, path), "run agent-rules list --file %s --status all" % path)
+    if sub == "promote":
+        if match["status"] != "proposed":
+            die("%s is %s, not proposed" % (rule_id, match["status"]), "only a proposed rule can be promoted")
+        match["status"] = "active"
+        match["last_confirmed"] = now
+        match["last_decayed"] = now
+        write_rows(rows)
+        print("promoted %s to active" % rule_id)
+    elif sub == "confirm":
+        match["confidence"] = round(min(1.0, match["confidence"] + gain), 2)
+        match["confirmations"] = match.get("confirmations", 0) + 1
+        match["last_confirmed"] = now
+        match["last_decayed"] = now
+        if match["status"] == "archived":
+            match["status"] = "active"
+            match["archived_reason"] = None
+        write_rows(rows)
+        print("confirmed %s (confidence %.2f, status %s)" % (rule_id, match["confidence"], match["status"]))
+    else:
+        match["status"] = "archived"
+        match["archived_reason"] = os.environ["WHY"]
+        write_rows(rows)
+        print("archived %s: %s" % (rule_id, os.environ["WHY"]))
+
+elif sub == "decay":
+    rows = read_rows()
+    changed = []
+    for row in rows:
+        if row["status"] not in ("proposed", "active"):
+            continue
+        since = max(
+            row.get("last_confirmed") or row["created"],
+            row.get("last_decayed") or row["created"],
+        )
+        if days_between(since, now) < window_days:
+            continue
+        row["confidence"] = round(max(0.0, row["confidence"] - step), 2)
+        row["last_decayed"] = now
+        if row["confidence"] < floor:
+            row["status"] = "archived"
+            row["archived_reason"] = "unused for %d+ days, confidence fell below %.2f" % (window_days, floor)
+        changed.append(row)
+    write_rows(rows)
+    if changed:
+        for row in changed:
+            print("decayed %s (confidence %.2f, status %s)" % (row["id"], row["confidence"], row["status"]))
+    else:
+        print("nothing to decay")
+
+elif sub == "list":
+    rows = read_rows()
+    status = os.environ["STATUS"]
+    if status != "all":
+        rows = [row for row in rows if row["status"] == status]
+    rows.sort(key=lambda row: row["confidence"], reverse=True)
+    if not rows:
+        print("no %s rules in %s" % (status, path))
+    for row in rows:
+        print("%.2f  %-10s  %-28s  %s  (%s)" % (
+            row["confidence"], row["status"], row["id"], row["text"], row["source"]))
+PYEOF

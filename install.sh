@@ -236,6 +236,7 @@ echo "bin:    $BIN/agent-template -> $DEST/scripts/agent-template"
 echo "bin:    $BIN/agent-template-feedback -> $DEST/scripts/agent-template-feedback"
 echo "bin:    $BIN/agent-template-weekly -> compatibility alias"
 echo "bin:    $BIN/agent-advisor -> $DEST/scripts/agent-advisor"
+echo "bin:    $BIN/agent-rules -> $DEST/scripts/agent-rules"
 echo "version: $(cat "$SRC/VERSION")"
 
 if [ "$DRY_RUN" = "yes" ]; then
@@ -307,7 +308,7 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-progress" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-kick" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-feedback" \
           "$DEST/scripts/agent-template-weekly" \
-          "$DEST/scripts/agent-advisor" "$DEST/scripts/triage.sh" \
+          "$DEST/scripts/agent-advisor" "$DEST/scripts/agent-rules" "$DEST/scripts/triage.sh" \
           "$DEST/scripts/sync-project.sh" "$DEST/scripts/migrate-provider-policy.py" \
           "$DEST/evals/run-evals.sh" \
           "$DEST/project-template/.claude/skills/evals/run-evals.sh" \
@@ -345,6 +346,9 @@ PYEOF
 # agent-advisor is on PATH because a run calls it by name from inside a model
 # CLI, where nothing knows where the template is installed.
 ln -sfn "$DEST/scripts/agent-advisor" "$BIN/agent-advisor"
+# Same reason for agent-rules: the learned-rules skill calls it by name from
+# inside a run, in whatever repo that run's checkout is.
+ln -sfn "$DEST/scripts/agent-rules" "$BIN/agent-rules"
 
 bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
   || fail "the installed create-agent.sh does not run" \
@@ -366,6 +370,9 @@ bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
           "check that $BIN is on PATH and the symlink resolves"
 "$BIN/agent-advisor" --help >/dev/null \
   || fail "the installed agent-advisor does not run" \
+          "check that $BIN is on PATH and the symlink resolves"
+"$BIN/agent-rules" --help >/dev/null \
+  || fail "the installed agent-rules does not run" \
           "check that $BIN is on PATH and the symlink resolves"
 printf '{"title":"x","description":"y","comments":[]}' \
   | bash "$DEST/scripts/triage.sh" --rules-only >/dev/null \
