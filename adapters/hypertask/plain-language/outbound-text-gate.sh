@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared outbound gate for ticket comments and human-addressed run responses.
+# Shared outbound shape gate for ticket comments and human-addressed responses.
 
 _plain_comment() {
   COMMENT_TEXT="$1" python3 -c '
@@ -8,118 +8,35 @@ print(html.unescape(re.sub(r"<[^>]+>", " ", os.environ["COMMENT_TEXT"])).strip()
 '
 }
 
-_rewrite_plain_comment() {
-  local draft="$1" reasons="$2" kind="$3" cli="${AGENT_COMMENT_REWRITE_CLI:-${COMMENT_REWRITE_CLI:-}}"
-  local prompt output
-  local -a argv
-  [ -n "$cli" ] || return 1
-  for skill in "$POSPEAK_SKILL" "$UNSLOP_SKILL" "$ADHD_SKILL"; do
-    [ -r "$skill" ] || return 1
-  done
-  prompt="$(cat <<PROMPTEOF
-Rewrite the HTML ticket comment below. A product owner with ADHD reads it on a phone. Use low effort and return only the replacement HTML, with no code fence or explanation. Preserve the exact $kind: prefix at the start of the visible text. Start with <p><strong> and bold the complete first sentence. Use at most 80 words. Remove paths, function calls, code spans, commit hashes, and em dashes. Put each ticket or PR reference inside an <a href="https://..."> link. End the last block with a question mark or start it with Next:. For Done: and Handoff:, include one sentence explaining what shipped; never return only a link.
-
-The mechanical check rejected it for:
-$reasons
-
-Draft:
-$draft
-
-POSPEAK RULES, VERBATIM:
-$(cat "$POSPEAK_SKILL")
-
-UNSLOP RULES, VERBATIM:
-$(cat "$UNSLOP_SKILL")
-
-I-HAVE-ADHD RULES, VERBATIM:
-$(cat "$ADHD_SKILL")
-PROMPTEOF
-)"
-  read -r -a argv <<< "$cli"
-  [ "${#argv[@]}" -gt 0 ] || return 1
-  output="$(timeout 60 "${argv[@]}" "$prompt")" || return 1
-  [ -n "$output" ] || return 1
-  printf '%s' "$output"
-}
-
-_format_ticket_references() {
-  local original="$1" token_path="${TOKEN_FILE:-${token_file:-}}" api_url formatted
-  api_url="${BOARD_API_URL:-}"
-  if [ -z "$api_url" ] && declare -F _ht_api_base >/dev/null 2>&1; then
-    api_url="$(_ht_api_base)"
-  fi
-  api_url="${api_url:-https://app.hypertask.ai/api}"
-  if ! formatted="$(printf '%s' "$original" | python3 "$TICKET_LINK_FORMATTER" \
-      --mode html --api-url "$api_url" --token-file "$token_path" 2>>"$RUN_LOG")"; then
-    _outbound_gate_activity action "Reply held: ticket links could not be verified"
-    _outbound_gate_note "Reply held: ticket links could not be verified through the board API"
-    return 1
-  fi
-  TEXT="$formatted"
-}
-
 _enforce_plain_comment() {
-  local original="$1" plain kind reasons rewritten rewritten_plain check_reasons final_draft final_reasons
-  plain="$(_plain_comment "$original")"
-  kind="${plain%%:*}"
-  case "$kind" in
-    Question|Decision|Handoff|Done) ;;
-    *) TEXT="$original"; return 0 ;;
-  esac
+  local original="$1" kind="$2" reasons
   if reasons="$(printf '%s' "$original" | python3 "$PLAIN_LANGUAGE_CHECK" 2>&1)"; then
     TEXT="$original"
     return 0
   fi
-  final_draft="$original"
-  final_reasons="$reasons"
-  if rewritten="$(_rewrite_plain_comment "$original" "$reasons" "$kind" 2>>"$RUN_LOG")"; then
-    final_draft="$rewritten"
-    rewritten_plain="$(_plain_comment "$rewritten")"
-    final_reasons=""
-    case "$rewritten_plain" in
-      "$kind:"*) ;;
-      *) final_reasons="rewrite removed the $kind: prefix" ;;
-    esac
-    if check_reasons="$(printf '%s' "$rewritten" | python3 "$PLAIN_LANGUAGE_CHECK" 2>&1)"; then
-      if [ -z "$final_reasons" ]; then
-        TEXT="$rewritten"
-        return 0
-      fi
-    else
-      final_reasons="${final_reasons}${final_reasons:+
-}${check_reasons}"
-    fi
-  else
-    final_reasons="$reasons
-rewrite model did not return a replacement within 60 seconds"
-  fi
   mkdir -p "$(dirname "$RUN_LOG")" 2>/dev/null || true
   {
-    printf '%s plain-language-held: draft follows\n%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$final_draft"
-    printf 'plain-language-held: reasons follow\n%s\n' "$final_reasons"
+    printf '%s plain-language-held: draft follows\n%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$original"
+    printf 'plain-language-held: reasons follow\n%s\n' "$reasons"
   } >> "$RUN_LOG" 2>/dev/null || true
-  _outbound_gate_activity action "$kind held: did not pass the plain-language check"
-  _outbound_gate_note "$kind held: did not pass the plain-language check"
+  _outbound_gate_activity action "${kind:-Reply} held: did not pass the plain-language shape check"
+  _outbound_gate_note "${kind:-Reply} held: did not pass the plain-language shape check"
   return 1
 }
 
 _outbound_text_gate() {
-  local original="$1" verbatim="${2:-no}" plain finalized
+  local original="$1" plain kind=""
   TEXT="$original"
   plain="$(_plain_comment "$TEXT")"
   case "$plain" in
-    Question:*|Decision:*|Handoff:*|Done:*) ;;
+    Question:*|Decision:*|Handoff:*|Done:*) kind="${plain%%:*}" ;;
     *)
-      _outbound_gate_activity action "${plain:-empty comment}"
-      _outbound_gate_note "quiet mode: redirected unmarked ticket comment to run activity"
-      return 1 ;;
+      if [ "${AGENT_REPLY_ONLY:-no}" != "yes" ]; then
+        _outbound_gate_activity action "${plain:-empty comment}"
+        _outbound_gate_note "quiet mode: redirected unmarked ticket comment to run activity"
+        return 1
+      fi
+      ;;
   esac
-  _format_ticket_references "$TEXT" || return 1
-  finalized="$TEXT"
-  if [ "$verbatim" != "yes" ]; then
-    _enforce_plain_comment "$TEXT" || return 1
-  fi
-  if [ "$TEXT" != "$finalized" ]; then
-    _format_ticket_references "$TEXT" || return 1
-  fi
+  _enforce_plain_comment "$TEXT" "$kind"
 }

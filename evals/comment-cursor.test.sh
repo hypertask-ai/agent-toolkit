@@ -14,6 +14,8 @@ bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
 . "$ROOT/adapters/hypertask/adapter.sh"
 STATE_DIR="$TMP/state"
 SLUG="test"
+VALENTIN_RULES_RECORD="$STATE_DIR/valentin-ticket-rules.tsv"
+export VALENTIN_RULES_RECORD
 mkdir -p "$STATE_DIR"
 warn() { printf '%s\n' "$*" >&2; }
 
@@ -29,7 +31,8 @@ _ht_get() {
     *'/mcp/comments?'*)
       limit="$(printf '%s' "$path" | sed -n 's/.*[?&]limit=\([0-9][0-9]*\).*/\1/p')"
       cursor="$(printf '%s' "$path" | sed -n 's/.*[?&]cursor=\([0-9][0-9]*\).*/\1/p')"
-      TOTAL="$TOTAL" BASE="$BASE" LIMIT="${limit:-100}" CURSOR="$cursor" READS="$READS" python3 - <<'PY'
+      TOTAL="$TOTAL" BASE="$BASE" LIMIT="${limit:-100}" CURSOR="$cursor" READS="$READS" \
+        AUTHOR="${AUTHOR:-Human}" python3 - <<'PY'
 import json, os
 base, total = int(os.environ["BASE"]), int(os.environ["TOTAL"])
 ids = list(range(base + total, base, -1))
@@ -46,8 +49,8 @@ comments = [{
     "id": value,
     "createdAt": "2026-01-01T00:%02d:00Z" % (value % 60),
     "agent": None,
-    "creator": {"displayName": "Human"},
-    "text": "<p><span data-label=\"agent-agent-1\">Test Bot</span> question %d?</p>" % value,
+    "creator": {"displayName": os.environ["AUTHOR"]},
+    "text": "<p><span data-label=\"agent-agent-1\">Test Bot</span> question %d? <a href=\"https://example.test/%d\">evidence</a></p>" % (value, value),
 } for value in page]
 next_cursor = str(page[-1]) if len(ids) > len(page) and page else None
 print(json.dumps({"comments": comments, "nextCursor": next_cursor, "total": total}))
@@ -70,6 +73,22 @@ if [ "$(cat "$STATE_DIR/test.comment-cursor.1")" = 160 ] \
   ok sixty-comments-one-tick 'all 60 comments newer than the board cursor are read in one tick'
 else
   bad sixty-comments-one-tick "cursor=$(cat "$STATE_DIR/test.comment-cursor.1") reads=$read_total output=$output warning=$(cat "$TMP/first.err")"
+fi
+
+TOTAL=2
+BASE=200
+AUTHOR=Valentin
+printf '200\n' > "$STATE_DIR/test.comment-cursor.1"
+adapter_new_comments_on_owned token 1 agent-1 'Test Bot' >/dev/null
+printf '200\n' > "$STATE_DIR/test.comment-cursor.1"
+adapter_new_comments_on_owned token 1 agent-1 'Test Bot' >/dev/null
+unset AUTHOR
+if [ "$(wc -l < "$VALENTIN_RULES_RECORD")" -eq 2 ] \
+   && grep -qF $'1:201\tTEST-1' "$VALENTIN_RULES_RECORD" \
+   && grep -qF 'question 202? evidence [links: https://example.test/202]' "$VALENTIN_RULES_RECORD"; then
+  ok valentin-rules-shared-deduped 'direct owner statements and evidence links persist once in the shared record'
+else
+  bad valentin-rules-shared-dedup "record=$(cat "$VALENTIN_RULES_RECORD" 2>/dev/null || true)"
 fi
 
 TOTAL=501

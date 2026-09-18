@@ -1,3 +1,21 @@
+## 3.39.0 - 2026-09-18
+
+- AGTE-46, corrected by AGTE-47, routes direct ticket replies through fixed
+  high-effort Codex GPT-5.6 Sol with a five-minute limit and no resumable model
+  session.
+- AGTE-44 context is folded in: replies retain the full ticket thread, read a
+  deduplicated shared record of Valentin's comments, and receive the exact
+  terminal communication rules.
+- The reply sandbox exposes repository code and runner logs read-only, permits
+  web and image research with writes only under `/tmp`, and never receives the
+  board token; the runner validates and posts the answer afterward.
+- The outbound comment gate now holds invalid drafts unchanged instead of
+  rewriting words, links, markers, or em dashes.
+- HTPR-3533 coverage verifies that its screenshot produces the Google
+  authorized redirect-address fix.
+- ACTION: run `agent-template update --keep-timers` so current agents receive
+  contextual sandboxed replies without changing timer state.
+
 ## 3.38.0 - 2026-09-18
 
 - AGTE-53 carries Hypertask priority and dueDate into runner candidates.

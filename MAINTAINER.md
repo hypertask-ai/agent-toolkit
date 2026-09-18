@@ -227,13 +227,15 @@ the company pack's `skills/talk-to-valentin/` directory are canonical; bundled
 files under `adapters/hypertask/plain-language/` fill any missing reference. The
 generated board wrapper checks the first `<p>` and bold sentence, the 80-word
 cap, code-shaped tokens, commit hashes, em dashes, linked ticket and PR
-references, and the last block. A final gate fetches every ticket title from
-the board API and writes each reference as an HTML anchor whose visible text is
-the full id plus title. The same gate removes em dashes from all four comment
-kinds. It tries one 60-second rewrite for other plain-language
-failures with `CHAT_CLI` or `RESEARCH_CLI`, preserves the original marker, then
-checks the replacement and marker again. A second failure logs the draft and
-reasons, emits a held plain-language activity, and sends no raw comment.
+references, and the last block. This is a shape-only gate: it never changes the
+draft. Failure logs the unchanged draft and reasons, emits a held activity, and
+sends no comment.
+
+Direct human questions use the fixed high-effort Codex Sol reply route instead
+of the conf provider. Its five-minute bubblewrap sandbox gets the full thread,
+shared Valentin statement record, exact terminal rules, read-only checkout and
+logs, read-only web research, image access, and writable `/tmp`, but no board token.
+The runner validates and posts the returned HTML after the sandbox exits.
 
 At ticket-run start the adapter posts `{taskId, source: "runtime"}` to
 `/api/mcp/agents/runs`. Claimed, started, PR opened, red check, fix pushed,
@@ -243,8 +245,9 @@ in the local run log and ticket work continues.
 
 ## The conf decides the provider
 
-The conf is the only command policy. Core treats commands as opaque strings
-and neither allows nor rejects providers, models or harnesses.
+For build runs, the conf is the command policy. Core treats those commands as
+opaque strings and neither allows nor rejects providers, models or harnesses.
+Reply-only runs use the fixed route above.
 
 - `MODEL_CLI` is normal ticket work.
 - `LADDER` optionally lists full commands separated by `|`. Three failed

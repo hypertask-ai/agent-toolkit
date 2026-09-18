@@ -10,10 +10,17 @@ fail=0
 ok() { printf 'PASS %-36s %s\n' "$1" "$2"; pass=$((pass + 1)); }
 bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
 
-mkdir -p "$TMP/home/.config/agents" "$TMP/company" "$TMP/repo" "$TMP/bin"
+mkdir -p "$TMP/home/.config/agents" "$TMP/home/.claude/skills/pospeak" \
+  "$TMP/home/.claude/skills/unslop" "$TMP/home/.claude/skills/i-have-adhd" \
+  "$TMP/home/.codex" "$TMP/company" "$TMP/repo" "$TMP/bin"
 printf '# company pack\n' > "$TMP/company/INDEX.md"
 printf 'test\n' > "$TMP/company/VERSION"
 printf 'token\n' > "$TMP/token"
+printf '{}\n' > "$TMP/home/.codex/auth.json"
+printf 'global\n' > "$TMP/home/.claude/CLAUDE.md"
+printf 'pospeak\n' > "$TMP/home/.claude/skills/pospeak/SKILL.md"
+printf 'unslop\n' > "$TMP/home/.claude/skills/unslop/SKILL.md"
+printf 'adhd\n' > "$TMP/home/.claude/skills/i-have-adhd/SKILL.md"
 
 cat > "$TMP/board" <<'EOF'
 #!/usr/bin/env bash
@@ -49,6 +56,25 @@ cat > "$TMP/bin/failing-model" <<'EOF'
 #!/usr/bin/env bash
 echo 'provider unavailable' >&2
 exit 7
+EOF
+cat > "$TMP/bin/timeout-stub" <<'EOF'
+#!/usr/bin/env bash
+shift
+exec "$@"
+EOF
+cat > "$TMP/bin/bwrap-stub" <<'EOF'
+#!/usr/bin/env bash
+hax=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [ "${args[$i]}" = "--ro-bind" ] && [ "${args[$((i + 2))]:-}" = "/opt/hax" ]; then
+    hax="${args[$((i + 1))]}"
+  fi
+  if [ "${args[$i]}" = "--" ]; then
+    exec "$hax" "${args[@]:$((i + 2))}"
+  fi
+done
+exit 2
 EOF
 chmod +x "$TMP/board" "$TMP/bin/"*
 
@@ -98,6 +124,8 @@ run_poll() {
     XDG_STATE_HOME="$state" COMPANY_SKILLS_DIR="$TMP/company" \
     BOARD_JSON="$TMP/board.json" MODEL_CAPTURE="$capture" \
     BOARD_CAPTURE="${BOARD_CAPTURE:-$TMP/board-capture}" COMMENT_JSON="${COMMENT_JSON:-}" \
+    REPLY_HAX_BIN="$TMP/bin/failing-model" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
+    REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
     PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" "$@" test
 }
 
@@ -187,7 +215,7 @@ MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills -
 EOF
 HOME="$TMP/home" python3 "$ROOT/scripts/migrate-provider-policy.py" \
   --version 3.16.0 "$migrate" > "$TMP/migrate.out"
-if grep -q '^LADDER=.*/hax --provider=codex.*|.*/hax --provider=codex.*|claude -p --model opus' "$migrate/cursor.conf" \
+if grep -q '^LADDER=.*/hax --provider=codex.*|.*/hax --provider=codex.*|.*/hax --provider=codex.*--model=gpt-5.6-sol' "$migrate/cursor.conf" \
    && grep -q '^RESEARCH_CLI=.*/hax --provider=codex.*--effort=xhigh' "$migrate/cursor.conf" \
    && grep -q '^TRIAGE_HARD_CLI=.*/hax --provider=codex.*--effort=high' "$migrate/cursor.conf" \
    && [ -f "$migrate/cursor.conf.bak-3.16.0" ] \

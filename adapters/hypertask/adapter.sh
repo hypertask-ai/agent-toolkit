@@ -819,6 +819,63 @@ print(json.dumps(row))
   fi
 }
 
+# _record_valentin_comments <jsonl-file> <board-id> <ticket-ref>
+# Every direct owner comment becomes one compact, deduplicated line shared by
+# all runners. Keeping all of Valentin's own words avoids guessing which short
+# sentence was intended as a durable rule.
+_record_valentin_comments() {
+  local comments_file="$1" board_id="$2" ref="$3"
+  local record="${VALENTIN_RULES_RECORD:-$STATE_DIR/valentin-ticket-rules.tsv}"
+  [ -s "$comments_file" ] || return 0
+  mkdir -p "$(dirname "$record")"
+  touch "$record"
+  exec 8>>"$record.lock"
+  flock 8
+  BOARD="$board_id" REF="$ref" python3 - "$comments_file" "$record" <<'PYEOF'
+import html
+import json
+import os
+import re
+import sys
+
+source, target = sys.argv[1:]
+seen = set()
+with open(target, encoding="utf-8") as handle:
+    for line in handle:
+        if line.strip():
+            seen.add(line.split("\t", 1)[0])
+rows = []
+with open(source, encoding="utf-8") as handle:
+    for line in handle:
+        if not line.strip():
+            continue
+        comment = json.loads(line)
+        if isinstance(comment.get("agent"), dict):
+            continue
+        creator = comment.get("creator") if isinstance(comment.get("creator"), dict) else {}
+        creator_id = str(creator.get("id") or creator.get("userId") or "")
+        author = str(creator.get("displayName") or creator.get("name") or "")
+        if creator_id != "6" and not author.casefold().startswith("valentin"):
+            continue
+        key = "%s:%s" % (os.environ["BOARD"], comment.get("id") or "")
+        if key in seen:
+            continue
+        raw = str(comment.get("text") or comment.get("commentText") or comment.get("html") or "")
+        links = re.findall(r'(?:href|src)=["\x27]([^"\x27]+)', raw, flags=re.I)
+        text = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", raw)).split())
+        if links:
+            text += " [links: %s]" % ", ".join(dict.fromkeys(links))
+        text = text.replace("\t", " ").replace("\n", " ")
+        rows.append("\t".join((key, os.environ["REF"], str(comment.get("createdAt") or ""), text)))
+        seen.add(key)
+if rows:
+    with open(target, "a", encoding="utf-8") as handle:
+        handle.write("\n".join(rows) + "\n")
+PYEOF
+  flock -u 8
+  exec 8>&-
+}
+
 # adapter_new_comments_on_owned <token-file> <board-id> <agent-id> <agent-name>
 # Optional: reads each board's recently updated ticket comments until it reaches
 # the last comment id this agent saw there. The cursor avoids rereading a fixed
@@ -826,7 +883,7 @@ print(json.dumps(row))
 # without emitting one warning per skipped ticket.
 adapter_new_comments_on_owned() {
   local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4"
-  local one status tasks rows task task_id comments page_stats page_count page_max
+  local one status tasks rows task task_id task_ref comments page_stats page_count page_max
   local page_caught page_cursor comments_cursor remaining direct offset returned
   local cursor_file last_seen max_seen read_count hit_ceiling ceiling_board page_has_new comments_file
   local ceiling="${OWNED_COMMENT_READ_CEILING:-500}"
@@ -889,6 +946,7 @@ for task in json.load(sys.stdin).get("tasks") or []:
           [ -n "$task" ] || continue
           [ "$read_count" -lt "$ceiling" ] || { hit_ceiling="yes"; break; }
           task_id="$(ROW="$task" python3 -c 'import json,os; print(json.loads(os.environ["ROW"])["id"])')"
+          task_ref="$(ROW="$task" python3 -c 'import json,os; print(json.loads(os.environ["ROW"])["ref"])')"
           comments_file="${TMPDIR:-/tmp}/agent-board-comments.$$.$one.$task_id"
           : > "$comments_file"
           comments_cursor=""
@@ -919,6 +977,7 @@ print("%d\t%d\t%s\t%s" % (len(new), maximum, "yes" if caught else "no", doc.get(
           done
 
           if [ -s "$comments_file" ]; then
+            _record_valentin_comments "$comments_file" "$one" "$task_ref"
             direct="$(ROW="$task" COMMENTS="$comments_file" AID="$agent_id" ANAME="$agent_name" MENTION="agent-$agent_id" python3 -c '
 import html, json, os, re
 row = json.loads(os.environ["ROW"])

@@ -1286,7 +1286,7 @@ elif provider == "codex":
     if model and model != "auto":
         model_cli += " --model %s" % model
 elif provider == "claude":
-    model_cli = "claude -p --model %s" % (model or "sonnet")
+    model_cli = "/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
 elif provider == "pi":
     model_cli = "pi --print --tools read,bash,edit,write --no-extensions --no-skills"
     if model and model != "auto":

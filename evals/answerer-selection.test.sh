@@ -11,10 +11,17 @@ ok() { printf 'PASS %-36s %s\n' "$1" "$2"; pass=$((pass + 1)); }
 bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
 
 CONF_DIR="$TMP/home/.config/agents"
-mkdir -p "$CONF_DIR" "$TMP/bin" "$TMP/company" "$TMP/repo" "$TMP/boards"
+mkdir -p "$CONF_DIR" "$TMP/home/.claude/skills/pospeak" \
+  "$TMP/home/.claude/skills/unslop" "$TMP/home/.claude/skills/i-have-adhd" \
+  "$TMP/home/.codex" "$TMP/bin" "$TMP/company" "$TMP/repo" "$TMP/boards"
 printf '# company pack\n' > "$TMP/company/INDEX.md"
 printf 'test\n' > "$TMP/company/VERSION"
 printf 'token\n' > "$TMP/token"
+printf '{}\n' > "$TMP/home/.codex/auth.json"
+printf 'global\n' > "$TMP/home/.claude/CLAUDE.md"
+printf 'pospeak\n' > "$TMP/home/.claude/skills/pospeak/SKILL.md"
+printf 'unslop\n' > "$TMP/home/.claude/skills/unslop/SKILL.md"
+printf 'adhd\n' > "$TMP/home/.claude/skills/i-have-adhd/SKILL.md"
 
 cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
@@ -23,10 +30,30 @@ if [[ " $* " = *" comment add TEST-1 "* ]]; then
 fi
 exit 0
 EOF
-cat > "$TMP/bin/provider" <<'EOF'
+cat > "$TMP/bin/hax-stub" <<'EOF'
 #!/usr/bin/env bash
-printf '%s\n' "$AGENT_NAME" >> "$MODEL_RUN_LOG"
-"$AGENT_BOARD_CLI" comment add TEST-1 --text '<p><strong>Decision: This is the selected answer.</strong></p><p>Next: continue.</p>'
+prompt="${!#}"
+printf '%s\n' "$prompt" | sed -n '1s/^You are \(.*\) in a read-only.*/\1/p' >> "$MODEL_RUN_LOG"
+printf '<p><strong>This is the selected answer.</strong></p><p>Next: continue.</p>\n'
+EOF
+cat > "$TMP/bin/timeout-stub" <<'EOF'
+#!/usr/bin/env bash
+shift
+exec "$@"
+EOF
+cat > "$TMP/bin/bwrap-stub" <<'EOF'
+#!/usr/bin/env bash
+hax=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [ "${args[$i]}" = "--ro-bind" ] && [ "${args[$((i + 2))]:-}" = "/opt/hax" ]; then
+    hax="${args[$((i + 1))]}"
+  fi
+  if [ "${args[$i]}" = "--" ]; then
+    exec "$hax" "${args[@]:$((i + 2))}"
+  fi
+done
+exit 2
 EOF
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -83,6 +110,8 @@ run_live() {
     XDG_STATE_HOME="$TMP/state/$case_name/$slug" COMPANY_SKILLS_DIR="$TMP/company" \
     TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
     BOARD_WRITE_LOG="$TMP/board-writes.log" MODEL_RUN_LOG="$TMP/model-runs.log" \
+    REPLY_HAX_BIN="$TMP/bin/hax-stub" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
+    REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
     PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once "$slug"
 }
 

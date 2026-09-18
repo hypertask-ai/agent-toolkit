@@ -26,7 +26,7 @@ DRY_RUN=no
 ONLY_TICKET=""
 REPO="${AGENT_TEMPLATE_REPO:-$HOME/projects/vstack}"
 BOARD_CLI="${AGENT_TEMPLATE_BOARD_CLI:-}"
-MODEL_CLI="${AGENT_TEMPLATE_MODEL_CLI:-claude -p --model sonnet}"
+MODEL_CLI="${AGENT_TEMPLATE_MODEL_CLI:-/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p}"
 BOARD_ID="${FEEDBACK_BOARD_ID:-5500}"
 MAX_TICKETS="${AGENT_TEMPLATE_MAX_TICKETS:-10}"
 CHANGELOG=""

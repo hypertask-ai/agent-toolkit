@@ -128,14 +128,22 @@ the canonical `skills/talk-to-valentin/` company-pack copy when present and
 uses the template's bundled copy when a reference is absent. Before any kind
 posts, the board wrapper requires a bold first sentence in a first `<p>`, at
 most 80 words, no code-shaped detail or em dash, linked ticket and PR
-references, and a final question or `Next:` block. A final gate applies to all
-four comment kinds. It fetches authoritative titles through the board
-API, writes ticket references as HTML anchors with the full id plus title, and
-removes em dashes. A failure gets one 60-second rewrite through `CHAT_CLI`,
-falling back to `RESEARCH_CLI`. The rewrite must preserve the original marker,
-and the wrapper checks both the replacement and marker again. If either check
-fails, the wrapper keeps the draft and reasons in the run log, posts a held
-plain-language activity, and posts no comment.
+references, and a final question or `Next:` block. The final gate validates
+that shape only. It never rewrites words, links, markers, or punctuation. If a
+check fails, the wrapper keeps the unchanged draft and reasons in the run log,
+posts a held activity, and posts no comment.
+
+A human question or direct mention uses a separate reply-only route. The prompt
+contains the complete ticket description and thread, a deduplicated shared
+record of Valentin's prior ticket statements, and the terminal `CLAUDE.md`,
+`pospeak`, `unslop`, and `i-have-adhd` sources verbatim. It explicitly requires
+relevant images, repository code, browsing evidence, and runner logs to be read
+before answering. Replies always use Codex GPT-5.6 Sol at high effort through
+`hax` with `--no-session --bare`, independent of the agent conf, with a
+five-minute limit. Bubblewrap exposes the repository and logs
+read-only, permits writes only under `/tmp`, and does not mount the board token.
+The model returns HTML; the runner checks its shape and posts it afterward.
+Reply text does not need a four-kind marker and is never forced into `Decision:`.
 
 ## The three wiring modes
 
@@ -448,7 +456,7 @@ A Cursor-first conf can explicitly choose the former ladder:
 
 ```sh
 MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
-LADDER="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|claude -p --model opus --effort high"
+LADDER="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
 RESEARCH_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session --raw -p"
 TRIAGE_HARD_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
 CHAT_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust --mode ask"

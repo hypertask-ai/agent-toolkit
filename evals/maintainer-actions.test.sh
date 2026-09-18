@@ -15,8 +15,15 @@ STATE_DIR="$TMP/state"
 BIN="$TMP/bin"
 REPO="$TMP/repo"
 COMPANY="$TMP/company"
-mkdir -p "$CONF_DIR/credentials" "$STATE_DIR" "$BIN" "$REPO" "$COMPANY/skills/talk-to-valentin/reference"
+mkdir -p "$CONF_DIR/credentials" "$HOME_DIR/.claude/skills/pospeak" \
+  "$HOME_DIR/.claude/skills/unslop" "$HOME_DIR/.claude/skills/i-have-adhd" \
+  "$HOME_DIR/.codex" "$STATE_DIR" "$BIN" "$REPO" "$COMPANY/skills/talk-to-valentin/reference"
 printf 'token\n' > "$CONF_DIR/credentials/maintainer-token"
+printf '{}\n' > "$HOME_DIR/.codex/auth.json"
+printf 'global\n' > "$HOME_DIR/.claude/CLAUDE.md"
+printf 'pospeak\n' > "$HOME_DIR/.claude/skills/pospeak/SKILL.md"
+printf 'unslop\n' > "$HOME_DIR/.claude/skills/unslop/SKILL.md"
+printf 'adhd\n' > "$HOME_DIR/.claude/skills/i-have-adhd/SKILL.md"
 printf '# skills\n' > "$COMPANY/INDEX.md"
 printf 'test\n' > "$COMPANY/VERSION"
 for name in pospeak.md unslop.md i-have-adhd.md; do printf 'Use plain words.\n' > "$COMPANY/skills/talk-to-valentin/reference/$name"; done
@@ -92,10 +99,27 @@ cat > "$BIN/model" <<'EOF'
 if [[ "$1" = *'source=advisor'* ]]; then
   sleep "${MODEL_DELAY:-0}"
   printf 'Decision: The detached instruction completed exactly.\nSecond line stays unchanged.\n'
-else
-  printf 'reply-only\n' >> "$MODEL_RUN_LOG"
-  "$AGENT_BOARD_CLI" comment add OWNER-9 --text '<p><strong>Decision: The instruction is still running.</strong></p><p>Next: wait for its result.</p>'
 fi
+EOF
+cat > "$BIN/reply-hax" <<'EOF'
+#!/usr/bin/env bash
+printf 'reply-only\n' >> "$MODEL_RUN_LOG"
+printf '<p><strong>The instruction is still running.</strong></p><p>Next: wait for its result.</p>\n'
+EOF
+cat > "$BIN/timeout-stub" <<'EOF'
+#!/usr/bin/env bash
+shift
+exec "$@"
+EOF
+cat > "$BIN/bwrap-stub" <<'EOF'
+#!/usr/bin/env bash
+hax=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [ "${args[$i]}" = "--ro-bind" ] && [ "${args[$((i + 2))]:-}" = "/opt/hax" ]; then hax="${args[$((i + 1))]}"; fi
+  if [ "${args[$i]}" = "--" ]; then exec "$hax" "${args[@]:$((i + 2))}"; fi
+done
+exit 2
 EOF
 cat > "$BIN/board" <<'EOF'
 #!/usr/bin/env bash
@@ -271,6 +295,8 @@ run_poll() {
     SYSTEMD_RUN_LOG="$TMP/systemd-run.log" INSTRUCTION_PID_FILE="$TMP/instruction.pid" \
     ADVISOR_POST_FILE="$TMP/advisor-post" SYSTEMCTL_LOG="$TMP/systemctl.log" \
     GH_LOG="$TMP/gh.log" MODEL_RUN_LOG="$TMP/model-runs.log" MODEL_DELAY="${MODEL_DELAY:-6}" \
+    REPLY_HAX_BIN="$BIN/reply-hax" REPLY_BWRAP_BIN="$BIN/bwrap-stub" \
+    REPLY_TIMEOUT_BIN="$BIN/timeout-stub" REPLY_CODEX_AUTH="$HOME_DIR/.codex/auth.json" \
     "$ROOT/scripts/agent-board-poll" "$@" maintainer
 }
 

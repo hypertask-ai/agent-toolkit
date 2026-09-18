@@ -62,9 +62,8 @@ def migrate(path: Path, version: str, dry_run: bool) -> bool:
     binary = str(Path.home() / ".local/bin/hax")
     high = f"{binary} --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
     research = f"{binary} --provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session --raw -p"
-    final = "claude -p --model opus --effort high"
     additions = {
-        "LADDER": f"{high}|{high}|{final}",
+        "LADDER": f"{high}|{high}|{high}",
         "RESEARCH_CLI": research,
         "TRIAGE_HARD_CLI": high,
     }

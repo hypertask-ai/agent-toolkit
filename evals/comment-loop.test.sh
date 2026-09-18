@@ -78,7 +78,7 @@ TOKEN_FILE="$TMP/token"
 BOARD_CLI="$TMP/board"
 WATCH_SECTIONS="*"
 SKILLS_INDEX=""
-MODEL_CLI="claude -p"
+MODEL_CLI="claude --print"
 PR_REPO="example/repo"
 TRIAGE="no"
 CLAIM_UNASSIGNED="no"
@@ -104,7 +104,7 @@ TOKEN_FILE="$TMP/token"
 BOARD_CLI="$TMP/board"
 WATCH_SECTIONS="*"
 SKILLS_INDEX=""
-MODEL_CLI="claude -p"
+MODEL_CLI="claude --print"
 PR_REPO="example/repo"
 TRIAGE="no"
 CLAIM_UNASSIGNED="no"
@@ -308,33 +308,15 @@ export MECH_POSTS MECH_UPDATES REWRITE_CALLS REWRITE_PROMPT
 : > "$REWRITE_CALLS"
 adapter_install_board_cli plain-test "$TMP/token" "$TMP/plain-board" "Test Bot" agent-1 1
 technical='<p>Question: Should runThing() in src/app.ts ship?</p>'
-REWRITE_OUTPUT='<p><strong>Question: Should this change ship today?</strong></p>'
-export REWRITE_OUTPUT
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
   AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
   "$TMP/plain-board" comment add TEST-1 --text "$technical" >"$TMP/technical.out" 2>"$TMP/technical.err"
-if [ "$(wc -l < "$REWRITE_CALLS")" -eq 1 ] \
-   && grep -qF '<p><strong>Question: Should this change ship today?</strong></p>' "$MECH_POSTS" \
-   && grep -qF 'comment contains a file path' "$REWRITE_PROMPT" \
-   && grep -qF 'Preserve the exact Question: prefix' "$REWRITE_PROMPT" \
-   && grep -qF 'POSPEAK RULES, VERBATIM:' "$REWRITE_PROMPT"; then
-  ok technical-comment-rewritten 'a technical draft keeps its marker through the passing rewrite'
+if [ ! -s "$REWRITE_CALLS" ] && [ ! -s "$MECH_POSTS" ] \
+   && grep -qF "$technical" "$TMP/state/agent-board-poll/plain-test.log" \
+   && grep -qF 'comment contains a file path' "$TMP/state/agent-board-poll/plain-test.log"; then
+  ok invalid-comment-held-verbatim 'an invalid draft is logged unchanged and never sent to a rewrite model'
 else
-  bad technical-comment-rewritten "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/technical.err")"
-fi
-
-: > "$MECH_POSTS"
-: > "$REWRITE_CALLS"
-REWRITE_OUTPUT='<p><strong>Decision: This change should ship today.</strong></p><p>Next: approve the release.</p>'
-export REWRITE_OUTPUT
-HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
-  AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
-  "$TMP/plain-board" comment add TEST-1 --text "$technical" >"$TMP/missing-prefix.out" 2>"$TMP/missing-prefix.err"
-if [ ! -s "$MECH_POSTS" ] \
-   && grep -qF 'rewrite removed the Question: prefix' "$TMP/state/agent-board-poll/plain-test.log"; then
-  ok rewrite-missing-prefix-held 'a fluent rewrite with a changed marker is refused'
-else
-  bad rewrite-missing-prefix-held "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/missing-prefix.err")"
+  bad invalid-comment-held-verbatim "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/technical.err")"
 fi
 
 : > "$MECH_POSTS"
@@ -351,41 +333,30 @@ fi
 
 : > "$MECH_POSTS"
 : > "$REWRITE_CALLS"
-REWRITE_OUTPUT='<p><strong>Decision: The release is ready — now.</strong></p><p>Next: approve the release.</p>'
-export REWRITE_OUTPUT
 em_dash='<p><strong>Decision: The release is ready — now.</strong></p><p>Next: approve the release.</p>'
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
   AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
   "$TMP/plain-board" comment add TEST-1 --text "$em_dash" >"$TMP/em-dash.out" 2>"$TMP/em-dash.err"
-if [ "$(wc -l < "$MECH_POSTS")" -eq 1 ] \
-   && [ ! -s "$REWRITE_CALLS" ] \
-   && grep -qF 'Decision: The release is ready, now.' "$MECH_POSTS" \
-   && ! grep -qF '—' "$MECH_POSTS"; then
-  ok em-dash-comment-removed 'the final gate replaces an em dash before posting'
+if [ ! -s "$REWRITE_CALLS" ] && [ ! -s "$MECH_POSTS" ] \
+   && grep -qF "$em_dash" "$TMP/state/agent-board-poll/plain-test.log" \
+   && grep -qF 'comment contains an em dash' "$TMP/state/agent-board-poll/plain-test.log"; then
+  ok em-dash-comment-held 'the final gate holds an em dash unchanged instead of changing the words'
 else
-  bad em-dash-comment-removed "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/em-dash.err")"
+  bad em-dash-comment-held "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/em-dash.err")"
 fi
 
 : > "$MECH_POSTS"
 : > "$REWRITE_CALLS"
-REWRITE_OUTPUT='<p><strong>Handoff: The quiet-mode fixes shipped.</strong></p><p>Next: QA Bot will verify the release.</p>'
-export REWRITE_OUTPUT
+link_only='<p><strong>Done: <a href="https://github.com/example/repo/pull/1">PR 1</a>.</strong></p><p>Next: review the release.</p>'
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
   AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
-  "$TMP/plain-board" comment add TEST-1 --text '<p><strong>Handoff: <a href="https://github.com/example/repo/pull/1">PR 1</a>.</strong></p><p>Next: send it to QA Bot.</p>' >/dev/null
-REWRITE_OUTPUT='<p><strong>Done: The quiet-mode fixes shipped.</strong></p><p>Next: Review <a href="https://github.com/example/repo/pull/1">PR 1</a>.</p>'
-export REWRITE_OUTPUT
-HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
-  AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
-  "$TMP/plain-board" comment add TEST-1 --text '<p><strong>Done: <a href="https://github.com/example/repo/pull/1">PR 1</a>.</strong></p><p>Next: review the release.</p>' >/dev/null
-if [ "$(wc -l < "$MECH_POSTS")" -eq 2 ] \
-   && [ "$(wc -l < "$REWRITE_CALLS")" -eq 2 ] \
-   && grep -qF 'Done and Handoff must explain what shipped, not only link to it' "$REWRITE_PROMPT" \
-   && grep -qF 'Handoff: The quiet-mode fixes shipped.' "$MECH_POSTS" \
-   && grep -qF 'Done: The quiet-mode fixes shipped.' "$MECH_POSTS"; then
-  ok handoff-done-plain-words 'link-only Handoff and Done drafts are rewritten with shipped explanations'
+  "$TMP/plain-board" comment add TEST-1 --text "$link_only" >"$TMP/link-only.out" 2>"$TMP/link-only.err"
+if [ ! -s "$REWRITE_CALLS" ] && [ ! -s "$MECH_POSTS" ] \
+   && grep -qF "$link_only" "$TMP/state/agent-board-poll/plain-test.log" \
+   && grep -qF 'Done and Handoff must explain what shipped, not only link to it' "$TMP/state/agent-board-poll/plain-test.log"; then
+  ok link-only-comment-held 'a link-only result is held unchanged rather than given invented meaning'
 else
-  bad handoff-done-plain-words "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS")"
+  bad link-only-comment-held "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/link-only.err")"
 fi
 
 MECH_POSTS="$TMP/dedupe-posts"

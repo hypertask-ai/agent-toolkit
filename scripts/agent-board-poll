@@ -186,6 +186,16 @@ for skill in "$POSPEAK_SKILL" "$UNSLOP_SKILL" "$ADHD_SKILL"; do
   [ -r "$skill" ] || die "plain-language rules are missing at $skill" \
     "restore the installed template or company skill pack, then retry"
 done
+# Reply-only runs use Valentin's terminal sources, not copies in this toolkit.
+# The ADHD plugin has no stable top-level symlink on every host, so resolve its
+# installed source once and fail the reply rather than silently paraphrasing it.
+TERMINAL_CLAUDE_RULES="${VALENTIN_CLAUDE_RULES:-$HOME/.claude/CLAUDE.md}"
+TERMINAL_POSPEAK_SKILL="${VALENTIN_POSPEAK_SKILL:-$HOME/.claude/skills/pospeak/SKILL.md}"
+TERMINAL_UNSLOP_SKILL="${VALENTIN_UNSLOP_SKILL:-$HOME/.claude/skills/unslop/SKILL.md}"
+TERMINAL_ADHD_SKILL="${VALENTIN_ADHD_SKILL:-$HOME/.claude/skills/i-have-adhd/SKILL.md}"
+if [ ! -r "$TERMINAL_ADHD_SKILL" ]; then
+  TERMINAL_ADHD_SKILL="$HOME/.claude/plugins/marketplaces/i-have-adhd/skills/i-have-adhd/SKILL.md"
+fi
 PLAIN_LANGUAGE_PROMPT="For every Question:, Decision:, Handoff:, or Done: ticket comment, follow the three rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
 
 POSPEAK RULES, VERBATIM:
@@ -287,6 +297,8 @@ CORE_STATE_NAME="agent-board-poll"
 STATE_DIR="$(core_state_dir)"
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/$SLUG.log"
+VALENTIN_RULES_RECORD="$STATE_DIR/valentin-ticket-rules.tsv"
+export VALENTIN_RULES_RECORD
 GRAFT_PATH=""
 GRAFT_MCP_COMMAND=""
 GRAFT_MCP_CONFIG=""
@@ -573,6 +585,45 @@ post_ticket_comment() {
   done
   rm -f "$err_file"
   return 1
+}
+
+# A reply model can read the checkout, runner logs, its Codex credential, and
+# the network. Only /tmp is writable, and the board token is never mounted.
+run_reply_model() {
+  local prompt="$1" repo="$2" reply_file="$3" err_file="$4"
+  local hax_bin="${REPLY_HAX_BIN:-/home/valentin/.local/bin/hax}"
+  local bwrap_bin="${REPLY_BWRAP_BIN:-$(command -v bwrap || true)}"
+  local timeout_bin="${REPLY_TIMEOUT_BIN:-$(command -v timeout || true)}"
+  local codex_auth="${REPLY_CODEX_AUTH:-$HOME/.codex/auth.json}"
+  local token_real repo_real logs_real
+  [ -x "$hax_bin" ] || { printf 'fixed reply model is missing at %s\n' "$hax_bin" > "$err_file"; return 127; }
+  [ -x "$bwrap_bin" ] || { printf 'reply sandbox requires bwrap\n' > "$err_file"; return 127; }
+  [ -x "$timeout_bin" ] || { printf 'reply sandbox requires timeout\n' > "$err_file"; return 127; }
+  [ -r "$codex_auth" ] || { printf 'Codex credential is missing at %s\n' "$codex_auth" > "$err_file"; return 127; }
+  [ -d "$repo" ] || { printf 'reply repository is missing at %s\n' "$repo" > "$err_file"; return 127; }
+  token_real="$(readlink -f "$TOKEN_FILE")"
+  repo_real="$(readlink -f "$repo")"
+  logs_real="$(readlink -f "$STATE_DIR")"
+  case "$token_real" in
+    "$repo_real"/*|"$logs_real"/*)
+      printf 'reply sandbox refused because the board token is inside a readable mount\n' > "$err_file"
+      return 126 ;;
+  esac
+
+  "$timeout_bin" 300 "$bwrap_bin" \
+    --die-with-parent --new-session \
+    --unshare-user-try --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try \
+    --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+    --symlink usr/lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev \
+    --tmpfs /tmp --dir /tmp/home --dir /tmp/home/.codex \
+    --ro-bind "$codex_auth" /tmp/home/.codex/auth.json \
+    --tmpfs /opt --ro-bind "$hax_bin" /opt/hax --remount-ro /opt \
+    --ro-bind "$repo" /workspace --ro-bind "$STATE_DIR" /logs \
+    --clearenv --setenv HOME /tmp/home --setenv XDG_STATE_HOME /tmp/state \
+    --setenv TMPDIR /tmp --setenv PATH /opt:/usr/bin \
+    --setenv LANG C.UTF-8 --chdir /workspace -- \
+    /opt/hax --provider=codex --model=gpt-5.6-sol --effort=high \
+      --no-session --bare -p "$prompt" > "$reply_file" 2> "$err_file"
 }
 
 check_maintainer_builds() {
@@ -1037,8 +1088,8 @@ rank_order() {
 }
 
 # Candidates that passed every gate, waiting to be ranked against each other.
-ELIGIBLE=(); E_QUEUE_ORDER=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=()
-E_REASON=(); E_PR_FIX=(); E_REPLY_ONLY=()
+ELIGIBLE=(); E_QUEUE_ORDER=(); E_ROW=(); E_COMMENT=(); E_COMMENTS=()
+E_WHY=(); E_TRIES=(); E_REASON=(); E_PR_FIX=(); E_REPLY_ONLY=()
 
 # ---------- one tick at a time ----------
 # The systemd unit is Type=oneshot, so systemd already refuses a second run
@@ -1588,6 +1639,7 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
   E_QUEUE_ORDER+=("$queue_order")
   E_ROW+=("$row")
   E_COMMENT+=("$comment_json")
+  E_COMMENTS+=("$comments_json")
   E_WHY+=("$why")
   E_TRIES+=("$tries")
   E_REASON+=("$reason")
@@ -1669,6 +1721,7 @@ for i in $(rank_order); do
   fi
   row="${E_ROW[$i]}"
   comment_json="${E_COMMENT[$i]}"
+  comments_json="${E_COMMENTS[$i]}"
   tries="${E_TRIES[$i]}"
   why="${E_WHY[$i]}"
   reason="${E_REASON[$i]}"
@@ -1783,22 +1836,51 @@ Keep fixing this PR until it merges and is live."
   fi
 
   if [ "$is_reply_only" = "yes" ]; then
-    PROMPT="You are $AGENT_NAME in a reply-only run for $ref.
+    for rule_source in "$TERMINAL_CLAUDE_RULES" "$TERMINAL_POSPEAK_SKILL" \
+                       "$TERMINAL_UNSLOP_SKILL" "$TERMINAL_ADHD_SKILL"; do
+      [ -r "$rule_source" ] || die "reply rule source is missing at $rule_source" \
+        "restore Valentin's terminal rule source, then retry this reply"
+    done
+    shared_rules="$(cat "$VALENTIN_RULES_RECORD" 2>/dev/null || printf '(no prior ticket rules recorded yet)')"
+    PROMPT="You are $AGENT_NAME in a read-only reply run for $ref.
 
 Ticket $url: $title
 
+Ticket description, verbatim HTML:
+$description
+
 Human comment to answer: ${comment_text:-none}
 
-REPLY-ONLY CONTRACT: A direct mention or question from a human must always get
-an answer in this tick, regardless of whether the ticket is done, archived, in
-QA, or in any other column. Answer only that comment. Do not edit files, run a
-code change, claim or assign the ticket, move its column, open or update a pull
-request, or change any board state except posting the answer. With quiet mode
-on, post one concise \`Decision:\` comment in HTML block tags and do not
-@mention the board owner. If the configured comment policy permits a plain
-answer, that is also valid. Use:
-\`$BOARD_CLI comment add $ref --text '<p>Decision: concise answer</p>'\`.
-Then stop."
+Full ticket thread, verbatim normalized JSON. Read all of it before answering.
+Image src and href values are evidence, not decoration:
+${comments_json:-[]}
+
+COMPACT SHARED RECORD OF VALENTIN'S PRIOR TICKET STATEMENTS:
+$shared_rules
+
+REPLY CONTRACT:
+- Answer the human's latest addressed comment using the full thread and shared record.
+- Inspect repository code under /workspace and run logs under /logs when they can settle the answer.
+- Browse with read-only HTTP requests when needed.
+- Download every relevant image URL to /tmp and inspect the image before answering.
+- The filesystem outside /tmp is read-only. Do not attempt any board, repository, browser, or external write.
+- Return only one concise HTML comment. Start with <p><strong> and bold the complete first sentence. Stay at or below 80 words. End the last block with a question mark or start it with Next:.
+- Do not add Decision: framing. Use Question:, Handoff:, or Done: only when it is the actual meaning of the answer.
+- Do not include tool traces, a code fence, or an explanation of your process.
+
+The runner posts the returned HTML after a shape-only check. It never rewrites your words.
+
+GLOBAL CLAUDE.md, VERBATIM:
+$(cat "$TERMINAL_CLAUDE_RULES")
+
+POSPEAK SKILL, VERBATIM:
+$(cat "$TERMINAL_POSPEAK_SKILL")
+
+UNSLOP SKILL, VERBATIM:
+$(cat "$TERMINAL_UNSLOP_SKILL")
+
+I-HAVE-ADHD SKILL, VERBATIM:
+$(cat "$TERMINAL_ADHD_SKILL")"
   fi
 
   # A hard ticket gets two things the default path does not: a stronger model,
@@ -1846,25 +1928,24 @@ MAINTAINER COMMANDS:
 After any command, echo its result unchanged."
   fi
 
-  if [ "$GRAFT" = "on" ]; then
+  if [ "$GRAFT" = "on" ] && [ "$is_reply_only" = "no" ]; then
     PROMPT="$PROMPT
 
 Ask Graft before grepping: use \`graft ask '<question>'\` or the Graft MCP tools first."
   fi
 
-  PROMPT="$PROMPT
-
-COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent and explains what shipped. \`Done:\` explains what shipped and includes the pull request link. Neither \`Handoff:\` nor \`Done:\` can be only a link. Write every ticket reference as an HTML anchor whose visible text is its full id plus authoritative title. Do not use em dashes. Everything else, including claims, plans, progress, retries, checks, and blockers, is run activity. The board wrapper redirects an unmarked comment to activity instead of posting it. The existing limit remains at one reminder and three total ticket comments per day unless a human wrote in between.
-
-$PLAIN_LANGUAGE_PROMPT
-
-QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any ticket comment. The board wrapper strips and logs an owner mention before posting."
   if [ "$is_reply_only" = "yes" ]; then
     PROMPT="$PROMPT
 
-This reply-only run must leave the ticket in its current column."
+QUIET MODE: Do not @mention the board owner. This reply-only run must leave the ticket in its current column."
   else
-    PROMPT="$PROMPT Attention comes from moving the ticket to the review column."
+    PROMPT="$PROMPT
+
+COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent and explains what shipped. \`Done:\` explains what shipped and includes the pull request link. Neither \`Handoff:\` nor \`Done:\` can be only a link. Write every ticket reference as an HTML anchor whose visible text is its full id plus authoritative title, and every PR reference inside a full https HTML anchor. Everything else is run activity, not a ticket comment. Progress, plans, claims, retries, model switches, test output, diagnostics, and routine status never belong in comments. Start directly with the marker; never put a heading before it.
+
+$PLAIN_LANGUAGE_PROMPT
+
+QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any ticket comment. The board wrapper strips and logs an owner mention before posting. Attention comes from moving the ticket to the review column."
   fi
 
   RUN_DIR="${AGENT_REPO:-}"
@@ -1881,7 +1962,7 @@ This reply-only run must leave the ticket in its current column."
     }
   fi
 
-  if [ "$GRAFT" = "on" ]; then
+  if [ "$GRAFT" = "on" ] && [ "$is_reply_only" = "no" ]; then
     GRAFT_MCP_COMMAND="graft mcp ${RUN_DIR:-${AGENT_REPO:-.}}"
     GRAFT_COMMAND="$GRAFT_SHIM_DIR/graft" GRAFT_DIR="${RUN_DIR:-${AGENT_REPO:-.}}" \
       python3 -c 'import json,os; print(json.dumps({"mcpServers":{"graft":{"command":os.environ["GRAFT_COMMAND"],"args":["mcp",os.environ["GRAFT_DIR"]]}}}, indent=2))' \
@@ -1939,54 +2020,75 @@ print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
     OPEN_PRS_BEFORE="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
   fi
   set +e
-  # One short-lived process per ticket. Nothing survives it except the board,
-  # the repo, and this log. The agent's token is never in the prompt or the
-  # command line: the board CLI wrapper reads it from its own 0600 file.
-  # Resolve once, immediately before launch. PR debt deliberately bypasses the
-  # attempt-backed ladder and uses the agent's configured command verbatim.
-  if [ "$is_pr_fix" = "yes" ]; then
-    RUN_MODEL_CLI="$MODEL_CLI"
-    RUN_MODEL_RUNG="pr-fix"
+  # Reply runs have one fixed model and no board capability. The model writes a
+  # draft to a file; core validates and posts it only after the sandbox exits.
+  if [ "$is_reply_only" = "yes" ]; then
+    RUN_MODEL_RUNG="reply-codex-sol-high"
+    RUN_MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session --bare -p"
+    REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.html"
+    log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI; read-only bwrap, 300s)"
+    run_reply_model "$PROMPT" "${RUN_DIR:-$AGENT_REPO}" "$REPLY_FILE" "$ERRFILE"
+    rc=$?
+    if [ "$rc" -eq 0 ] && [ ! -s "$REPLY_FILE" ]; then
+      printf 'reply model returned an empty answer\n' >> "$ERRFILE"
+      rc=65
+    fi
+    if [ "$rc" -eq 0 ] && ! python3 "$PLAIN_LANGUAGE_CHECK" < "$REPLY_FILE" 2>> "$ERRFILE"; then
+      printf 'reply held unchanged because it failed the outbound shape check\n' >> "$ERRFILE"
+      rc=65
+    fi
+    if [ "$rc" -eq 0 ]; then
+      cat "$REPLY_FILE" >> "$LOG"
+      printf '\n' >> "$LOG"
+      if ! (export AGENT_REPLY_ONLY=yes; post_ticket_comment "$ref" file "$REPLY_FILE"); then
+        printf 'validated reply could not be posted\n' >> "$ERRFILE"
+        rc=74
+      fi
+    fi
   else
-    resolve_ticket_command "$ref" "$TRIAGE_THIS" "$tries"
-  fi
-  log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI)"
-  read -r -a MODEL_ARGV <<< "$RUN_MODEL_CLI"
-  if [ "$GRAFT" = "on" ] && [ "$(basename "${MODEL_ARGV[0]}")" = "claude" ]; then
-    MODEL_ARGV=("${MODEL_ARGV[0]}" --mcp-config "$GRAFT_MCP_CONFIG" "${MODEL_ARGV[@]:1}")
-  fi
-  # What agent-advisor needs to answer a question about this ticket, and the
-  # counter that caps it at two. Written per run: the cap is a run's budget,
-  # not a ticket's, so a ticket picked up again tomorrow starts fresh.
-  mkdir -p "$ADVISOR_DIR"
-  ADVISOR_CONTEXT="$ADVISOR_DIR/$SLUG-$ref.json"
-  ADVISOR_COUNTER="$ADVISOR_DIR/$SLUG-$ref.count"
-  REF="$ref" URL="$url" TITLE="$title" DESCRIPTION="$description" TASK_ID="$task_id" \
-  BOARD="$board" TOKEN_FILE="$TOKEN_FILE" BOARD_CLI="$BOARD_CLI" SLUG="$SLUG" \
-  ADAPTER="$BOARD_ADAPTER" python3 -c '
+    # One short-lived process per ticket. Resolve once immediately before
+    # launch. PR debt bypasses the attempt-backed ladder.
+    if [ "$is_pr_fix" = "yes" ]; then
+      RUN_MODEL_CLI="$MODEL_CLI"
+      RUN_MODEL_RUNG="pr-fix"
+    else
+      resolve_ticket_command "$ref" "$TRIAGE_THIS" "$tries"
+    fi
+    log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI)"
+    read -r -a MODEL_ARGV <<< "$RUN_MODEL_CLI"
+    if [ "$GRAFT" = "on" ] && [ "$(basename "${MODEL_ARGV[0]}")" = "claude" ]; then
+      MODEL_ARGV=("${MODEL_ARGV[0]}" --mcp-config "$GRAFT_MCP_CONFIG" "${MODEL_ARGV[@]:1}")
+    fi
+    # What agent-advisor needs to answer a question about this ticket, and the
+    # counter that caps it at two. Written per run, not per ticket.
+    mkdir -p "$ADVISOR_DIR"
+    ADVISOR_CONTEXT="$ADVISOR_DIR/$SLUG-$ref.json"
+    ADVISOR_COUNTER="$ADVISOR_DIR/$SLUG-$ref.count"
+    REF="$ref" URL="$url" TITLE="$title" DESCRIPTION="$description" TASK_ID="$task_id" \
+    BOARD="$board" TOKEN_FILE="$TOKEN_FILE" BOARD_CLI="$BOARD_CLI" SLUG="$SLUG" \
+    ADAPTER="$BOARD_ADAPTER" python3 -c '
 import json, os
 print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
                   "title": os.environ["TITLE"], "description": os.environ["DESCRIPTION"],
                   "task_id": os.environ["TASK_ID"], "board": os.environ["BOARD"],
                   "token_file": os.environ["TOKEN_FILE"], "board_cli": os.environ["BOARD_CLI"],
                   "slug": os.environ["SLUG"], "adapter": os.environ["ADAPTER"]}))' > "$ADVISOR_CONTEXT"
-  printf '0\n' > "$ADVISOR_COUNTER"
+    printf '0\n' > "$ADVISOR_COUNTER"
 
-  (
-    # The run happens where the agent's work lives, so the model CLI sees the
-    # repo it is meant to change and nothing else.
-    if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
-    PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}" \
-    AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
-    GRAFT="$GRAFT" GRAFT_MCP_COMMAND="$GRAFT_MCP_COMMAND" GRAFT_MCP_CONFIG="$GRAFT_MCP_CONFIG" \
-    AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base" \
-    AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" \
-    AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL" \
-    AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER" \
-    AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI" \
-      "${MODEL_ARGV[@]}" "$PROMPT"
-  ) >> "$LOG" 2>"$ERRFILE"
-  rc=$?
+    (
+      if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
+      PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}" \
+      AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
+      GRAFT="$GRAFT" GRAFT_MCP_COMMAND="$GRAFT_MCP_COMMAND" GRAFT_MCP_CONFIG="$GRAFT_MCP_CONFIG" \
+      AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base" \
+      AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" \
+      AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL" \
+      AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER" \
+      AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI" \
+        "${MODEL_ARGV[@]}" "$PROMPT"
+    ) >> "$LOG" 2>"$ERRFILE"
+    rc=$?
+  fi
   set -e
   cat "$ERRFILE" >> "$LOG" 2>/dev/null || true
   if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then

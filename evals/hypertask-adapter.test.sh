@@ -88,18 +88,19 @@ _ht_run_post() {
 technical='<p>Question: Should runThing() in src/app.ts ship?</p>'
 QUIET=on COMMENT_REWRITE_CLI="$TMP/rewrite-model" \
   adapter_run_activity "$TMP/token" run-1 "$TMP/response.log" response "$technical"
-if [ "$(wc -l < "$REWRITE_CALLS")" -eq 1 ] \
-   && PAYLOAD="$RUN_PAYLOAD" EXPECTED="$REWRITE_OUTPUT" python3 - <<'PYEOF'
+if [ ! -s "$REWRITE_CALLS" ] \
+   && grep -qF "$technical" "$TMP/response.log" \
+   && grep -qF 'comment contains a file path' "$TMP/response.log" \
+   && PAYLOAD="$RUN_PAYLOAD" python3 - <<'PYEOF'
 import json, os
 with open(os.environ["PAYLOAD"], encoding="utf-8") as handle:
     payload = json.load(handle)
-assert payload == {"type": "response", "text": os.environ["EXPECTED"]}
-assert "Question:" in payload["text"]
+assert payload == {"type": "action", "text": "Question held: did not pass the plain-language shape check"}
 PYEOF
 then
-  ok response-uses-comment-gate 'a quiet response keeps its prefix and posts the shared gate rewrite'
+  ok response-uses-comment-gate 'an invalid quiet response is held unchanged without a rewrite call'
 else
-  bad response-uses-comment-gate "calls=$(cat "$REWRITE_CALLS") payload=$(cat "$RUN_PAYLOAD")"
+  bad response-uses-comment-gate "calls=$(cat "$REWRITE_CALLS") payload=$(cat "$RUN_PAYLOAD") log=$(cat "$TMP/response.log")"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

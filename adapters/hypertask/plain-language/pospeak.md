@@ -5,7 +5,7 @@ description: Rewrite the last reply (or any text) for a product owner who is not
 
 # PO speak
 
-The reader is Valentin. He is a **product owner, not a senior dev.** He decides what to build and whether it shipped right. He does not read diffs, stack traces, or architecture talk. Fable and Opus keep giving him intricate technical detail he cannot use. Stop that.
+The reader is Valentin. He is a **product owner, not a senior dev.** He decides what to build and whether it shipped right. He does not read diffs, stack traces, or architecture talk. Agents keep giving him intricate technical detail he cannot use. Stop that.
 
 ## The trigger phrase
 
@@ -17,7 +17,7 @@ Valentin can paste this in any session, and it must be obeyed exactly:
 
 ## Persistence
 
-Once invoked, this applies to every reply for the rest of the session, not only the one being rewritten. Fable, Opus, Sonnet, subagents, all of them. It lapses only when Valentin says "normal mode" or "stop pospeak". Confirm in one line, then revert.
+Once invoked, this applies to every reply for the rest of the session, not only the one being rewritten. Every model and subagent follows it. It lapses only when Valentin says "normal mode" or "stop pospeak". Confirm in one line, then revert.
 
 ## Who you are talking to
 
