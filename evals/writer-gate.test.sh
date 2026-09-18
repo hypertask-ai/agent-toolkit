@@ -50,20 +50,20 @@ if [ "${1:-} ${2:-}" = "comment add" ]; then
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --text|--body) text="$2"; shift 2 ;;
-      --improve) improve=yes; shift ;;
+      --improve) improve="${2:-}"; shift 2 ;;
       *) shift ;;
     esac
   done
   printf '%s\n' "$improve" >> "$IMPROVE_CALLS"
-  if [ "$improve" = yes ] && [ "${IMPROVE_UNSUPPORTED:-no}" = yes ]; then
+  if [ "$improve" != no ] && [ "${IMPROVE_UNSUPPORTED:-no}" = yes ]; then
     printf 'error: unknown option --improve\n' >&2
     exit 2
   fi
-  if [ "$improve" = yes ] && [ "${WRITER_FAIL:-no}" = yes ]; then
+  if [ "$improve" != no ] && [ "${WRITER_FAIL:-no}" = yes ]; then
     printf 'AI writer failed\n' >&2
     exit 43
   fi
-  if [ "$improve" = yes ]; then text="$IMPROVED_COMMENT"; fi
+  if [ "$improve" != no ]; then text="$IMPROVED_COMMENT"; fi
   printf '%s' "$text" > "$COMMENT_TEXT"
   printf 'posted\n'
   exit 0
@@ -124,9 +124,9 @@ rewritten='<p><strong>Decision: The clearer release is ready.</strong></p><p>Nex
 : > "$IMPROVE_CALLS"
 IMPROVED_COMMENT="$rewritten" "$TMP/htbot" comment add TEST-1 --text "$original" >/dev/null
 if [ "$(cat "$COMMENT_TEXT")" = "$rewritten" ] \
-   && [ "$(cat "$IMPROVE_CALLS")" = yes ] \
+   && [ "$(cat "$IMPROVE_CALLS")" = improve-readability ] \
    && printf '%s' "$(cat "$COMMENT_TEXT")" | grep -q '^<p><strong>Decision:'; then
-  ok comment-rewrite-applied '--improve rewrites while preserving the leading marker'
+  ok comment-rewrite-applied '--improve improve-readability rewrites while preserving the leading marker'
 else
   bad comment-rewrite-applied "comment=$(cat "$COMMENT_TEXT") calls=$(cat "$IMPROVE_CALLS")"
 fi
@@ -144,9 +144,10 @@ fi
 WRITER_FAIL=yes IMPROVED_COMMENT='unused' \
   "$TMP/htbot" comment add TEST-3 --text "$original" >/dev/null 2>"$TMP/comment-failure.err"
 if [ "$(cat "$COMMENT_TEXT")" = "$original" ] \
-   && [ "$(paste -sd, "$IMPROVE_CALLS")" = 'yes,no' ] \
+   && [ "$(paste -sd, "$IMPROVE_CALLS")" = 'improve-readability,no' ] \
+   && [ "$(grep -c '^AI writer failed$' "$TMP/comment-failure.err")" -eq 1 ] \
    && [ "$(grep -c '^WARNING: Hypertask AI writer failed on TEST-3; posting the original comment$' "$TMP/comment-failure.err")" -eq 1 ]; then
-  ok comment-writer-fallback 'failed --improve retries the original with one warning'
+  ok comment-writer-fallback 'a refused write prints the CLI error and posts the original'
 else
   bad comment-writer-fallback "comment=$(cat "$COMMENT_TEXT") calls=$(cat "$IMPROVE_CALLS") error=$(cat "$TMP/comment-failure.err")"
 fi

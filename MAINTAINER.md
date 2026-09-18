@@ -45,6 +45,10 @@ provider processes receive a per-agent command shim first on `PATH`; bare
 wrapper. A missing token ends the run with `no agent token for <slug>` before a
 board write, rather than falling back to the login in the owner's home config.
 
+Bot comments use the `improve-readability` writer mode unless the caller passes
+`--raw`. If the writer refuses a comment, the wrapper prints the CLI error and
+posts the original text instead.
+
 ## Manager access
 
 Manager access is per agent, not per host. Set `MANAGER="on"` only in a trusted

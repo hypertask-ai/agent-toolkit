@@ -1,0 +1,2 @@
+- Bot comment wrappers now request the `improve-readability` writer mode explicitly. If the writer refuses a comment, the wrapper prints the CLI error and posts the original text instead.
+- The eval suite posts one comment through the released Hypertask CLI against a local dry-run API, so no board data changes.
