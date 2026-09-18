@@ -1,0 +1,3 @@
+- AGTE-62 makes `Answer:` a first-class ticket comment marker in the outbound gate, runner prompts, answerer selection, setup text, and docs.
+- Quiet-mode replies now keep the board-owner mention when the owner directly mentioned the agent, even after the daily owner-mention allowance was used. The existing three-comments-per-ticket daily limit remains.
+- Offline coverage verifies that an `Answer:` to an owner mention posts as a comment with the mention intact.

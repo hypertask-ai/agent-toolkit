@@ -214,13 +214,14 @@ else
   bad graft-run-contract "prompt=$(cat "$TMP/prompt") run=$(cat "$GRAFT_RUN_CAPTURE" 2>/dev/null) wrapper=$(cat "$GRAFT_WRAPPER_CAPTURE" 2>/dev/null)"
 fi
 if grep -qF 'Question:' "$TMP/prompt" \
+   && grep -qF 'Answer:' "$TMP/prompt" \
    && grep -qF 'Decision:' "$TMP/prompt" \
    && grep -qF 'Handoff:' "$TMP/prompt" \
    && grep -qF 'Done:' "$TMP/prompt" \
    && grep -qF 'Everything else' "$TMP/prompt"; then
-  ok comment-kind-prompt-contract 'every run receives the four comment kinds'
+  ok comment-kind-prompt-contract 'every run receives the five comment kinds'
 else
-  bad comment-kind-prompt-contract 'the model prompt omitted the four-kind contract'
+  bad comment-kind-prompt-contract 'the model prompt omitted the five-kind contract'
 fi
 if ROOT="$ROOT" TMP="$TMP" python3 - <<'PYEOF'
 import os
@@ -234,7 +235,7 @@ for name in ("pospeak.md", "ticket-format.md", "unslop.md", "i-have-adhd.md"):
     assert (rules / name).read_text().rstrip() in prompt
 PYEOF
 then
-  ok plain-language-prompt-contract 'all four comment kinds receive the four rule texts verbatim'
+  ok plain-language-prompt-contract 'all five comment kinds receive the four rule texts verbatim'
 else
   bad plain-language-prompt-contract 'the runner prompt omitted the phone reader or verbatim rules'
 fi
@@ -270,6 +271,19 @@ else
   bad owner-mention-quiet-strip "posts=$posts add=$(cat "$TMP/second.err") update=$(cat "$TMP/update.err")"
 fi
 
+printf 'TEST-1\t%s\n' "$(date +%s)" > "$TMP/state/agent-board-poll/mention-test.owner-mentions"
+owner_answer='<p><strong>Answer: <span data-type="mention" data-label="name-6">Owner</span>, the release is ready.</strong></p><p>Next: review the result.</p>'
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+  AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY=yes \
+  "$TMP/mention-board" comment add TEST-1 --text "$owner_answer" >"$TMP/owner-answer.out" 2>"$TMP/owner-answer.err"
+if [ "$(wc -l < "$TMP/mechanical-posts")" -eq 3 ] \
+   && tail -1 "$TMP/mechanical-posts" | grep -qF 'name-6' \
+   && ! grep -qF 'owner-mention budget' "$TMP/owner-answer.err"; then
+  ok owner-mention-answer-exception 'an Answer to an owner mention keeps the owner mention after its daily allowance was used'
+else
+  bad owner-mention-answer-exception "posts=$(cat "$TMP/mechanical-posts") error=$(cat "$TMP/owner-answer.err")"
+fi
+
 MECH_POSTS="$TMP/kind-posts"
 MECH_UPDATES="$TMP/kind-updates"
 export MECH_POSTS MECH_UPDATES
@@ -287,16 +301,17 @@ fi
 
 for allowed in \
   '<p><strong>Question: Which release number is needed?</strong></p>' \
+  '<p><strong>Answer: The release number is 42.</strong></p><p>Next: use release 42.</p>' \
   '<p><strong>Decision: Legal approval is required.</strong></p><p>Next: wait for approval.</p>' \
   '<p><strong>Handoff: The quiet-mode fixes shipped.</strong></p><p>Next: QA Bot owns verification.</p>' \
   '<p><strong>Done: The quiet-mode fixes shipped.</strong></p><p>Next: Review <a href="https://github.com/example/repo/pull/1">PR 1</a>.</p>'
 do
   HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/kind-board" comment add TEST-1 --text "$allowed" >/dev/null
 done
-if [ "$(wc -l < "$MECH_POSTS")" -eq 4 ]; then
-  ok four-comment-markers-pass 'all four marked comment kinds reach the board CLI'
+if [ "$(wc -l < "$MECH_POSTS")" -eq 5 ]; then
+  ok five-comment-markers-pass 'all five marked comment kinds reach the board CLI'
 else
-  bad four-comment-markers-pass "posts=$(cat "$MECH_POSTS")"
+  bad five-comment-markers-pass "posts=$(cat "$MECH_POSTS")"
 fi
 
 MECH_POSTS="$TMP/plain-posts"

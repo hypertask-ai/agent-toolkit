@@ -29,7 +29,7 @@ _outbound_text_gate() {
   TEXT="$original"
   plain="$(_plain_comment "$TEXT")"
   case "$plain" in
-    Question:*|Decision:*|Handoff:*|Done:*) kind="${plain%%:*}" ;;
+    Question:*|Answer:*|Decision:*|Handoff:*|Done:*) kind="${plain%%:*}" ;;
     *)
       if [ "${AGENT_REPLY_ONLY:-no}" != "yes" ]; then
         _outbound_gate_activity action "${plain:-empty comment}"
