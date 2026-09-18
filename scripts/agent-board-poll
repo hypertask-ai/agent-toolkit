@@ -85,6 +85,11 @@ case "$MAINTAINER" in
   on|off) : ;;
   *) die "MAINTAINER must be on or off, got '$MAINTAINER'" "set MAINTAINER=off unless this is the setup maintainer" ;;
 esac
+GRAFT="${GRAFT:-off}"
+case "$GRAFT" in
+  on|off) : ;;
+  *) die "GRAFT must be on or off, got '$GRAFT'" "set GRAFT=off unless this agent is in the Graft trial" ;;
+esac
 # An agent may also take tickets nobody has claimed, which is how a board column
 # becomes a queue without anyone assigning by hand. Off unless the conf says so,
 # because on a shared board it is the difference between helping and barging in.
@@ -269,6 +274,30 @@ CORE_STATE_NAME="agent-board-poll"
 STATE_DIR="$(core_state_dir)"
 mkdir -p "$STATE_DIR"
 LOG="$STATE_DIR/$SLUG.log"
+GRAFT_PATH=""
+GRAFT_MCP_COMMAND=""
+GRAFT_MCP_CONFIG=""
+if [ "$GRAFT" = "on" ]; then
+  GRAFT_BIN="$(command -v graft || true)"
+  [ -n "$GRAFT_BIN" ] || die "GRAFT=on but graft is not on PATH" \
+    "install @nanonets/graft globally and run graft build in ${AGENT_REPO:-the agent repo}"
+  [ -f "${AGENT_REPO:-}/graft/.graph/wiring.json" ] || die \
+    "GRAFT=on but ${AGENT_REPO:-the agent repo} has no structural Graft index" \
+    "run DO_NOT_TRACK=1 GRAFT_NO_GITIGNORE=1 graft build ${AGENT_REPO:-<repo>}"
+  GRAFT_SHIM_DIR="$STATE_DIR/$SLUG-graft-bin"
+  mkdir -p "$GRAFT_SHIM_DIR"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' \
+      'unset GRAFT_API_KEY GRAFT_PROVIDER GRAFT_MODEL GRAFT_BASE_URL OPENAI_API_KEY ANTHROPIC_API_KEY OPENROUTER_API_KEY' \
+      'export DO_NOT_TRACK=1'
+    printf 'exec %q "$@"\n' "$GRAFT_BIN"
+  } > "$GRAFT_SHIM_DIR/graft"
+  chmod 755 "$GRAFT_SHIM_DIR/graft"
+  GRAFT_PATH="$GRAFT_SHIM_DIR:"
+  GRAFT_MCP_COMMAND="graft mcp ${AGENT_REPO:-.}"
+  GRAFT_MCP_CONFIG="$STATE_DIR/$SLUG-graft-mcp.json"
+fi
+export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
 if [ "$BOARD_ADAPTER" = "hypertask" ]; then
   core_enable_agent_identity "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" \
     2> >(tee -a "$LOG" >&2) || exit 1
@@ -1661,6 +1690,12 @@ MAINTAINER COMMANDS:
 After any command, echo its result unchanged."
   fi
 
+  if [ "$GRAFT" = "on" ]; then
+    PROMPT="$PROMPT
+
+Ask Graft before grepping: use \`graft ask '<question>'\` or the Graft MCP tools first."
+  fi
+
   PROMPT="$PROMPT
 
 COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent. \`Done:\` is one line and includes the pull request link. Write every ticket reference as an HTML anchor whose visible text is its full id plus authoritative title. Do not use em dashes. Everything else, including claims, plans, progress, retries, checks, and blockers, is run activity. The board wrapper redirects an unmarked comment to activity instead of posting it. The existing limit remains at one reminder and three total ticket comments per day unless a human wrote in between.
@@ -1688,6 +1723,15 @@ This reply-only run must leave the ticket in its current column."
     }
   fi
 
+  if [ "$GRAFT" = "on" ]; then
+    GRAFT_MCP_COMMAND="graft mcp ${RUN_DIR:-${AGENT_REPO:-.}}"
+    GRAFT_COMMAND="$GRAFT_SHIM_DIR/graft" GRAFT_DIR="${RUN_DIR:-${AGENT_REPO:-.}}" \
+      python3 -c 'import json,os; print(json.dumps({"mcpServers":{"graft":{"command":os.environ["GRAFT_COMMAND"],"args":["mcp",os.environ["GRAFT_DIR"]]}}}, indent=2))' \
+      > "$GRAFT_MCP_CONFIG"
+    chmod 600 "$GRAFT_MCP_CONFIG"
+    export GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
+  fi
+
   ERRFILE="$STATE_DIR/$SLUG.stderr"
   # Cleared before every run: the wrapper appends to it as this run posts
   # comments, and only this run's own posts belong to what gets read back
@@ -1697,7 +1741,7 @@ This reply-only run must leave the ticket in its current column."
   record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
   runtime_run_id="local"
   if declare -F adapter_run_open >/dev/null 2>&1; then
-    runtime_run_id="$(adapter_run_open "$TOKEN_FILE" "$task_id" "$LOG")"
+    runtime_run_id="$(adapter_run_open "$TOKEN_FILE" "$task_id" "$LOG" "$GRAFT")"
     if [ "$is_reply_only" = "yes" ]; then
       adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "started reply-only $ref"
     else
@@ -1717,15 +1761,16 @@ This reply-only run must leave the ticket in its current column."
   run_api_base=""
   if declare -F _ht_api_base >/dev/null 2>&1; then run_api_base="$(_ht_api_base)"; fi
   run_started_at="$(date -Is)"
-  REF="$ref" TITLE="$title" BOARD="$board" STARTED_AT="$run_started_at" python3 -c '
+  REF="$ref" TITLE="$title" BOARD="$board" STARTED_AT="$run_started_at" GRAFT="$GRAFT" python3 -c '
 import json, os
 print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
-                  "board_id": int(os.environ["BOARD"]), "started_at": os.environ["STARTED_AT"]}))
+                  "board_id": int(os.environ["BOARD"]), "started_at": os.environ["STARTED_AT"],
+                  "graft": os.environ["GRAFT"]}))
 ' > "$LOCK"
   if [ "$is_pr_fix" = "yes" ]; then
-    log "run start $ref key=$key dir=${RUN_DIR:-.} PR-fix-unlimited: $why"
+    log "run start $ref key=$key dir=${RUN_DIR:-.} graft=$GRAFT PR-fix-unlimited: $why"
   else
-    log "run start $ref key=$key dir=${RUN_DIR:-.} attempt=$((tries + 1)): $why"
+    log "run start $ref key=$key dir=${RUN_DIR:-.} graft=$GRAFT attempt=$((tries + 1)): $why"
   fi
   # Which skills this run is about to read, by version. A bot behaving oddly is
   # usually a bot reading an old pack, and this is the line that shows it.
@@ -1749,6 +1794,9 @@ print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
   fi
   log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI)"
   read -r -a MODEL_ARGV <<< "$RUN_MODEL_CLI"
+  if [ "$GRAFT" = "on" ] && [ "$(basename "${MODEL_ARGV[0]}")" = "claude" ]; then
+    MODEL_ARGV=("${MODEL_ARGV[0]}" --mcp-config "$GRAFT_MCP_CONFIG" "${MODEL_ARGV[@]:1}")
+  fi
   # What agent-advisor needs to answer a question about this ticket, and the
   # counter that caps it at two. Written per run: the cap is a run's budget,
   # not a ticket's, so a ticket picked up again tomorrow starts fresh.
@@ -1770,8 +1818,9 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     # The run happens where the agent's work lives, so the model CLI sees the
     # repo it is meant to change and nothing else.
     if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
-    PATH="${AGENT_IDENTITY_PATH:-$PATH}" \
+    PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}" \
     AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
+    GRAFT="$GRAFT" GRAFT_MCP_COMMAND="$GRAFT_MCP_COMMAND" GRAFT_MCP_CONFIG="$GRAFT_MCP_CONFIG" \
     AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base" \
     AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" \
     AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL" \

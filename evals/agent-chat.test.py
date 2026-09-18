@@ -133,10 +133,10 @@ with tempfile.TemporaryDirectory() as temporary:
     print("PASS agent-chat-two-agents-independent")
 
 
-def runtime_conf(root, slug, token, model="runner --model test-model", board_ids="15"):
+def runtime_conf(root, slug, token, model="runner --model test-model", board_ids="15", graft="off"):
     (root / f"{slug}.conf").write_text(
         f'AGENT_SLUG="{slug}"\nTOKEN_FILE="{token}"\nBOARD_ID="{board_ids}"\n'
-        f'WATCH_SECTIONS="Bugs,In Progress"\nMODEL_CLI="{model}"\nCHAT="off"\n'
+        f'WATCH_SECTIONS="Bugs,In Progress"\nMODEL_CLI="{model}"\nCHAT="off"\nGRAFT="{graft}"\n'
     )
 
 
@@ -161,7 +161,7 @@ with tempfile.TemporaryDirectory() as temporary:
     board_state.mkdir()
     token = temporary / "token"
     token.write_text("secret-token")
-    runtime_conf(config, "runner", token, board_ids="15,5156")
+    runtime_conf(config, "runner", token, board_ids="15,5156", graft="on")
     (config / "board.yml").write_text(
         "project: 15\nfactory_project: 5156\ncolumns:\n  work:\n    bug: Bugs\n"
         "  in-progress: In Progress\n  done: Done\n"
@@ -179,6 +179,7 @@ with tempfile.TemporaryDirectory() as temporary:
     payload = FakeHeartbeatApi.calls[0][1]
     assert payload["runtime"] == "agent-board-poll 3.20.0"
     assert payload["model"] == "test-model"
+    assert payload["graft"] == "on"
     assert payload["cadence_seconds"] == 60
     assert payload["source_sections"] == [
         {"board_id": 15, "section": "Bugs"},
@@ -208,7 +209,9 @@ with tempfile.TemporaryDirectory() as temporary:
     FakeHeartbeatApi.calls = []
     daemon = ChatDaemon(config, chat_state, board_state_dir=board_state)
     daemon.heartbeat_once(FakeHeartbeatApi)
-    queue = FakeHeartbeatApi.calls[0][1]["queue"]
+    payload = FakeHeartbeatApi.calls[0][1]
+    assert payload["graft"] == "off"
+    queue = payload["queue"]
     assert queue == [{
         "ticket": "HTPR-7001",
         "board_id": 15,

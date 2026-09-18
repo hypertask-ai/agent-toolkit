@@ -1312,6 +1312,7 @@ block = "\n".join([
     'ANSWERER_FALLBACK=""',
     'MANAGER="off"',
     'MAINTAINER="off"',
+    'GRAFT="off"',
 ])
 print("CONVERT")
 print(block)
@@ -1379,6 +1380,27 @@ PYEOF
   QUIET_ARGS=(--version "$TEMPLATE_VERSION")
   [ "$DRY_RUN" = "yes" ] && QUIET_ARGS+=(--dry-run)
   python3 "$MIGRATE_QUIET" "${QUIET_ARGS[@]}" "$CONFIG_DIR"
+
+  echo "== 3e. explicit Graft default for current-schema agents =="
+  GRAFT_DEFAULTED=0
+  for dir in "${CONF_DIRS[@]}"; do
+    [ -d "$dir" ] || continue
+    for f in "$dir"/*.conf; do
+      [ -f "$f" ] || continue
+      grep -q '^BOARD_ADAPTER=' "$f" || continue
+      grep -q '^GRAFT=' "$f" && continue
+      base="$(basename "$f" .conf)"
+      if [ "$DRY_RUN" = "yes" ]; then
+        echo "  would default $base: append GRAFT=off"
+      else
+        cp -a "$f" "$f.bak-$(date +%s)"
+        core_write_missing_keys "$f" 'GRAFT="off"'
+        echo "  defaulted $base: GRAFT=off"
+      fi
+      GRAFT_DEFAULTED=$((GRAFT_DEFAULTED + 1))
+    done
+  done
+  [ "$GRAFT_DEFAULTED" -gt 0 ] || echo "  every current-schema agent already declares GRAFT"
 
   echo "== 4. redundant agent-board-poll@<slug>.service.d/path.conf drop-ins =="
   # core_write_poll_units (run by install.sh, step 2) now puts PATH and HOME

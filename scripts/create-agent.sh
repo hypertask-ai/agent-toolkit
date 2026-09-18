@@ -447,6 +447,7 @@ QUIET="$QUIET"
 ANSWERER_FALLBACK=""
 MANAGER="off"
 MAINTAINER="off"
+GRAFT="off"
 EOF
 )"
 # PR_REPO only when given: an empty PR_REPO="" written to a conf that has

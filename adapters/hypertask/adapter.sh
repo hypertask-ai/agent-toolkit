@@ -99,26 +99,26 @@ _ht_run_post() {
   printf '%s\n%s' "$status" "$body"
 }
 
-# adapter_run_open <token-file> <task-id> <run-log>
+# adapter_run_open <token-file> <task-id> <run-log> <graft on|off>
 # Prints the app run id, or "local" when registration is unavailable.
 adapter_run_open() {
-  local token_file="$1" task_id="$2" log_file="$3" payload reply status body run_id
-  payload="$(TASK_ID="$task_id" python3 -c 'import json,os; value=os.environ["TASK_ID"]; print(json.dumps({"taskId": int(value) if value.isdigit() else value, "source": "runtime"}))')"
+  local token_file="$1" task_id="$2" log_file="$3" graft="$4" payload reply status body run_id
+  payload="$(TASK_ID="$task_id" GRAFT="$graft" python3 -c 'import json,os; value=os.environ["TASK_ID"]; print(json.dumps({"taskId": int(value) if value.isdigit() else value, "source": "runtime", "graft": os.environ["GRAFT"]}))')"
   reply="$(_ht_run_post "$token_file" '/mcp/agents/runs' "$payload")"
   status="${reply%%$'\n'*}"
   body="${reply#*$'\n'}"
   if [[ "$status" = 2* ]]; then
     run_id="$(printf '%s' "$body" | python3 -c 'import json,sys; d=json.load(sys.stdin); r=d.get("run") if isinstance(d.get("run"),dict) else d; print(r.get("id") or r.get("runId") or "")' 2>/dev/null || true)"
     if [ -n "$run_id" ]; then
-      _adapter_run_log "$log_file" "opened run $run_id for task $task_id"
+      _adapter_run_log "$log_file" "opened run $run_id for task $task_id graft=$graft"
       printf '%s' "$run_id"
       return 0
     fi
   fi
   if [ "$status" = "404" ]; then
-    _adapter_run_log "$log_file" "runs API unavailable (HTTP 404); opened local-only run for task $task_id"
+    _adapter_run_log "$log_file" "runs API unavailable (HTTP 404); opened local-only run for task $task_id graft=$graft"
   else
-    _adapter_run_log "$log_file" "run registration failed (HTTP $status); opened local-only run for task $task_id"
+    _adapter_run_log "$log_file" "run registration failed (HTTP $status); opened local-only run for task $task_id graft=$graft"
   fi
   printf 'local'
 }

@@ -75,6 +75,10 @@ HT_MISSION="Maintain the product"
 HT_START_SECTIONS="Ready"
 HT_PROJECT_ID="1"
 EOF
+cat > "$CONF_DIR/current-worker.conf" <<'EOF'
+AGENT_SLUG="current-worker"
+BOARD_ADAPTER="hypertask"
+EOF
 
 run_update() {
   HOME="$HOME_DIR" AGENT_CONFIG_DIR="$CONF_DIR" AGENT_TEMPLATE_CONFIG_DIR="$CONF_DIR" \
@@ -101,6 +105,8 @@ status=$?
 set -e
 if [ "$status" -eq 0 ] \
    && grep -q '^BOARD_ADAPTER="hypertask"$' "$CONF_DIR/old-worker.conf" \
+   && grep -q '^GRAFT="off"$' "$CONF_DIR/old-worker.conf" \
+   && grep -q '^GRAFT="off"$' "$CONF_DIR/current-worker.conf" \
    && grep -q 'ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-agents/product-bot.conf`\.' "$TMP/stable.out" \
    && grep -q 'checkout --detach stable' "$TMP/git.log" \
    && ! grep -q 'checkout --detach origin/main' "$TMP/git.log"; then

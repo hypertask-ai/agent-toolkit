@@ -55,15 +55,17 @@ else
 fi
 
 printf 'token\n' > "$TMP/token"
-_ht_run_post() { printf '404\n{}'; }
-run_id="$(adapter_run_open "$TMP/token" task-1 "$TMP/run.log")"
+RUN_OPEN_PAYLOAD="$TMP/run-open-payload"
+_ht_run_post() { printf '%s' "$3" > "$RUN_OPEN_PAYLOAD"; printf '404\n{}'; }
+run_id="$(adapter_run_open "$TMP/token" task-1 "$TMP/run.log" on)"
 adapter_run_activity "$TMP/token" "$run_id" "$TMP/run.log" action 'started TEST-1'
 adapter_run_stop "$TMP/token" "$run_id" "$TMP/run.log" completed
 if [ "$run_id" = local ] \
-   && grep -qF 'opened local-only run for task task-1' "$TMP/run.log" \
+   && grep -qF 'opened local-only run for task task-1 graft=on' "$TMP/run.log" \
    && grep -qF 'action started TEST-1' "$TMP/run.log" \
-   && grep -qF 'closed run local with status completed' "$TMP/run.log"; then
-  ok run-api-404-local-only 'a missing runs route keeps open, activity, and close in the local log'
+   && grep -qF 'closed run local with status completed' "$TMP/run.log" \
+   && RUN_OPEN_PAYLOAD="$RUN_OPEN_PAYLOAD" python3 -c 'import json,os; assert json.load(open(os.environ["RUN_OPEN_PAYLOAD"])) == {"taskId":"task-1","source":"runtime","graft":"on"}'; then
+  ok run-api-404-local-only 'a missing runs route keeps graft, open, activity, and close in the local record'
 else
   bad run-api-404-local-only "id=$run_id log=$(cat "$TMP/run.log")"
 fi

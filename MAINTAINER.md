@@ -217,6 +217,18 @@ runner splits a command into arguments without shell evaluation and appends the
 prompt as the final argument. Put the harness's `-p` or `--print` before it.
 See `CONF.md` for the complete schema and pi and Cursor examples.
 
+## Graft trial
+
+`GRAFT="off"` is the default. With `GRAFT="on"`, ticket runs receive the
+structural `graft` CLI, `GRAFT_MCP_COMMAND="graft mcp <repo>"`, a run-scoped
+MCP JSON file at `GRAFT_MCP_CONFIG`, and one prompt line telling the agent to
+ask Graft before grep. The runner's Graft wrapper
+sets `DO_NOT_TRACK=1` and removes provider keys before every Graft process, so
+`graft build`, queries, and MCP stay in the deterministic free tier. Install
+with `npm install -g @nanonets/graft`, then index the checkout with
+`DO_NOT_TRACK=1 GRAFT_NO_GITIGNORE=1 graft build <repo>`. Do not use `--deep`.
+Run records and runtime heartbeats report `graft` as `on` or `off`.
+
 ## Its own repo
 
 `PR_REPO` in the conf, required: every bot has one, no repo-less mode. The

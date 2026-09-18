@@ -193,6 +193,7 @@ class RuntimeAgent:
     board_ids: tuple[int, ...]
     source_sections: tuple[tuple[int, str], ...]
     model: str
+    graft: str
 
     @classmethod
     def from_conf(cls, path: Path) -> "RuntimeAgent | None":
@@ -222,6 +223,7 @@ class RuntimeAgent:
             board_ids=board_ids,
             source_sections=tuple(sections),
             model=model_name(values["MODEL_CLI"]),
+            graft="on" if values.get("GRAFT") == "on" else "off",
         )
 
     def token(self) -> str:
@@ -330,6 +332,7 @@ def runtime_payload(agent: RuntimeAgent, board_state_dir: Path, sequence: int, v
         "sequence": sequence,
         "runtime": f"agent-board-poll {version}",
         "model": agent.model,
+        "graft": agent.graft,
         "cadence_seconds": POLL_CADENCE_SECONDS,
         "source_sections": [
             {"board_id": board_id, "section": section}
@@ -672,6 +675,7 @@ class ChatDaemon:
                     board_ids=(0,),
                     source_sections=(),
                     model="Unreported",
+                    graft="off",
                 )
                 self.log(fallback, f"runtime config error: {type(error).__name__}: {error}")
         return agents
@@ -730,6 +734,7 @@ class ChatDaemon:
                 "result": result,
                 "detail": detail[:500],
                 "runtime": f"agent-board-poll {self.version}",
+                "graft": agent.graft,
             }
             self.runtime_status.save()
 
@@ -848,7 +853,8 @@ def show_status(config_dir: Path, state_dir: Path) -> int:
         row = row if isinstance(row, dict) else {}
         print(
             f"{agent.slug}\t{row.get('result', 'never')}\t"
-            f"{row.get('at', 'never')}\t{row.get('runtime', 'agent-board-poll unknown')}"
+            f"{row.get('at', 'never')}\t{row.get('runtime', 'agent-board-poll unknown')}\t"
+            f"graft={row.get('graft', agent.graft)}"
         )
         shown += 1
     return 0 if shown else 1

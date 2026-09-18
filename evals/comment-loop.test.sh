@@ -10,10 +10,15 @@ fail=0
 ok() { printf 'PASS %-36s %s\n' "$1" "$2"; pass=$((pass + 1)); }
 bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
 
-mkdir -p "$TMP/home/.config/agents" "$TMP/company" "$TMP/repo" "$TMP/bin" "$TMP/state/agent-board-poll"
+mkdir -p "$TMP/home/.config/agents" "$TMP/company" "$TMP/repo/graft/.graph" "$TMP/bin" "$TMP/state/agent-board-poll"
+printf '{}\n' > "$TMP/repo/graft/.graph/wiring.json"
 printf '# company pack\n' > "$TMP/company/INDEX.md"
 printf 'test\n' > "$TMP/company/VERSION"
 printf 'token\n' > "$TMP/token"
+GRAFT_RUN_CAPTURE="$TMP/graft-run"
+GRAFT_WRAPPER_CAPTURE="$TMP/graft-wrapper"
+MODEL_ARGS_CAPTURE="$TMP/model-args"
+export GRAFT_RUN_CAPTURE GRAFT_WRAPPER_CAPTURE MODEL_ARGS_CAPTURE
 
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -31,7 +36,15 @@ EOF
 cat > "$TMP/bin/provider" <<'EOF'
 #!/usr/bin/env bash
 printf '%s' "${!#}" > "$PROMPT_CAPTURE"
+printf '%s\n' "$*" > "$MODEL_ARGS_CAPTURE"
+printf '%s\n' "$GRAFT|$GRAFT_MCP_COMMAND|$GRAFT_MCP_CONFIG" > "$GRAFT_RUN_CAPTURE"
+graft probe
 EOF
+cat > "$TMP/bin/graft" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "api=${GRAFT_API_KEY-unset} dnt=${DO_NOT_TRACK-unset} args=$*" > "$GRAFT_WRAPPER_CAPTURE"
+EOF
+cp "$TMP/bin/provider" "$TMP/bin/claude"
 cat > "$TMP/bin/rewrite-model" <<'EOF'
 #!/usr/bin/env bash
 printf 'called\n' >> "$REWRITE_CALLS"
@@ -65,10 +78,11 @@ TOKEN_FILE="$TMP/token"
 BOARD_CLI="$TMP/board"
 WATCH_SECTIONS="*"
 SKILLS_INDEX=""
-MODEL_CLI="provider"
+MODEL_CLI="claude -p"
 PR_REPO="example/repo"
 TRIAGE="no"
 CLAIM_UNASSIGNED="no"
+GRAFT="on"
 EOF
 
 run_dry() {
@@ -127,7 +141,7 @@ cat > "$TMP/comments.json" <<'EOF'
 EOF
 PROMPT_CAPTURE="$TMP/prompt" HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
   XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
-  TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
+  TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" GRAFT_API_KEY="paid-key-must-not-pass" \
   PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test
 if grep -qF 'run-activity: action run finished for TEST-1' "$TMP/state/agent-board-poll/test.log" \
    && ! grep -qF 'run-activity: response' "$TMP/state/agent-board-poll/test.log"; then
@@ -139,6 +153,16 @@ if grep -qF 'When it is on, do not @mention the board owner' "$TMP/prompt"; then
   ok owner-mention-prompt-contract 'quiet runs forbid owner mentions'
 else
   bad owner-mention-prompt-contract 'the model prompt omitted quiet owner handling'
+fi
+if grep -qF "Ask Graft before grepping: use \`graft ask '<question>'\` or the Graft MCP tools first." "$TMP/prompt" \
+   && grep -qF "on|graft mcp $TMP/repo|$TMP/state/agent-board-poll/test-graft-mcp.json" "$GRAFT_RUN_CAPTURE" \
+   && GRAFT_MCP_CONFIG="$TMP/state/agent-board-poll/test-graft-mcp.json" GRAFT_DIR="$TMP/repo" python3 -c 'import json,os; d=json.load(open(os.environ["GRAFT_MCP_CONFIG"])); assert d["mcpServers"]["graft"]["args"] == ["mcp",os.environ["GRAFT_DIR"]]' \
+   && grep -qF -- "--mcp-config $TMP/state/agent-board-poll/test-graft-mcp.json" "$MODEL_ARGS_CAPTURE" \
+   && grep -qF 'api=unset dnt=1 args=probe' "$GRAFT_WRAPPER_CAPTURE" \
+   && grep -qF 'graft=on' "$TMP/state/agent-board-poll/test.log"; then
+  ok graft-run-contract 'enabled runs get the prompt, CLI, MCP command, keyless wrapper, and run record'
+else
+  bad graft-run-contract "prompt=$(cat "$TMP/prompt") run=$(cat "$GRAFT_RUN_CAPTURE" 2>/dev/null) wrapper=$(cat "$GRAFT_WRAPPER_CAPTURE" 2>/dev/null)"
 fi
 if grep -qF 'Question:' "$TMP/prompt" \
    && grep -qF 'Decision:' "$TMP/prompt" \

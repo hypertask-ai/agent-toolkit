@@ -1,3 +1,15 @@
+## 3.35.0 - 2026-09-18
+
+- AGTE-34 adds an opt-in, keyless structural Graft trial with the CLI, run-scoped
+  MCP configuration, and one ask-before-grep prompt line.
+- Run records and runtime heartbeats explicitly report Graft as `on` or `off`,
+  while new and migrated agent confs default to `off`.
+- Graft subprocesses disable telemetry and remove provider keys so the trial
+  cannot use LLM enrichment or paid services.
+- ACTION: install Graft, structurally index the hypertasks checkout, set
+  `GRAFT="on"` for dev-1 and `GRAFT="off"` for dev-2, then run
+  `agent-template update --keep-timers`.
+
 ## 3.34.0 - 2026-09-18
 
 - AGTE-32 applies a final outbound check to agent chat and ticket comments that

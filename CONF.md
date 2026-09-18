@@ -62,6 +62,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `ANSWERER_FALLBACK` | Slug of the agent that answers owner questions when there is no mention, agent assignee, or prior `Done:` or `Decision:` author; default empty. |
 | `MANAGER` | `on` allows the manager control commands; default `off`. |
 | `MAINTAINER` | `on` allows manager controls plus allowlisted build, merge, and advisor-instruction commands; default `off`. |
+| `GRAFT` | `on` adds the keyless structural Graft CLI and MCP command to ticket runs and tells the agent to ask Graft before grepping; default `off`. |
 
 On this maintainer host, set `ANSWERER_FALLBACK="product-bot"` in the agent confs so Product Bot handles owner questions only when the first three answerer ranks do not apply. This is host configuration, not a runner default.
 
