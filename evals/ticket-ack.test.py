@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """AGTE-18: a busy agent acknowledges an owner question within one ack tick
 and later edits that same comment in place with the full answer."""
+import json
 import runpy
 import stat
 import tempfile
@@ -110,6 +111,11 @@ with tempfile.TemporaryDirectory() as temporary:
     entry = next(iter(entries.values()))
     assert entry["ticket"] == "TEST-9"
     assert entry["answered"] is False
+    contract = json.loads((board_state / "acker.reply-contract.json").read_text())
+    interaction = contract["interactions"][0]
+    assert interaction["received"] == "2026-09-18T10:00:00Z"
+    assert interaction["acknowledged"] and interaction["estimate_given"]
+    assert interaction["estimate_due"]
     print("PASS ticket-ack-busy-agent-acked-once")
 
     # A second tick while still busy must not post a second acknowledgement.
@@ -134,6 +140,8 @@ with tempfile.TemporaryDirectory() as temporary:
     entries = daemon.ack_state.value.get("acker", {})
     entry = next(iter(entries.values()))
     assert entry["answered"] is True
+    contract = json.loads((board_state / "acker.reply-contract.json").read_text())
+    assert contract["interactions"][0]["answered"]
     print("PASS ticket-ack-answer-edits-same-comment")
 
 

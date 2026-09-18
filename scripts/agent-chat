@@ -617,6 +617,22 @@ def ack_text(queue_count: int, estimate_minutes: float) -> str:
     return f"<p><strong>Got it, still working.</strong> {lead}, answer in about {minutes} {minute_word}.</p>"
 
 
+def reply_contract_event(board_state_dir: Path, slug: str, event: str, event_id: str,
+                         at: str, *, board: str = "", ticket: str = "", url: str = "",
+                         kind: str = "question", estimate_minutes: float = 30) -> bool:
+    helper = Path(__file__).resolve().with_name("agent-reply-contract")
+    if not helper.is_file():
+        return False
+    command = [str(helper), event, "--state-dir", str(board_state_dir), "--slug", slug,
+               "--event-id", event_id, "--at", at]
+    if event == "received":
+        command += ["--board", board, "--ticket", ticket, "--url", url, "--kind", kind]
+    elif event == "acknowledged":
+        command += ["--estimate-minutes", str(max(1, round(estimate_minutes)))]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=10, check=False)
+    return result.returncode == 0
+
+
 def strip_html(value: str) -> str:
     return html_unescape(re.sub(r"<[^>]+>", " ", value))
 
@@ -1262,6 +1278,17 @@ class ChatDaemon:
         if not question or question.get("id") is None:
             return
         key = f"{locked_ref}:{question['id']}"
+        question_html = str(question.get("text") or question.get("html") or "")
+        mentioned = f"agent-{agent.agent_id}" in question_html
+        contract_id = f"{board_id}:{question['id']}" if mentioned or "?" in strip_html(question_html) else ""
+        if contract_id:
+            received_at = str(question.get("createdAt") or datetime.now(timezone.utc).isoformat())
+            ticket_url = f"https://app.hypertask.ai/detail/project-{board_id}/{str(locked_ref).rsplit('-', 1)[-1]}"
+            reply_contract_event(
+                self.board_state_dir, agent.slug, "received", contract_id, received_at,
+                board=str(board_id), ticket=str(locked_ref), url=ticket_url,
+                kind="mention" if mentioned else "question",
+            )
         with self.ack_state.lock:
             if key in self.ack_state.value.get(agent.slug, {}):
                 return
@@ -1271,13 +1298,21 @@ class ChatDaemon:
         if not ack_id:
             self.log(agent, f"ack lane could not post an acknowledgement on {locked_ref}")
             return
+        acked_at = datetime.now(timezone.utc).isoformat()
+        if contract_id:
+            reply_contract_event(
+                self.board_state_dir, agent.slug, "acknowledged", contract_id, acked_at,
+                estimate_minutes=estimate,
+            )
         with self.ack_state.lock:
             self.ack_state.value.setdefault(agent.slug, {})[key] = {
                 "ticket": locked_ref,
+                "board_id": str(board_id),
+                "contract_event_id": contract_id,
                 "question_comment_id": question["id"],
                 "question_text": strip_html(str(question.get("text") or question.get("html") or ""))[:2000],
                 "ack_comment_id": ack_id,
-                "acked_at": datetime.now(timezone.utc).isoformat(),
+                "acked_at": acked_at,
                 "answered": False,
             }
             self.ack_state.save()
@@ -1310,6 +1345,12 @@ class ChatDaemon:
         if not board_comment_update(agent, str(ack_id), answer):
             self.log(agent, f"ack lane could not edit the acknowledgement on {ticket}")
             return
+        contract_id = str(entry.get("contract_event_id") or "")
+        if contract_id:
+            reply_contract_event(
+                self.board_state_dir, agent.slug, "answered", contract_id,
+                datetime.now(timezone.utc).isoformat(),
+            )
         with self.ack_state.lock:
             self.ack_state.value.setdefault(agent.slug, {}).setdefault(key, dict(entry))["answered"] = True
             self.ack_state.save()
