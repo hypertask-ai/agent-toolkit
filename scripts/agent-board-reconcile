@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Keep board columns in sync with durable agent run records.
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+CORE_ROOT="$(dirname "$(dirname "$SELF")")"
+# shellcheck disable=SC1091
+. "$CORE_ROOT/scripts/lib/core.sh"
+
+STATE_DIR="${AGENT_BOARD_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll}"
+CONFIG_DIR="${AGENT_CONFIG_DIR:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --state-dir) STATE_DIR="${2:?--state-dir needs a path}"; shift 2 ;;
+    --config-dir) CONFIG_DIR="${2:?--config-dir needs a path}"; shift 2 ;;
+    -h|--help) echo "usage: agent-board-reconcile [--state-dir PATH] [--config-dir PATH]"; exit 0 ;;
+    *) die "unknown option $1" "run agent-board-reconcile --help" ;;
+  esac
+done
+mkdir -p "$STATE_DIR/run-records"
+
+record_field() {
+  local path="$1" field="$2"
+  FIELD="$field" python3 - "$path" <<'PYEOF'
+import json, os, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+print(row.get(os.environ["FIELD"]) or "")
+PYEOF
+}
+
+record_is_live() {
+  local path="$1" pid status
+  status="$(record_field "$path" status)"
+  [ "$status" = "running" ] || return 1
+  pid="$(record_field "$path" pid)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  pgrep -f 'agent-board-poll([[:space:]]|$)' 2>/dev/null | grep -qxF "$pid"
+}
+
+CONF_FILES=()
+if [ -n "$CONFIG_DIR" ]; then
+  for conf in "$CONFIG_DIR"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
+else
+  while IFS= read -r dir; do
+    for conf in "$dir"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
+  done < <(core_conf_dirs)
+fi
+
+for conf in "${CONF_FILES[@]}"; do
+  (
+    unset AGENT_ID AGENT_NAME AGENT_SLUG BOARD_ADAPTER BOARD_ID BOARD_CLI TOKEN_FILE PR_REPO PR_BRANCH_PREFIX
+    # shellcheck disable=SC1090
+    . "$conf"
+    [ "${BOARD_ADAPTER:-}" = "hypertask" ] || exit 0
+    slug="${AGENT_SLUG:-$(basename "$conf" .conf)}"
+    : "${AGENT_ID:?missing AGENT_ID in $conf}" "${BOARD_ID:?missing BOARD_ID in $conf}"
+    : "${BOARD_CLI:?missing BOARD_CLI in $conf}" "${TOKEN_FILE:?missing TOKEN_FILE in $conf}"
+    IN_PROGRESS_SECTION="${IN_PROGRESS_SECTION:-In Progress}"
+    PR_BRANCH_PREFIX="${PR_BRANCH_PREFIX:-agent/$slug-}"
+    log="$STATE_DIR/$slug.log"
+    opened="$STATE_DIR/$slug.opened-prs"
+    touch "$log" "$opened"
+    STATE_DIR="$STATE_DIR"
+    SLUG="$slug"
+    export STATE_DIR SLUG
+    core_load_adapter "$BOARD_ADAPTER"
+
+    health_log() {
+      local board="$1" message="$2" health_ref
+      health_ref="$(BOARD="$board" python3 - "$STATE_DIR/board-health.json" <<'PYEOF'
+import json, os, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+print(((row.get("boards") or {}).get(os.environ["BOARD"]) or {}).get("ref") or "")
+PYEOF
+)"
+      if [ -n "$health_ref" ] && AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$health_ref" \
+          --text "<p><strong>Decision: $message</strong></p>" >>"$log" 2>&1; then
+        return 0
+      fi
+      printf '%s board health: %s\n' "$(date -Is)" "$message" >> "$log"
+    }
+
+    for record in "$STATE_DIR/run-records/$slug-"*.json; do
+      [ -f "$record" ] || continue
+      record_is_live "$record" || continue
+      ref="$(record_field "$record" ref)"
+      board="$(record_field "$record" board)"
+      current="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$log" || true)"
+      if [ "${current,,}" != "${IN_PROGRESS_SECTION,,}" ]; then
+        if ! adapter_assign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$log" 2>&1 \
+           || ! adapter_move_task "$BOARD_CLI" "$ref" "$IN_PROGRESS_SECTION" >>"$log" 2>&1; then
+          health_log "$board" "Reconciler could not keep live run $ref in $IN_PROGRESS_SECTION after two attempts."
+        fi
+      fi
+    done
+
+    rows="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "$IN_PROGRESS_SECTION" 2>>"$log" || true)"
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      assigned="$(ROW="$row" AID="$AGENT_ID" python3 -c 'import json,os; print("yes" if os.environ["AID"] in json.loads(os.environ["ROW"]).get("agent_ids", []) else "no")')"
+      [ "$assigned" = "yes" ] || continue
+      ref="$(ROW="$row" python3 -c 'import json,os; print(json.loads(os.environ["ROW"]).get("ref") or "")')"
+      board="$(ROW="$row" python3 -c 'import json,os; print(json.loads(os.environ["ROW"]).get("board") or "")')"
+      record="$STATE_DIR/run-records/$slug-$ref.json"
+      if [ -f "$record" ] && record_is_live "$record"; then continue; fi
+      set +e
+      adapter_agent_has_open_pr "${PR_REPO:-}" "$ref" "$PR_BRANCH_PREFIX" "$opened"
+      pr_rc=$?
+      set -e
+      [ "$pr_rc" -ne 0 ] || continue
+      if [ "$pr_rc" -eq 2 ]; then
+        health_log "$board" "Reconciler could not check open pull requests for $ref, so it left the ticket in $IN_PROGRESS_SECTION."
+        continue
+      fi
+      origin=""
+      [ ! -f "$record" ] || origin="$(record_field "$record" origin_section)"
+      if [ -z "$origin" ]; then
+        health_log "$board" "Reconciler found stale $ref in $IN_PROGRESS_SECTION without a recorded origin section."
+        continue
+      fi
+      if adapter_move_task "$BOARD_CLI" "$ref" "$origin" >>"$log" 2>&1; then
+        RECORD_STATUS=reconciled python3 - "$record" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["status"] = os.environ["RECORD_STATUS"]
+row["reconciled_at"] = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True); handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+        health_log "$board" "Reconciler returned stale $ref from $IN_PROGRESS_SECTION to $origin because no live run or open agent pull request remained."
+      else
+        health_log "$board" "Reconciler could not return stale $ref to $origin after two attempts."
+      fi
+    done <<< "$rows"
+  )
+done

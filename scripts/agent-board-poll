@@ -143,8 +143,10 @@ RUN_COOLDOWN_SECONDS="${RUN_COOLDOWN_SECONDS:-1800}"
 # verifies somebody else's work and the difficulty of the fix is not its
 # problem.
 AGENT_KIND="${AGENT_KIND:-dev}"
+IN_PROGRESS_SECTION="${IN_PROGRESS_SECTION:-In Progress}"
+REVIEW_SECTION="${REVIEW_SECTION:-AI Review}"
 QA_FAIL_SECTION="${QA_FAIL_SECTION:-}"
-QA_BLOCKED_SECTION="${QA_BLOCKED_SECTION:-}"
+QA_BLOCKED_SECTION="${QA_BLOCKED_SECTION:-Agent Blocked (Infra)}"
 case "$AGENT_KIND" in
   dev) TRIAGE_DEFAULT="yes" ;;
   *)   TRIAGE_DEFAULT="no" ;;
@@ -367,6 +369,8 @@ BLOCKED="$STATE_DIR/$SLUG.blocked"
 # Pull requests first opened during this agent's runs remain attributable even
 # when an old or manually chosen branch name does not identify the agent.
 OPENED_PRS="$STATE_DIR/$SLUG.opened-prs"
+RUN_RECORD_DIR="$STATE_DIR/run-records"
+mkdir -p "$RUN_RECORD_DIR"
 PR_LIVE_CACHE="$STATE_DIR/pr-live-cache"
 # Failed attempts are append-only: "task timestamp command-rung failed". The
 # rung is diagnostic only; ladder selection depends on the total failure count.
@@ -508,6 +512,79 @@ PYEOF
 log() {
   printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"
   if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
+}
+
+report_board_health() {
+  local board="$1" message="$2" health_ref
+  health_ref="$(BOARD="$board" python3 - "$STATE_DIR/board-health.json" <<'PYEOF'
+import json, os, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+print(((row.get("boards") or {}).get(os.environ["BOARD"]) or {}).get("ref") or "")
+PYEOF
+)"
+  if [ -n "$health_ref" ] && AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$health_ref" \
+      --text "<p><strong>Decision: $message</strong></p>" >>"$LOG" 2>&1; then
+    return 0
+  fi
+  log "board health: $message"
+}
+
+move_ticket_or_report() {
+  local ref="$1" section="$2" board="$3" context="$4"
+  if adapter_move_task "$BOARD_CLI" "$ref" "$section" >>"$LOG" 2>&1; then
+    log "$context moved $ref to $section"
+    return 0
+  fi
+  report_board_health "$board" "$context could not move $ref to $section after two attempts."
+  return 1
+}
+
+write_run_record() {
+  local path="$1" status="$2" origin="$3" ref="$4" task_id="$5" board="$6" started_at="$7"
+  RECORD_STATUS="$status" RECORD_ORIGIN="$origin" RECORD_REF="$ref" RECORD_TASK="$task_id" \
+    RECORD_BOARD="$board" RECORD_STARTED="$started_at" RECORD_PID="$$" RECORD_SLUG="$SLUG" \
+    RECORD_AGENT="$AGENT_ID" RECORD_IN_PROGRESS="$IN_PROGRESS_SECTION" \
+    RECORD_REVIEW="$REVIEW_SECTION" RECORD_BLOCKED="$QA_BLOCKED_SECTION" \
+    python3 - "$path" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+row = {
+    "slug": os.environ["RECORD_SLUG"], "agent_id": os.environ["RECORD_AGENT"],
+    "pid": int(os.environ["RECORD_PID"]), "status": os.environ["RECORD_STATUS"],
+    "ref": os.environ["RECORD_REF"], "task_id": os.environ["RECORD_TASK"],
+    "board": os.environ["RECORD_BOARD"], "origin_section": os.environ["RECORD_ORIGIN"],
+    "in_progress_section": os.environ["RECORD_IN_PROGRESS"],
+    "review_section": os.environ["RECORD_REVIEW"], "blocked_section": os.environ["RECORD_BLOCKED"],
+    "started_at": os.environ["RECORD_STARTED"],
+}
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+}
+
+run_verdict_marker() {
+  local ref="$1" task_id="$2" board="$3" ids comments
+  ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
+  [ -n "$ids" ] || return 0
+  comments="$(adapter_ticket_comments "$TOKEN_FILE" "$task_id" "$board" 2>>"$LOG" || printf '[]')"
+  COMMENTS="$comments" IDS="$ids" python3 -c '
+import html, json, os, re
+ids = set(os.environ["IDS"].split())
+rows = [row for row in json.loads(os.environ["COMMENTS"]) if str(row.get("id") or "") in ids]
+rows.sort(key=lambda row: (row.get("createdAt") or "", row.get("id") or 0), reverse=True)
+for row in rows:
+    plain = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", str(row.get("html") or ""))).split())
+    match = re.match(r"(Done|Handoff|Question|Decision):", plain, re.I)
+    if match:
+        print(match.group(1).title())
+        break
+'
 }
 
 progress_event() {
@@ -696,7 +773,7 @@ qa_apply_verdict() {
     *) log "QA lifecycle skipped for $ref: no verdict marker"; return 1 ;;
   esac
   if [ "$marker" = "Question" ] && [ -z "$target" ]; then
-    log "QA blocked verdict for $ref left in place: board $board has no QA_BLOCKED_SECTION or HT Manager Review column"
+    log "QA blocked verdict for $ref left in place: board $board has no QA_BLOCKED_SECTION"
     return 0
   fi
   if [ -z "$target" ]; then
@@ -2240,6 +2317,28 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
   run_started_epoch="$(date +%s)"
   run_started_at="$(date -Is)"
   record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
+  run_record="$RUN_RECORD_DIR/$SLUG-$ref.json"
+  origin_section="$(row_field "$row" section)"
+  if [ "$is_pr_fix" = "yes" ]; then
+    origin_section="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$LOG" || true)"
+  fi
+  [ -n "$origin_section" ] || origin_section="$IN_PROGRESS_SECTION"
+  if [ "$is_reply_only" = "no" ]; then
+    write_run_record "$run_record" running "$origin_section" "$ref" "$task_id" "$board" "$run_started_at"
+    if ! adapter_assign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
+      report_board_health "$board" "Run start could not assign $ref to $SLUG after two attempts."
+      write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at"
+      write_failure_status "$ref" assignment "could not assign the ticket before model invocation"
+      [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+      continue
+    fi
+    if ! move_ticket_or_report "$ref" "$IN_PROGRESS_SECTION" "$board" "run start"; then
+      write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at"
+      write_failure_status "$ref" move "could not move the ticket to $IN_PROGRESS_SECTION before model invocation"
+      [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+      continue
+    fi
+  fi
   if [ "$is_reply_only" = "yes" ] && [ "$comment_id" != "0" ]; then
     reply_contract_event acknowledged --event-id "$board:$comment_id" --at "$run_started_at" \
       --estimate-minutes 30
@@ -2312,6 +2411,8 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
   log "$SKILLS_LINE"
   started=$((started + 1))
   OPEN_PRS_BEFORE=""
+  opened_this_run="no"
+  run_verdict=""
   if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
     OPEN_PRS_BEFORE="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
   fi
@@ -2410,6 +2511,7 @@ if rows:
         log "QA lifecycle failed for $ref: posted comment had no QA verdict marker"
       else
         IFS=$'\t' read -r qa_marker _ _ <<< "$qa_info"
+        run_verdict="$qa_marker"
         log "QA outcome $ref verdict=$qa_marker"
         if ! qa_apply_verdict "$row" "$qa_marker" "run fallback"; then
           [ "$rc" -ne 0 ] || rc=74
@@ -2427,6 +2529,7 @@ if rows:
         continue
       fi
       printf '%s\t%s\t%s\n' "$PR_REPO" "$opened_number" "$ref" >> "$OPENED_PRS"
+      opened_this_run="yes"
       opened_url="https://github.com/$PR_REPO/pull/$opened_number"
       progress_event --event pr-opened --pr "$opened_number" --pr-url "$opened_url" \
         --ticket "$ref" --ticket-url "$url"
@@ -2435,6 +2538,44 @@ if rows:
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "PR opened $opened_url"
       fi
     done <<< "$OPEN_PRS_AFTER"
+  fi
+  if [ "$is_reply_only" = "no" ]; then
+    if [ -z "$run_verdict" ]; then
+      run_verdict="$(run_verdict_marker "$ref" "$task_id" "$board")"
+    fi
+    run_record_status="completed"
+    if [ "$rc" -ne 0 ]; then
+      run_record_status="blocked"
+      move_ticket_or_report "$ref" "$QA_BLOCKED_SECTION" "$board" "blocked run" || true
+    elif [ "$opened_this_run" = "yes" ] || [ "$is_pr_fix" = "yes" ]; then
+      run_record_status="review"
+      if ! move_ticket_or_report "$ref" "$REVIEW_SECTION" "$board" "PR outcome"; then
+        rc=74
+        run_record_status="move-failed"
+      fi
+    elif [ "$AGENT_KIND" = "qa" ] && [ -n "$run_verdict" ]; then
+      run_record_status="qa-${run_verdict,,}"
+    elif [ "$run_verdict" = "Question" ] || [ "$run_verdict" = "Handoff" ]; then
+      run_record_status="blocked"
+      if ! move_ticket_or_report "$ref" "$QA_BLOCKED_SECTION" "$board" "blocked verdict"; then
+        rc=74
+        run_record_status="move-failed"
+      fi
+    else
+      if ! move_ticket_or_report "$ref" "$origin_section" "$board" "no-change outcome"; then
+        rc=74
+        run_record_status="move-failed"
+      elif [ -z "$run_verdict" ]; then
+        no_change="<p><strong>Done: run finished without a change, reason: the model completed without opening a pull request or posting an outcome verdict.</strong></p><p>Next: The ticket is back in $origin_section.</p>"
+        if ! post_ticket_comment "$ref" text "$no_change"; then
+          rc=74
+          run_record_status="comment-failed"
+        else
+          run_record_status="no-change"
+        fi
+      fi
+    fi
+    write_run_record "$run_record" "$run_record_status" "$origin_section" "$ref" "$task_id" "$board" "$run_started_at"
   fi
   # The seen-key and run-done bookkeeping happen first, before any optional
   # post-run step: push_skill_commits below touches a second git repo (the

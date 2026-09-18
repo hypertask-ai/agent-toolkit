@@ -294,13 +294,26 @@ PYEOF
 adapter_install_board_cli() {
   local slug="$1" token_file="$2" dest="$3" agent_name="${4:-}"
   local agent_id="${5:-}" board_ids="${6:-}" quiet="${7:-on}"
-  local plain_language_dir
+  local plain_language_dir native_cli native_path
   plain_language_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/plain-language" && pwd)"
   mkdir -p "$(dirname "$dest")"
+  native_cli="hypertask"
+  native_path="$(command -v hypertask)"
+  if [ "$(readlink -f "$native_path")" = "$(readlink -m "$dest")" ]; then
+    if [ ! -x "$dest.native" ]; then
+      cp "$native_path" "$dest.native"
+      chmod 755 "$dest.native"
+    fi
+    native_cli="$dest.native"
+  fi
   cat > "$dest" <<EOF
 #!/usr/bin/env bash
 # $slug: the board CLI acting as this agent.
 set -euo pipefail
+HYPERTASK_NATIVE="$native_cli"
+if [ "\$HYPERTASK_NATIVE" != hypertask ]; then
+  hypertask() { "\$HYPERTASK_NATIVE" "\$@"; }
+fi
 TOKEN_FILE="$token_file"
 AGENT_NAME="$agent_name"
 AGENT_ID="$agent_id"
@@ -472,7 +485,7 @@ if doc.get("success") is True and title and body:
   if [ "\$REWRITTEN" = yes ] && [ "\$HAS_DESCRIPTION" = no ]; then
     POST_ARGS+=(--description "\$WRITTEN_DESCRIPTION")
   fi
-  exec hypertask --token "\$TOKEN" "\${POST_ARGS[@]}"
+  exec "\$HYPERTASK_NATIVE" --token "\$TOKEN" "\${POST_ARGS[@]}"
 fi
 
 _strip_owner_mentions() {
@@ -630,7 +643,7 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "update" ] && [ -n "\${3:-}" ]; th
     fi
     _outbound_text_gate "\$TEXT" || exit 0
     if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
-      exec hypertask --token "\$TOKEN" comment update "\$3" --text "\$TEXT"
+      exec "\$HYPERTASK_NATIVE" --token "\$TOKEN" comment update "\$3" --text "\$TEXT"
     fi
     if TEXT="\$TEXT" OWNER_IDS="\$OWNER_IDS" python3 -c '
 import os, re, sys
@@ -899,7 +912,7 @@ if mine:
   fi
 fi
 
-exec hypertask --token "\$TOKEN" "\$@"
+exec "\$HYPERTASK_NATIVE" --token "\$TOKEN" "\$@"
 EOF
   chmod 755 "$dest"
 }
@@ -1288,7 +1301,7 @@ blocked = os.environ["BLOCKED"].strip()
 if blocked:
     blocked = canonical(blocked)
 else:
-    blocked = next((item for item in names if item.casefold() == "ht manager review"), "")
+    blocked = canonical("Agent Blocked (Infra)")
 owner = project.get("ownerId") or (project.get("owner") or {}).get("id") or ""
 print(json.dumps({"board": os.environ["BOARD"], "owner_id": str(owner),
                   "fail_section": fail, "blocked_section": blocked}))
@@ -1693,8 +1706,84 @@ adapter_post_comment() {
 }
 
 adapter_move_task() {
-  local board_cli="$1" ref="$2" section="$3"
-  "$board_cli" task move "$ref" --section "$section"
+  local board_cli="$1" ref="$2" section="$3" attempt
+  for attempt in 1 2; do
+    "$board_cli" task move "$ref" --section "$section" && return 0
+  done
+  return 1
+}
+
+# adapter_assign_task <board-cli> <ref> <agent-id>
+adapter_assign_task() {
+  local board_cli="$1" ref="$2" agent_id="$3" attempt task
+  task="$($board_cli --json task get "$ref" 2>/dev/null || true)"
+  if TASK="$task" AID="$agent_id" python3 -c '
+import json, os, sys
+raw = os.environ["TASK"]
+start, end = raw.find("{"), raw.rfind("}")
+try:
+    doc = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
+    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+except (IndexError, TypeError, ValueError):
+    raise SystemExit(1)
+for who in task.get("assignees") or []:
+    agent = who.get("agent") if isinstance(who, dict) else None
+    if isinstance(agent, dict) and str(agent.get("id") or "") == os.environ["AID"]:
+        raise SystemExit(0)
+raise SystemExit(1)
+'; then
+    return 0
+  fi
+  for attempt in 1 2; do
+    "$board_cli" task assign "$ref" --assignee "$agent_id" && return 0
+  done
+  return 1
+}
+
+# adapter_current_section <board-cli> <ref>
+adapter_current_section() {
+  local board_cli="$1" ref="$2" task
+  task="$($board_cli --json task get "$ref" 2>/dev/null)" || return 1
+  printf '%s' "$task" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+start, end = raw.find("{"), raw.rfind("}")
+if start < 0 or end <= start:
+    raise SystemExit(1)
+doc = json.loads(raw[start:end + 1])
+task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+print(task.get("section") or "")
+'
+}
+
+# adapter_agent_has_open_pr <repo> <ref> <branch-prefix> <opened-prs>
+adapter_agent_has_open_pr() {
+  local repo="$1" ref="$2" prefix="$3" opened_prs="$4" rows
+  [ -n "$repo" ] && command -v gh >/dev/null 2>&1 || return 2
+  rows="$(gh pr list --repo "$repo" --state open --search "$ref" --limit 100 \
+    --json number,title,body,headRefName 2>/dev/null)" || return 2
+  ROWS="$rows" REF="$ref" PREFIX="$prefix" REPO="$repo" OPENED="$opened_prs" python3 -c '
+import json, os, re, sys
+ref = os.environ["REF"].casefold()
+prefix = os.environ["PREFIX"].casefold()
+owned = set()
+try:
+    with open(os.environ["OPENED"], encoding="utf-8") as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) >= 2 and fields[0] == os.environ["REPO"]:
+                owned.add(fields[1])
+except OSError:
+    pass
+for pr in json.loads(os.environ["ROWS"] or "[]"):
+    haystack = " ".join(str(pr.get(key) or "") for key in ("title", "body", "headRefName")).casefold()
+    if ref not in haystack:
+        continue
+    branch = str(pr.get("headRefName") or "").casefold()
+    if (prefix and branch.startswith(prefix)) or str(pr.get("number")) in owned:
+        raise SystemExit(0)
+raise SystemExit(1)
+'
 }
 
 # adapter_add_label <board-cli> <token-file> <board-id> <ref> <label>
