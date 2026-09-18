@@ -365,6 +365,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/task-writer.test.sh" ]; then
   echo "-- Task Writer behavioural checks --"
   bash "$HERE/task-writer.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/writer-gate.test.sh" ]; then
+  echo ""
+  echo "-- bot writer gate behavioural checks --"
+  bash "$HERE/writer-gate.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/reply-contract.test.sh" ]; then
   echo ""
   echo "-- reply contract behavioural checks --"

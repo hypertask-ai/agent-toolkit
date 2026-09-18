@@ -51,6 +51,10 @@ case " $* " in
   *' --json project show '*) printf '%s\n' '{"project":{"ownerId":6}}' ;;
   *' --json comment list '*) printf '%s\n' '{"comments":[]}' ;;
   *' comment add '*)
+    if [[ " $* " = *' --improve '* ]]; then
+      printf 'error: unknown option --improve\n' >&2
+      exit 2
+    fi
     args=("$@")
     for ((i = 0; i < ${#args[@]}; i++)); do
       if [ "${args[$i]}" = "--text" ]; then printf '%s' "${args[$((i + 1))]}" > "$COMMENT_CAPTURE"; fi

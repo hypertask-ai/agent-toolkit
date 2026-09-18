@@ -393,6 +393,84 @@ _outbound_gate_note() { _comment_cap_note "\$@"; }
 # shellcheck source=/dev/null
 . "\$OUTBOUND_TEXT_GATE"
 
+# Task creation has no server-side writer flag, so rewrite both fields first.
+# --raw is deliberately wrapper-only and is removed before the real CLI call.
+if { [ "\${1:-}" = "task" ] || [ "\${1:-}" = "tasks" ]; } \
+   && [ "\${2:-}" = "create" ]; then
+  RAW=no
+  TITLE=""
+  DESCRIPTION=""
+  DESCRIPTION_FILE=""
+  PROJECT=""
+  HAS_DESCRIPTION=no
+  args=("\$@")
+  for ((i = 2; i < \${#args[@]}; i++)); do
+    case "\${args[\$i]}" in
+      --raw) RAW=yes ;;
+      --title) TITLE="\${args[\$((i + 1))]:-}"; i=\$((i + 1)) ;;
+      --description) DESCRIPTION="\${args[\$((i + 1))]:-}"; HAS_DESCRIPTION=yes; i=\$((i + 1)) ;;
+      --description-file) DESCRIPTION_FILE="\${args[\$((i + 1))]:-}"; HAS_DESCRIPTION=yes; i=\$((i + 1)) ;;
+      --project) PROJECT="\${args[\$((i + 1))]:-}"; i=\$((i + 1)) ;;
+    esac
+  done
+  if [ -n "\$DESCRIPTION_FILE" ] && [ -r "\$DESCRIPTION_FILE" ]; then
+    DESCRIPTION="\$(cat "\$DESCRIPTION_FILE")"
+  fi
+  WRITTEN_TITLE="\$TITLE"
+  WRITTEN_DESCRIPTION="\$DESCRIPTION"
+  REWRITTEN=no
+  if [ "\$RAW" != "yes" ] && [ -n "\$TITLE" ] && [ -n "\$PROJECT" ]; then
+    PROMPT="\$TITLE
+
+\$DESCRIPTION"
+    if [ -n "\${AGENT_AI_WRITER_FIXTURE:-}" ]; then
+      WRITER_OUTPUT="\$(cat "\$AGENT_AI_WRITER_FIXTURE" 2>/dev/null)" || WRITER_OUTPUT=""
+    else
+      WRITER_OUTPUT="\$(hypertask --token "\$TOKEN" --json ai write "\$PROMPT" --project "\$PROJECT" --mode task-writer 2>/dev/null)" || WRITER_OUTPUT=""
+    fi
+    WRITTEN="\$(WRITER_OUTPUT="\$WRITER_OUTPUT" python3 -c '
+import json, os
+raw = os.environ["WRITER_OUTPUT"]
+start, end = raw.find("{"), raw.rfind("}")
+try:
+    doc = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
+except json.JSONDecodeError:
+    doc = {}
+title = str(doc.get("title") or "").strip()
+body = str(doc.get("html") or "").strip()
+if doc.get("success") is True and title and body:
+    print(title)
+    print(body, end="")
+' 2>/dev/null || true)"
+    if [ -n "\$WRITTEN" ] && [[ "\$WRITTEN" == *\$'\n'* ]]; then
+      WRITTEN_TITLE="\${WRITTEN%%\$'\n'*}"
+      WRITTEN_DESCRIPTION="\${WRITTEN#*\$'\n'}"
+      REWRITTEN=yes
+    else
+      _comment_cap_note "WARNING: Hypertask AI writer failed; posting the original task text"
+    fi
+  fi
+  POST_ARGS=()
+  for ((i = 0; i < \${#args[@]}; i++)); do
+    case "\${args[\$i]}" in
+      --raw) ;;
+      --title)
+        POST_ARGS+=(--title "\$WRITTEN_TITLE")
+        i=\$((i + 1)) ;;
+      --description|--description-file)
+        POST_ARGS+=(--description "\$WRITTEN_DESCRIPTION")
+        i=\$((i + 1)) ;;
+      --markdown)
+        [ "\$REWRITTEN" = yes ] || POST_ARGS+=(--markdown) ;;
+      *) POST_ARGS+=("\${args[\$i]}") ;;
+    esac
+  done
+  if [ "\$REWRITTEN" = yes ] && [ "\$HAS_DESCRIPTION" = no ]; then
+    POST_ARGS+=(--description "\$WRITTEN_DESCRIPTION")
+  fi
+  exec hypertask --token "\$TOKEN" "\${POST_ARGS[@]}"
+fi
+
 _strip_owner_mentions() {
   local text="\$1" owner_ids="\$2"
   TEXT="\$text" OWNER_IDS="\$owner_ids" python3 -c '
@@ -472,15 +550,13 @@ print("ok")
   fi
   exit "\$RC"
 fi
+# Older CLIs have no --improve path, so obtain the rewritten HTML explicitly.
 _write_comment_with_ai() {
   local original="\$1" ref="\$2" plain marker prompt output rewritten
   plain="\$(_plain_comment "\$original")"
-  [ "\${#plain}" -ge 120 ] || { TEXT="\$original"; return 0; }
   case "\$plain" in
     Answer:*|Question:*|Decision:*|Handoff:*|Done:*) marker="\${plain%%:*}:" ;;
-    *)
-      if [ "\${AGENT_REPLY_ONLY:-no}" != "yes" ]; then TEXT="\$original"; return 0; fi
-      marker="" ;;
+    *) marker="" ;;
   esac
   prompt="Rewrite this ticket comment for a product owner in plain language. Keep the leading marker exactly when one is present. Keep every @mention and HTML mention span exactly. Keep every link and the original meaning. Return one concise HTML comment only.
 
@@ -499,7 +575,7 @@ try:
     doc = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
 except json.JSONDecodeError:
     doc = {}
-if doc.get("success") is not False:
+if doc.get("success") is True:
     print(str(doc.get("html") or "").strip(), end="")
 ' 2>/dev/null || true)"
   if [ -n "\$rewritten" ] && ORIGINAL="\$original" REWRITTEN="\$rewritten" MARKER="\$marker" python3 -c '
@@ -509,7 +585,7 @@ rewritten = os.environ["REWRITTEN"]
 marker = os.environ["MARKER"]
 def plain(value):
     return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", value)).split())
-if not plain(rewritten).casefold().startswith(marker.casefold()):
+if marker and not plain(rewritten).casefold().startswith(marker.casefold()):
     raise SystemExit(1)
 spans = re.findall(r"<span\\b(?=[^>]*data-label\\s*=\\s*[\"\x27]?name-[A-Za-z0-9_-]+)[^>]*>.*?</span>", original, re.I | re.S)
 mentions = re.findall(r"(?<![A-Za-z0-9_])@[A-Za-z0-9_.-]+", plain(original))
@@ -519,7 +595,7 @@ if any(value not in rewritten for value in spans) or any(value not in plain(rewr
     TEXT="\$rewritten"
   else
     TEXT="\$original"
-    _comment_cap_note "Write with AI failed on \$ref; posting the original comment"
+    _comment_cap_note "WARNING: Hypertask AI writer failed on \$ref; posting the original comment"
   fi
 }
 
@@ -568,11 +644,14 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
   REF="\$3"
   TEXT=""
   FILE=""
+  RAW=no
+  USE_IMPROVE=no
   args=("\$@")
   for ((i = 0; i < \${#args[@]}; i++)); do
     case "\${args[\$i]}" in
       --text|--body) TEXT="\${args[\$((i + 1))]:-}" ;;
       --file) FILE="\${args[\$((i + 1))]:-}" ;;
+      --raw) RAW=yes ;;
     esac
   done
   if [ -z "\$TEXT" ] && [ -n "\$FILE" ] && [ -r "\$FILE" ]; then
@@ -587,8 +666,10 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
         _comment_cap_note "quiet mode: stripped board-owner mention from comment on \$REF"
       fi
     fi
-    _write_comment_with_ai "\$TEXT" "\$REF"
-    _outbound_text_gate "\$TEXT" "\$VERBATIM" || exit 0
+    if [ "\$RAW" != yes ]; then
+      USE_IMPROVE=yes
+      _outbound_text_gate "\$TEXT" "\$VERBATIM" || exit 0
+    fi
     mkdir -p "\$(dirname "\$OWNER_MENTIONS")" 2>/dev/null || true
     touch "\$OWNER_MENTIONS"
     exec 9>>"\$OWNER_MENTIONS.lock"
@@ -713,12 +794,51 @@ else:
     # picked back up as if it were untouched. Without this, only the rank-3
     # "new work" path skipped an agent's own comment; a claimed-unfinished
     # ticket (rank 1) had no such guard and got reprocessed every tick.
-    if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
-      POST_ARGS=(comment add "\$REF" --text "\$TEXT")
-    else
-      POST_ARGS=("\$@")
-    fi
-    if OUT="\$(hypertask --token "\$TOKEN" "\${POST_ARGS[@]}")"; then
+    POST_ARGS=()
+    for ((i = 0; i < \${#args[@]}; i++)); do
+      case "\${args[\$i]}" in
+        --raw|--improve) ;;
+        --improve-command) i=\$((i + 1)) ;;
+        --text|--body|--file)
+          POST_ARGS+=(--text "\$TEXT")
+          i=\$((i + 1)) ;;
+        *) POST_ARGS+=("\${args[\$i]}") ;;
+      esac
+    done
+    FALLBACK_ARGS=("\${POST_ARGS[@]}")
+    if [ "\$USE_IMPROVE" = yes ]; then
+      POST_ARGS+=(--improve)
+      IMPROVE_ERR="\$(mktemp "\${TMPDIR:-/tmp}/agent-comment-improve.XXXXXX")"
+      if OUT="\$(hypertask --token "\$TOKEN" "\${POST_ARGS[@]}" 2>"\$IMPROVE_ERR")"; then
+        RC=0
+      else
+        RC=\$?
+        if grep -qiE '(unknown|unrecognized|invalid).*(option|argument).*--improve|--improve.*(unknown|unrecognized|invalid)' "\$IMPROVE_ERR"; then
+          _write_comment_with_ai "\$TEXT" "\$REF"
+          _outbound_text_gate "\$TEXT" "\$VERBATIM" || { rm -f "\$IMPROVE_ERR"; exit 0; }
+          for ((i = 0; i < \${#FALLBACK_ARGS[@]}; i++)); do
+            if [ "\${FALLBACK_ARGS[\$i]}" = "--text" ]; then
+              FALLBACK_ARGS[\$((i + 1))]="\$TEXT"
+            fi
+          done
+          if OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
+            RC=0
+          else
+            RC=\$?
+          fi
+        elif grep -qiE '(ai|writer|improv).*(fail|error|empty|unavailable)|(fail|error|empty|unavailable).*(ai|writer|improv)' "\$IMPROVE_ERR"; then
+          _comment_cap_note "WARNING: Hypertask AI writer failed on \$REF; posting the original comment"
+          if OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
+            RC=0
+          else
+            RC=\$?
+          fi
+        else
+          cat "\$IMPROVE_ERR" >&2
+        fi
+      fi
+      rm -f "\$IMPROVE_ERR"
+    elif OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
       RC=0
     else
       RC=\$?
