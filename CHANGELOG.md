@@ -1,3 +1,7 @@
+## 3.53.0 - 2026-09-18
+
+- AGTE-67, AGTE-68, and AGTE-72 make toolkit pull requests request squash auto-merge when opened, move version and changelog updates to a main-branch release workflow, preserve local host patches across updates, require maintainers to execute release actions themselves, and file toolkit bugs for pull requests that stay red or unmerged for two hours.
+
 ## 3.52.0 - 2026-09-18
 
 - AGTE-31 makes failed manager ticks visible in the runner log instead of only the system journal.
