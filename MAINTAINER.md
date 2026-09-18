@@ -280,9 +280,12 @@ is separate from the capped owned-ticket scan. The sheet records pull request
 states verified with `gh`, the latest QA verdict and date, and relevant
 configuration that exists or is missing. Newer verified facts win conflicts,
 and the answer names superseded older comments. The runner validates and posts
-the returned HTML after the sandbox exits. These reply-only runs default to
-`Answer:`, with a final `Decision needed:` question only when the owner
-genuinely needs to choose.
+the returned HTML after the sandbox exits. An empty or invalid draft gets one
+retry with the failed shape rules. If that retry also fails, the original draft
+posts under `Answer:` with a line saying the check was skipped, so an owner
+question never ends in silence. These reply-only runs default to `Answer:`, with
+a final `Decision needed:` question only when the owner genuinely needs to
+choose.
 
 When the owner writes "I don't understand" or asks for a guide, the answering
 agent posts exactly one `Decision:` comment shaped as a numbered guide and

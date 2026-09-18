@@ -1,0 +1,1 @@
+- Owner-question replies that fail the outbound shape check now retry once with the failed rules, then post the original answer with a skipped-check notice instead of leaving the ticket silent.

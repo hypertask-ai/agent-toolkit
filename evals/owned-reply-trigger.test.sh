@@ -305,5 +305,124 @@ else
   bad htpr-4370-verified-state "prompt=$(cat "$TMP/htpr-4370.prompt" 2>/dev/null) state=$(cat "$TMP/htpr-4370.state" 2>/dev/null) post=$(cat "$TMP/htpr-4370.post" 2>/dev/null)"
 fi
 
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-97","ticketNumber":"TEST-97","section":"Done","title":"Answer after a shape failure","description":"The owner needs an answer.","assignees":[],"labels":[],"commentCount":1,"updatedAt":"2026-09-18T20:03:00Z"}]}
+EOF
+cat > "$TMP/comments.json" <<'EOF'
+{"comments":[{"id":9701,"createdAt":"2026-09-18T20:01:00Z","agent":null,"creator":{"id":6,"displayName":"Valentin"},"text":"<p><span data-label=\"agent-agent-1\">Test Bot</span>, what happened?</p>"}]}
+EOF
+cat > "$TMP/bin/hax-stub" <<'EOF'
+#!/usr/bin/env bash
+count="$(cat "$REPLY_CALL_COUNT" 2>/dev/null || printf 0)"
+count=$((count + 1))
+printf '%s\n' "$count" > "$REPLY_CALL_COUNT"
+printf '%s' "${!#}" > "$PROMPT_CAPTURE.$count"
+if [ "$count" -eq 1 ]; then
+  printf 'Answer: The first draft has no HTML.\n'
+else
+  printf '<p><strong>Answer: The corrected reply is ready.</strong></p><p>Next: use the corrected reply.</p>\n'
+fi
+EOF
+chmod +x "$TMP/bin/hax-stub"
+rm -f "$TMP/state/agent-board-poll/test.seen" "$TMP/state/agent-board-poll/test.ticket-runs" \
+  "$TMP/reply-call-count" "$TMP/shape-retry.post"
+PROMPT_CAPTURE="$TMP/shape-retry.prompt" REPLY_CALL_COUNT="$TMP/reply-call-count" \
+  TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPTURE="$TMP/bwrap" BOARD_POST_CAPTURE="$TMP/shape-retry.post" \
+  REPLY_HAX_BIN="$TMP/bin/hax-stub" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
+  REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
+  TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
+  PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test >/dev/null
+if [ "$(cat "$TMP/reply-call-count")" = 2 ] \
+   && grep -qF 'SHAPE-CHECK RETRY:' "$TMP/shape-retry.prompt.2" \
+   && grep -qF 'first block must be a <p>' "$TMP/shape-retry.prompt.2" \
+   && grep -qF 'Put every ticket or pull request reference inside a full HTTPS link.' "$TMP/shape-retry.prompt.2" \
+   && grep -qF 'Answer: The first draft has no HTML.' "$TMP/shape-retry.prompt.2" \
+   && grep -qF '<strong>Answer: The corrected reply is ready.</strong>' "$TMP/shape-retry.post" \
+   && ! grep -qF 'Check skipped:' "$TMP/shape-retry.post"; then
+  ok reply-shape-retry 'one retry receives the failed rules and posts its corrected Answer'
+else
+  bad reply-shape-retry "calls=$(cat "$TMP/reply-call-count" 2>/dev/null) prompt=$(cat "$TMP/shape-retry.prompt.2" 2>/dev/null) post=$(cat "$TMP/shape-retry.post" 2>/dev/null) log=$(tail -n 20 "$TMP/state/agent-board-poll/test.log" 2>/dev/null)"
+fi
+
+cat > "$TMP/bin/ticket-link-stub.py" <<'EOF'
+#!/usr/bin/env python3
+import sys
+
+text = sys.stdin.read()
+text = text.replace(
+    "HTPR-5815",
+    '<a href="https://app.hypertask.ai/detail/project-15/5815">HTPR-5815 Product Bot reply incident</a>',
+)
+sys.stdout.write(text)
+EOF
+cat > "$TMP/bin/hax-stub" <<'EOF'
+#!/usr/bin/env bash
+count="$(cat "$REPLY_CALL_COUNT" 2>/dev/null || printf 0)"
+count=$((count + 1))
+printf '%s\n' "$count" > "$REPLY_CALL_COUNT"
+printf '%s' "${!#}" > "$PROMPT_CAPTURE.$count"
+if [ "$count" -eq 1 ]; then
+  printf '<p>The original reply for HTPR-5815 stays unchanged.</p>\n'
+else
+  printf 'The retry is still not HTML.\n'
+fi
+EOF
+chmod +x "$TMP/bin/hax-stub" "$TMP/bin/ticket-link-stub.py"
+cat > "$TMP/comments.json" <<'EOF'
+{"comments":[{"id":9702,"createdAt":"2026-09-18T20:02:00Z","agent":null,"creator":{"id":6,"displayName":"Valentin"},"text":"<p><span data-label=\"agent-agent-1\">Test Bot</span>, will I still get the answer?</p>"}]}
+EOF
+sed -i 's/20:03:00Z/20:04:00Z/' "$TMP/tasks.json"
+rm -f "$TMP/state/agent-board-poll/test.seen" "$TMP/state/agent-board-poll/test.ticket-runs" \
+  "$TMP/reply-call-count" "$TMP/shape-fallback.post"
+PROMPT_CAPTURE="$TMP/shape-fallback.prompt" REPLY_CALL_COUNT="$TMP/reply-call-count" \
+  TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPTURE="$TMP/bwrap" BOARD_POST_CAPTURE="$TMP/shape-fallback.post" \
+  TICKET_LINK_FORMATTER="$TMP/bin/ticket-link-stub.py" \
+  REPLY_HAX_BIN="$TMP/bin/hax-stub" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
+  REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
+  TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
+  PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test >/dev/null
+if [ "$(cat "$TMP/reply-call-count")" = 2 ] \
+   && head -n1 "$TMP/shape-fallback.post" | grep -qxF '<p><strong>Answer:</strong></p>' \
+   && grep -qF 'The original reply for' "$TMP/shape-fallback.post" \
+   && grep -qF '<a href="https://app.hypertask.ai/detail/project-15/5815">HTPR-5815 Product Bot reply incident</a>' "$TMP/shape-fallback.post" \
+   && grep -qF 'Check skipped: the reply did not pass the outbound shape check after one retry.' "$TMP/shape-fallback.post"; then
+  ok reply-shape-fallback 'a twice-invalid reply posts the linked original under Answer with a skipped-check line'
+else
+  bad reply-shape-fallback "calls=$(cat "$TMP/reply-call-count" 2>/dev/null) post=$(cat "$TMP/shape-fallback.post" 2>/dev/null) log=$(tail -n 20 "$TMP/state/agent-board-poll/test.log" 2>/dev/null)"
+fi
+
+cat > "$TMP/bin/hax-stub" <<'EOF'
+#!/usr/bin/env bash
+count="$(cat "$REPLY_CALL_COUNT" 2>/dev/null || printf 0)"
+printf '%s\n' "$((count + 1))" > "$REPLY_CALL_COUNT"
+EOF
+chmod +x "$TMP/bin/hax-stub"
+cat > "$TMP/comments.json" <<'EOF'
+{"comments":[{"id":9703,"createdAt":"2026-09-18T20:03:00Z","agent":null,"creator":{"id":6,"displayName":"Valentin"},"text":"<p><span data-label=\"agent-agent-1\">Test Bot</span>, why is there no answer?</p>"}]}
+EOF
+sed -i 's/20:04:00Z/20:05:00Z/' "$TMP/tasks.json"
+rm -f "$TMP/state/agent-board-poll/test.seen" "$TMP/state/agent-board-poll/test.ticket-runs" \
+  "$TMP/reply-call-count" "$TMP/empty-fallback.post"
+REPLY_CALL_COUNT="$TMP/reply-call-count" TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPTURE="$TMP/bwrap" \
+  BOARD_POST_CAPTURE="$TMP/empty-fallback.post" TICKET_LINK_FORMATTER="$TMP/bin/ticket-link-stub.py" \
+  REPLY_HAX_BIN="$TMP/bin/hax-stub" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
+  REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
+  TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
+  PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test >/dev/null
+if [ "$(cat "$TMP/reply-call-count")" = 2 ] \
+   && head -n1 "$TMP/empty-fallback.post" | grep -qxF '<p><strong>Answer:</strong></p>' \
+   && grep -qF 'I could not produce an answer after one retry.' "$TMP/empty-fallback.post" \
+   && grep -qF 'Check skipped:' "$TMP/empty-fallback.post"; then
+  ok empty-reply-fallback 'silence fails both attempts and produces a visible Answer fallback'
+else
+  bad empty-reply-fallback "calls=$(cat "$TMP/reply-call-count" 2>/dev/null) post=$(cat "$TMP/empty-fallback.post" 2>/dev/null)"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
