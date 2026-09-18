@@ -93,9 +93,10 @@ agent-template instruct <slug> <text|-> [--ticket <url>]
 ```
 
 `repos.allow` beside the agent conf is CSV with `key,path,github slug,base
-branch`. Build and merge refuse anything outside it. The shipped file contains
-the six approved repositories and is installed only when the host has no
-allowlist, so host policy is never overwritten by an update.
+branch`. On first install, the slug and branch are discovered from each
+checkout's `origin` and `origin/HEAD`; updates never overwrite host policy.
+Build refuses a checkout whose current origin differs from its allowlist row,
+and build and merge refuse anything outside the file.
 
 A build writes its guarded prompt and output under
 `~/.local/state/agent-board-poll/<slug>-builds/`, launches a 3 GB systemd user

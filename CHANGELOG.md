@@ -1,3 +1,10 @@
+## 3.45.0 - 2026-09-18
+
+- AGTE-27 generates the default repository allowlist from each checkout's origin and default branch at install time.
+- Builds refuse an origin mismatch before launch and print both the checkout and allowlisted repository slugs.
+- Focused offline coverage verifies generated identities and mismatch refusal.
+- ACTION: run `agent-template update --keep-timers`; existing host allowlists remain unchanged and can be corrected manually where needed.
+
 ## 3.44.0 - 2026-09-18
 
 - AGTE-26 makes QA agents watch the `QA` column by default so handed-off tickets are eligible.

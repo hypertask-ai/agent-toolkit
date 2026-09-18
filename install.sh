@@ -47,6 +47,47 @@ INSTALL_STATE="${AGENT_TEMPLATE_INSTALL_STATE:-${XDG_STATE_HOME:-$HOME/.local/st
 
 fail() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
 
+generate_repos_allow() {
+  local destination="$1" temporary key repo_path origin github_slug base_branch upstream
+  temporary="$(mktemp)"
+  printf '# key,path,github slug,base branch\n' > "$temporary"
+  while IFS=, read -r key repo_path _; do
+    case "$key" in ''|'#'*) continue ;; esac
+    if ! git -C "$repo_path" rev-parse --git-dir >/dev/null 2>&1; then
+      echo "WARNING: repository allowlist skipped $repo_path because it is not a git checkout" >&2
+      continue
+    fi
+    origin="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
+    [ -n "$origin" ] || fail "$repo_path has no origin remote" \
+      "add its origin remote, then run install.sh again"
+    case "$origin" in
+      git@github.com:*) github_slug="${origin#git@github.com:}" ;;
+      ssh://git@github.com/*) github_slug="${origin#ssh://git@github.com/}" ;;
+      https://github.com/*) github_slug="${origin#https://github.com/}" ;;
+      http://github.com/*) github_slug="${origin#http://github.com/}" ;;
+      *) fail "$repo_path origin $origin is not a GitHub repository" \
+          "set its origin to the GitHub repository, then run install.sh again" ;;
+    esac
+    github_slug="${github_slug%.git}"
+    case "$github_slug" in */*) ;; *) fail "$repo_path origin $origin has no GitHub owner and repository" \
+      "fix its origin remote, then run install.sh again" ;; esac
+    base_branch="$(git -C "$repo_path" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)"
+    base_branch="${base_branch#origin/}"
+    if [ -z "$base_branch" ]; then
+      base_branch="$(git -C "$repo_path" ls-remote --symref origin HEAD 2>/dev/null \
+        | sed -n 's@^ref: refs/heads/\(.*\)[[:space:]]HEAD$@\1@p' | head -n1)" || true
+    fi
+    if [ -z "$base_branch" ]; then
+      upstream="$(git -C "$repo_path" rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)"
+      case "$upstream" in origin/*) base_branch="${upstream#origin/}" ;; esac
+    fi
+    [ -n "$base_branch" ] || fail "$repo_path origin has no discoverable default branch" \
+      "set origin/HEAD, then run install.sh again"
+    printf '%s,%s,%s,%s\n' "$key" "$repo_path" "$github_slug" "$base_branch" >> "$temporary"
+  done < "$SRC/repos.allow"
+  mv "$temporary" "$destination"
+}
+
 # ---------- the shared company skills pack ----------
 # Every bot reads a company pack before its own, so the pack has to exist on
 # every host the template is installed on, not only the one where somebody
@@ -228,15 +269,15 @@ cp -a "$SRC/CONF.md" "$DEST/CONF.md"
 # `agent-template feedback` reports and what a bug report has to name.
 cp -a "$SRC/VERSION" "$DEST/VERSION"
 cp -a "$SRC/CHANGELOG.md" "$DEST/CHANGELOG.md"
-cp -a "$SRC/repos.allow" "$DEST/repos.allow"
 if [ ! -f "$AGENT_CONF_DIR/repos.allow" ]; then
   mkdir -p "$AGENT_CONF_DIR"
-  cp -a "$SRC/repos.allow" "$AGENT_CONF_DIR/repos.allow"
+  generate_repos_allow "$AGENT_CONF_DIR/repos.allow"
   chmod 600 "$AGENT_CONF_DIR/repos.allow"
-  echo "repository allowlist: $AGENT_CONF_DIR/repos.allow"
+  echo "repository allowlist: $AGENT_CONF_DIR/repos.allow (generated from checkout origins)"
 else
   echo "repository allowlist: $AGENT_CONF_DIR/repos.allow (kept existing)"
 fi
+cp -a "$AGENT_CONF_DIR/repos.allow" "$DEST/repos.allow"
 
 # A timer fires every 60s for several agents, any of which may have
 # scripts/agent-board-poll or an adapter open mid-read while this runs. The

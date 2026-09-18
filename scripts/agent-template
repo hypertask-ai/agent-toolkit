@@ -708,6 +708,17 @@ PYEOF
   case "$base_branch" in ''|*[!A-Za-z0-9._/-]*) manager_refuse "build refused: invalid base branch for $repo_key in repos.allow" ;; esac
   [ -d "$repo_path/.git" ] || git -C "$repo_path" rev-parse --git-dir >/dev/null 2>&1 \
     || manager_refuse "build refused: allowlisted path $repo_path is not a git checkout"
+  checkout_origin="$(git -C "$repo_path" remote get-url origin 2>/dev/null || true)"
+  case "$checkout_origin" in
+    git@github.com:*) checkout_slug="${checkout_origin#git@github.com:}" ;;
+    ssh://git@github.com/*) checkout_slug="${checkout_origin#ssh://git@github.com/}" ;;
+    https://github.com/*) checkout_slug="${checkout_origin#https://github.com/}" ;;
+    http://github.com/*) checkout_slug="${checkout_origin#http://github.com/}" ;;
+    *) checkout_slug="${checkout_origin:-<missing>}" ;;
+  esac
+  checkout_slug="${checkout_slug%.git}"
+  [ "$checkout_slug" = "$github_slug" ] \
+    || manager_refuse "build refused: checkout origin $checkout_slug does not match repos.allow $github_slug"
   command -v systemd-run >/dev/null 2>&1 \
     || manager_refuse "build refused: systemd-run is not available"
 

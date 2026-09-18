@@ -35,6 +35,7 @@ for name in pospeak.md unslop.md i-have-adhd.md; do printf 'Use plain words.\n' 
   touch README.md
   git add README.md
   git commit -qm init
+  git remote add origin https://github.com/example/allowed.git
 )
 
 cat > "$CONF_DIR/maintainer.conf" <<EOF
@@ -212,6 +213,21 @@ if [ "$unknown_rc" -ne 0 ] && [ "$unknown" = 'build refused: repository missing 
   ok build-refuses-unlisted-repo "unlisted path never reaches systemd-run"
 else
   bad build-refuses-unlisted-repo "rc=$unknown_rc output=$unknown"
+fi
+
+git -C "$REPO" remote set-url origin https://github.com/example/actual.git
+set +e
+mismatch="$(AGENT_SLUG=maintainer run_template build --repo allowed \
+  --ticket https://app.hypertask.ai/detail/project-1/2 --spec "$TMP/spec.md" 2>&1)"
+mismatch_rc=$?
+set -e
+git -C "$REPO" remote set-url origin https://github.com/example/allowed.git
+if [ "$mismatch_rc" -ne 0 ] \
+   && [ "$mismatch" = 'build refused: checkout origin example/actual does not match repos.allow example/allowed' ] \
+   && [ ! -s "$TMP/systemd-run.log" ]; then
+  ok build-refuses-origin-mismatch "actual and allowlisted repositories are printed before launch"
+else
+  bad build-refuses-origin-mismatch "rc=$mismatch_rc output=$mismatch"
 fi
 
 build="$(AGENT_SLUG=maintainer run_template build --repo allowed \

@@ -296,6 +296,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/maintainer-actions.test.sh" ]; then
   echo "-- maintainer action behavioural checks --"
   bash "$HERE/maintainer-actions.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/repos-allow.test.sh" ]; then
+  echo ""
+  echo "-- repository allowlist behavioural checks --"
+  bash "$HERE/repos-allow.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/instruction-tickets.test.sh" ]; then
   echo ""
   echo "-- instruction ticket behavioural checks --"

@@ -579,8 +579,10 @@ agent-template instruct <slug> <text|-> [--ticket <url>]
 ```
 
 `repos.allow` beside the conf supplies `key,path,github slug,base branch` CSV
-rows. A build outside it is refused. An accepted build writes the standard
-worktree, pull request, check, squash-merge, deployment, cleanup, and reporting
+rows. A first install discovers the slug and default branch from each checkout's
+`origin`; a build outside the file or whose checkout origin differs is refused.
+An accepted build writes the standard worktree, pull request, check,
+squash-merge, deployment, cleanup, and reporting
 guardrails into a prompt, starts a memory-capped systemd user job, and records
 its paths and status in `<slug>-builds.json`. Status prints the exit marker and
 twelve output lines; list is the source for answering what the agent did.
