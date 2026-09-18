@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# systemd entrypoint for one poll tick; preserves the poller's exit status.
+set -uo pipefail
+
+POLL="${AGENT_BOARD_POLL_BIN:-$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/agent-board-poll}"
+if [ "$#" -gt 0 ]; then
+  slug="${!#}"
+else
+  slug="unknown"
+fi
+
+"$POLL" --once "$@"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  log="${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll/$slug.log"
+  { mkdir -p "$(dirname "$log")" && printf '%s run FAILED tick exit=%s\n' "$(date -Is)" "$rc" >> "$log"; } 2>/dev/null || true
+fi
+exit "$rc"

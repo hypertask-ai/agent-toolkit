@@ -322,6 +322,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/manager-actions.test.sh" ]; then
   echo "-- manager action behavioural checks --"
   bash "$HERE/manager-actions.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/manager-tick.test.sh" ]; then
+  echo ""
+  echo "-- manager tick regression checks --"
+  bash "$HERE/manager-tick.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/maintainer-actions.test.sh" ]; then
   echo ""
   echo "-- maintainer action behavioural checks --"

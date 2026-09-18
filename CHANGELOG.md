@@ -1,3 +1,13 @@
+## 3.52.0 - 2026-09-18
+
+- AGTE-31 makes failed manager ticks visible in the runner log instead of only the system journal.
+- The systemd poll unit now uses a small exit-preserving wrapper that records
+  `run FAILED tick exit=N` when the poll process crashes.
+- Focused offline coverage runs a Product Bot dry tick with both manager modes
+  enabled and rejects non-zero exits or `command not found` output.
+- ACTION: run `agent-template update --keep-timers` so current agents receive
+  the failure-logging unit entrypoint without changing timer state.
+
 ## 3.51.0 - 2026-09-18
 
 - AGTE-29 adds optional per-repository build memory caps and reconciles OOM-killed systemd units before each runner tick.
