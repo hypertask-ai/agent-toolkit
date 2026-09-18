@@ -859,9 +859,10 @@ Never start or stop systemd units.
 Make all edits in a new git worktree under a scratch directory, never in the shared checkout at $repo_path.
 Do not overwrite, discard, or revert changes you did not make.
 Right before opening the pull request, pull $base_branch, rebase your branch, and resolve concurrent changes.
-If this repository has a VERSION file, take the next version not already used on $base_branch after that rebase.
+For the agent toolkit, never edit VERSION or CHANGELOG.md in a pull request; add one changelog.d/<name>.md fragment instead.
 Run the repository's tests and checks before opening the pull request.
-Open a pull request against $base_branch, wait for green with \`gh pr checks --watch --interval 30\` for at most 10 minutes, then squash merge it.
+Open a pull request against $base_branch and immediately run \`gh pr merge --auto --squash <pr>\` so it can merge itself when checks pass.
+Wait for green with \`gh pr checks --watch --interval 30\` for at most 10 minutes; if auto-merge is unavailable, squash merge the green pull request yourself.
 After merge, run \`agent-template update --keep-timers\` only when this build changes the agent toolkit.
 Remove the worktree when finished and report the result in fewer than 10 lines.
 
@@ -1192,11 +1193,27 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   TARGET_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
   echo "channel $CHANNEL selected: $TARGET_VERSION ($(git -C "$REPO" rev-parse --short HEAD))"
 
+  echo "== 1a. untracked template caches =="
+  cache_found=no
+  while IFS= read -r -d '' cache_path; do
+    cache_rel="${cache_path#"$REPO"/}"
+    if [ -n "$(git -C "$REPO" ls-files -- "$cache_rel" "$cache_rel/**")" ]; then
+      continue
+    fi
+    echo "cache cleaned: $cache_rel"
+    rm -rf "$cache_path"
+    cache_found=yes
+  done < <(find "$TEMPLATE_DIR" \
+    \( -type d \( -name __pycache__ -o -name .pytest_cache \) -print0 -prune \) -o \
+    \( -type f \( -name '*.pyc' -o -name '*.pyo' \) -print0 \))
+  [ "$cache_found" = "yes" ] || echo "no untracked template caches found"
+
   echo "== 1b. local changes to the installed release =="
   LOCAL_PATCHES=""
   MANIFEST="$INSTALLED_TEMPLATE/.manifest.sha256"
   BASELINE_MANIFEST=""
   INSTALLED_VERSION="$(cat "$INSTALLED_TEMPLATE/VERSION" 2>/dev/null || echo unknown)"
+  LOCAL_PATCH_DIR="$INSTALLED_TEMPLATE/local-patches/${INSTALLED_VERSION:-unknown}"
   if [ ! -f "$MANIFEST" ] && [ "$INSTALLED_VERSION" != "unknown" ]; then
     VERSION_PATH="templates/agent-skills/create-agent/VERSION"
     RELEASE_COMMIT="$(git -C "$REPO" log --all -S"$INSTALLED_VERSION" --format=%H -- "$VERSION_PATH" 2>/dev/null \
@@ -1272,16 +1289,15 @@ PYEOF
   fi
   [ -z "$BASELINE_MANIFEST" ] || rm -f "$BASELINE_MANIFEST"
   if [ -n "$LOCAL_PATCHES" ]; then
-    echo "local patches archived under $INSTALLED_TEMPLATE/local-patches/${INSTALLED_VERSION:-unknown}:"
+    echo "local patches archived for automatic reapply under $LOCAL_PATCH_DIR:"
     printf '%s\n' "$LOCAL_PATCHES" | sed 's/^/  /'
-    if [ "$KEEP_LOCAL_PATCHES" != "yes" ]; then
-      echo "update refused: local changes would be replaced"
-      echo "file each patch with agent-template feedback, then re-run with --keep-local-patches"
-      exit 0
-    fi
-    echo "continuing because --keep-local-patches was set"
+  elif [ -d "$LOCAL_PATCH_DIR" ] && [ -n "$(find "$LOCAL_PATCH_DIR" -type f -print -quit)" ]; then
+    echo "found archived local patches for automatic reapply under $LOCAL_PATCH_DIR"
   else
     echo "no local patches found"
+  fi
+  if [ "$KEEP_LOCAL_PATCHES" = "yes" ]; then
+    echo "--keep-local-patches is no longer needed; local patches are reapplied automatically"
   fi
 
   echo "== 2. stage and evaluate $TARGET_VERSION =="
@@ -1319,7 +1335,21 @@ PYEOF
     || die "install.sh failed (see its output above)" \
         "fix the failing step and re-run agent-template update; no conf was touched and no timer was restarted"
 
-  echo "== 2c. shared company skills pack =="
+  echo "== 2c. reapply local patches =="
+  reapplied=no
+  if [ -d "$LOCAL_PATCH_DIR" ]; then
+    while IFS= read -r -d '' patch_file; do
+      relative="${patch_file#"$LOCAL_PATCH_DIR"/}"
+      target="$INSTALLED_TEMPLATE/$relative"
+      mkdir -p "$(dirname "$target")"
+      cp -a "$patch_file" "$target"
+      echo "local patch reapplied: $relative"
+      reapplied=yes
+    done < <(find "$LOCAL_PATCH_DIR" -type f -print0 | sort -z)
+  fi
+  [ "$reapplied" = "yes" ] || echo "no local patches to reapply"
+
+  echo "== 2d. shared company skills pack =="
   # install.sh above clones or fast-forwards it; this prints where it landed
   # and what it is on, so a daily update run says out loud whether every bot
   # on this host is reading the current shared rules. A pack that cannot be

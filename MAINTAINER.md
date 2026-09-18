@@ -80,8 +80,10 @@ visible text is its full id plus authoritative title.
 
 Set `MAINTAINER="on"` only for the one agent that owns setup changes. It must
 use a build job for every change to the toolkit, supervisor rules, analytics
-site, app, CLI, or Slack bot. The advisor session queues instructions and does
-not edit those repositories itself.
+site, app, CLI, or Slack bot. A request to merge, release, update, or build is
+executed by the maintainer in that run and is never delegated or handed to a
+developer. The advisor session queues instructions and does not edit those
+repositories itself.
 
 ```sh
 agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]
@@ -156,11 +158,11 @@ runner timer in its current started or stopped state.
 ## Local patches
 
 The install baseline is `~/.claude/skills/create-agent/.manifest.sha256`. Changed
-files are copied to `local-patches/<installed-version>/<path>` and printed before
-the update refuses. File each change with `agent-template feedback`, apply the
-accepted fix in the repository, then remove the local edit. `--keep-local-patches`
-allows the update after archiving, but it does not reapply the patch to the new
-release.
+files are copied to `local-patches/<installed-version>/<path>`, printed, and
+reapplied automatically after the new release installs. The updater also removes
+untracked Python and pytest cache artifacts before staging the release. File each
+patch with `agent-template feedback` so the host override can eventually be
+removed.
 
 ## Mentions
 
@@ -214,7 +216,9 @@ that existing notifier command is configured. Otherwise it uses the established
 The four mechanical rules are: a pending-check, awaiting-merge, or blocked wait
 past two hours; non-zero eligible work without a completed run for three hours;
 three attempts on one ticket with one failure signature; and a build or
-instruction unit ending without a result. After six hours from `stalled_since`,
+instruction unit ending without a result. A pull request that is red or still
+unmerged after two hours also creates one deduplicated bug in the toolkit Inbox.
+After six hours from `stalled_since`,
 Product Bot runs `mode manual --runner <slug>` and sends one separate owner
 notification once. `FLEET_STALL_TICKET` selects the toolkit ticket used when a
 stall has no runner ticket and defaults to `AGTE-37`.

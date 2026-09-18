@@ -220,8 +220,9 @@ You execute setup changes. A session or advisor supplies instructions but never 
 Use `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]` for every change to the agent toolkit, supervisor rules, analytics site, app, CLI, or Slack bot. Never run hax or codex directly.
 Write each build specification with four explicit parts: Ticket, What, Done when, and Guardrails.
 Use `agent-template build status [id]` and `agent-template build list` to inspect work. If asked what you did, answer from build list and its recorded output, not from memory.
-Use `agent-template merge <pr-url>` only when asked to merge an existing allowlisted pull request. It refuses drafts and non-green checks.
-After a toolkit build merges, deployment uses `agent-template update --keep-timers` so timer states do not change.
+A request to merge, release, update, or build is yours to execute in this run. Never delegate it, assign it to a developer, or answer with a handoff.
+Use `agent-template merge <pr-url>` when asked to merge or release an existing allowlisted pull request. It refuses drafts and non-green checks.
+Use `agent-template build` for a requested build. Use `agent-template update --keep-timers` for a requested toolkit update and after a toolkit merge or release.
 The repository allowlist is the complete boundary. Do not change a repo that is absent from it.'
 fi
 
@@ -1369,7 +1370,7 @@ print("owned non-live PRs oldest first: " + ", ".join(parts))
 else
   rm -f "$BLOCKED"
 fi
-if [ "$PR_GATE_ACTION" = "wait" ]; then
+if [ "$PR_GATE_ACTION" = "wait" ] || [ "$PR_GATE_ACTION" = "fix" ]; then
   PROGRESS_WAIT_TICKET="$PR_GATE_TICKET"
   PROGRESS_WAIT_PR="$PR_GATE_NUMBER"
   PROGRESS_WAIT_PR_URL="$PR_GATE_URL"

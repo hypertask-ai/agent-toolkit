@@ -28,7 +28,9 @@ log = pathlib.Path(os.environ["BOARD_LOG"])
 with log.open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(sys.argv[1:]) + "\n")
 args = sys.argv[1:]
-if args[:2] == ["comment", "add"]:
+if args[:2] == ["task", "create"]:
+    print(json.dumps({"task": {"id": "bug-1", "ticketNumber": "AGTE-99"}}))
+elif args[:2] == ["comment", "add"]:
     counter = pathlib.Path(os.environ["BOARD_COUNTER"])
     value = int(counter.read_text() or "0") + 1 if counter.exists() else 1
     counter.write_text(str(value), encoding="utf-8")
@@ -103,9 +105,14 @@ assert {row["rule"] for row in entries.values()} == {
 wait = next(row for row in entries.values() if row["rule"] == "wait-over-two-hours")
 assert wait["runner"] == "dev-1" and wait["manual_at"] == "2026-09-18T12:00:00Z"
 assert wait["owner_notified_at"] == "2026-09-18T12:00:00Z"
+assert wait["bug_ticket"] == "AGTE-99" and wait["bug_filed_at"] == "2026-09-18T12:00:00Z"
 assert "PR 633" in wait["reason"] and "30 hours" in wait["reason"]
 assert all(row.get("comment_id") and row.get("notified_at") for row in entries.values())
 board = [json.loads(line) for line in open(os.environ["BOARD_LOG"])]
+assert len([row for row in board if row[:2] == ["task", "create"]]) == 1
+create = next(row for row in board if row[:2] == ["task", "create"])
+assert create[create.index("--project") + 1] == "5500"
+assert "PR #633" in create[create.index("--title") + 1]
 assert len([row for row in board if row[:2] == ["comment", "add"]]) == 4
 assert not [row for row in board if row[:2] == ["comment", "update"]]
 notifications = Path(os.environ["NOTIFIER_LOG"]).read_text().splitlines()

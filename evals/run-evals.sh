@@ -312,6 +312,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/agent-template-update.test.sh" ]; then
   echo "-- agent-template update behavioural checks --"
   bash "$HERE/agent-template-update.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/release-policy.test.sh" ]; then
+  echo ""
+  echo "-- merge-time release policy checks --"
+  bash "$HERE/release-policy.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/qa-sections.test.sh" ]; then
   echo ""
   echo "-- QA section behavioural checks --"

@@ -240,6 +240,8 @@ prompt="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["pr
 if [ "$build" = "build started: $build_id" ] \
    && grep -q 'STANDARD BUILD GUARDRAILS' "$prompt" \
    && grep -q 'Summary for non-engineers' "$prompt" \
+   && grep -q 'gh pr merge --auto --squash' "$prompt" \
+   && grep -q 'never edit VERSION or CHANGELOG.md' "$prompt" \
    && grep -q 'change one file' "$prompt" \
    && grep -q -- '--provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session' "$TMP/hax.log" \
    && grep -q -- '-p MemoryMax=7G --setenv=PATH=' "$TMP/systemd-run.log" \
@@ -420,6 +422,24 @@ if grep -q '^Environment=AGENT_SLUG=%i$' "$units/agent-board-poll@.service" \
   ok build-reconcile-precedes-tick "the timer service checks failed units before polling"
 else
   bad build-reconcile-precedes-tick "unit=$(cat "$units/agent-board-poll@.service")"
+fi
+
+fixture="$ROOT/evals/fixtures/maintainer-actions/execute-in-run.json"
+if python3 - "$fixture" "$ROOT/scripts/agent-board-poll" <<'PYEOF'
+import json, sys
+fixture = json.load(open(sys.argv[1], encoding="utf-8"))
+prompt = open(sys.argv[2], encoding="utf-8").read()
+assert "A request to merge, release, update, or build is yours to execute in this run." in prompt
+for command in fixture["required_commands"]:
+    assert command in prompt
+for outcome in fixture["forbidden_outcomes"]:
+    assert outcome in prompt
+assert len(fixture["instructions"]) == 4
+PYEOF
+then
+  ok maintainer-executes-action-fixture "merge, release, update, and build stay with the maintainer run"
+else
+  bad maintainer-executes-action-fixture "maintainer execution contract did not satisfy the fixture"
 fi
 
 if grep -q $'who=maintainer\twhat=build --repo allowed' "$STATE_DIR/agent-board-poll/manager-actions.log" \

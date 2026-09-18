@@ -102,6 +102,8 @@ else
 fi
 
 # Stable is the default and selects only the stable tag.
+mkdir -p "$TEMPLATE/evals/__pycache__"
+printf 'stale cache\n' > "$TEMPLATE/evals/__pycache__/case.pyc"
 : > "$TMP/git.log"
 set +e
 run_update >"$TMP/stable.out" 2>"$TMP/stable.err"
@@ -114,6 +116,8 @@ if [ "$status" -eq 0 ] \
    && grep -q '^WATCH_SECTIONS="AI Review,QA"$' "$CONF_DIR/current-qa.conf" \
    && compgen -G "$CONF_DIR/current-qa.conf.bak-*" >/dev/null \
    && grep -q 'ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-agents/product-bot.conf`\.' "$TMP/stable.out" \
+   && grep -q 'cache cleaned: templates/agent-skills/create-agent/evals/__pycache__' "$TMP/stable.out" \
+   && [ ! -e "$TEMPLATE/evals/__pycache__" ] \
    && grep -q 'checkout --detach stable' "$TMP/git.log" \
    && ! grep -q 'checkout --detach origin/main' "$TMP/git.log"; then
   ok stable-host-stays-on-tag "stable update checks out stable, prints the host action, and never follows main"
@@ -135,7 +139,7 @@ else
   bad red-evals-refuse-swap "status=$status installed=$([ -e "$TMP/installed" ] && echo yes || echo no) output=$(cat "$TMP/red.out")"
 fi
 
-# A changed installed file is archived and blocks the swap by default.
+# A changed installed file is archived, installed, and reapplied automatically.
 INSTALLED="$TMP/installed-template"
 mkdir -p "$INSTALLED/scripts"
 printf 'old-version\n' > "$INSTALLED/VERSION"
@@ -147,12 +151,13 @@ set +e
 AGENT_TEMPLATE_INSTALL_DIR="$INSTALLED" run_update >"$TMP/patch.out" 2>"$TMP/patch.err"
 status=$?
 set -e
-if [ "$status" -eq 0 ] && [ ! -e "$TMP/installed" ] \
+if [ "$status" -eq 0 ] && [ -e "$TMP/installed" ] \
    && grep -q '^host edit$' "$INSTALLED/local-patches/old-version/scripts/custom" \
-   && grep -q 'update refused: local changes would be replaced' "$TMP/patch.out"; then
-  ok local-patch-refuses-swap "host edit is archived and the swap is refused"
+   && grep -q '^host edit$' "$INSTALLED/scripts/custom" \
+   && grep -q 'local patch reapplied: scripts/custom' "$TMP/patch.out"; then
+  ok local-patch-reapplied "host edit is archived, reported, and restored after install"
 else
-  bad local-patch-refuses-swap "status=$status output=$(cat "$TMP/patch.out")"
+  bad local-patch-reapplied "status=$status output=$(cat "$TMP/patch.out")"
 fi
 
 # A host edit already present byte-for-byte upstream is no longer a conflict.

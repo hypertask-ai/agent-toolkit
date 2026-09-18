@@ -46,11 +46,10 @@ red`, logs that line, exits successfully, and leaves the old version installed.
 ## Local patches
 
 Every install writes `.manifest.sha256`. On update, a changed installed file is
-copied to `~/.claude/skills/create-agent/local-patches/<installed-version>/<path>`
-and listed. The swap then refuses by default. File the change as feedback with
-`agent-template feedback`, move the source-of-truth fix into the repository, and
-use `--keep-local-patches` only when the archived copy is intentional and the
-release should proceed.
+copied to `~/.claude/skills/create-agent/local-patches/<installed-version>/<path>`,
+listed, and reapplied after the release installs. Untracked Python and pytest
+cache artifacts are removed before staging. File the change as feedback with
+`agent-template feedback` so the source-of-truth fix can move into the repository.
 
 ## Mentions
 
