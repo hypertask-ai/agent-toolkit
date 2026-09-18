@@ -577,7 +577,7 @@ PYEOF
   exit "$rc"
 }
 
-# post_ticket_comment <ticket-ref-or-url> <text|file> <payload>
+# post_ticket_comment <ticket-ref-or-url> <text|file|raw-file> <payload>
 # Completion comments get two total attempts. A caller closes its durable state
 # after failure so a later tick cannot silently turn that cap into an endless retry.
 post_ticket_comment() {
@@ -599,6 +599,13 @@ post_ticket_comment() {
       else
         rc=$?
       fi
+    elif [ "$mode" = "raw-file" ]; then
+      if AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$ref" --raw --file "$payload" >>"$LOG" 2>"$err_file"; then
+        rm -f "$err_file"
+        return 0
+      else
+        rc=$?
+      fi
     else
       if "$BOARD_CLI" comment add "$ref" --text "$payload" >>"$LOG" 2>"$err_file"; then
         rm -f "$err_file"
@@ -611,6 +618,8 @@ post_ticket_comment() {
       printf '%s comment add failed: attempt=%s command=' "$(date -Is)" "$attempt"
       if [ "$mode" = "file" ]; then
         printf '%q ' AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$ref" --file "$payload"
+      elif [ "$mode" = "raw-file" ]; then
+        printf '%q ' AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$ref" --raw --file "$payload"
       else
         printf '%q ' "$BOARD_CLI" comment add "$ref" --text "$payload"
       fi
@@ -2322,18 +2331,83 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
     RUN_MODEL_RUNG="reply-codex-sol-high"
     RUN_MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session --bare -p"
     REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.html"
+    ORIGINAL_REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.original.html"
+    RETRY_REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.retry.html"
+    RETRY_ERR_FILE="$STATE_DIR/$SLUG-$ref.reply.retry.err"
+    FALLBACK_REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.fallback.html"
+    LINKED_FALLBACK_FILE="$STATE_DIR/$SLUG-$ref.reply.fallback-linked.html"
+    rm -f "$ORIGINAL_REPLY_FILE" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE" \
+      "$FALLBACK_REPLY_FILE" "$LINKED_FALLBACK_FILE"
+    reply_posted=no
+    shape_reason=""
     log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI; read-only bwrap, 300s)"
     run_reply_model "$PROMPT" "${RUN_DIR:-$AGENT_REPO}" "$REPLY_FILE" "$ERRFILE"
     rc=$?
-    if [ "$rc" -eq 0 ] && [ ! -s "$REPLY_FILE" ]; then
-      printf 'reply model returned an empty answer\n' >> "$ERRFILE"
-      rc=65
-    fi
-    if [ "$rc" -eq 0 ] && ! python3 "$PLAIN_LANGUAGE_CHECK" < "$REPLY_FILE" 2>> "$ERRFILE"; then
-      printf 'reply held unchanged because it failed the outbound shape check\n' >> "$ERRFILE"
-      rc=65
-    fi
     if [ "$rc" -eq 0 ]; then
+      cp "$REPLY_FILE" "$ORIGINAL_REPLY_FILE"
+      if [ ! -s "$ORIGINAL_REPLY_FILE" ]; then
+        shape_reason="reply is empty"
+      elif shape_reason="$(python3 "$PLAIN_LANGUAGE_CHECK" < "$ORIGINAL_REPLY_FILE" 2>&1)"; then
+        shape_reason=""
+      fi
+    fi
+    if [ "$rc" -eq 0 ] && [ -n "$shape_reason" ]; then
+      {
+        printf 'reply failed the outbound shape check: %s\n' "$shape_reason"
+        printf 'retrying once with the shape rules and original draft\n'
+      } >> "$ERRFILE"
+      RETRY_PROMPT="$PROMPT
+
+SHAPE-CHECK RETRY:
+The first draft did not pass: $shape_reason
+Return a non-empty HTML comment. Its first block must be <p>, its complete first sentence must be inside <strong>, and it must stay at or below 80 words. Do not use paths, function calls, code spans, commit hashes, or em dashes. Put every ticket or pull request reference inside a full HTTPS link. The last block must end with a question mark or start with Next:.
+
+Original draft, which must keep its meaning:
+$(cat "$ORIGINAL_REPLY_FILE")"
+      run_reply_model "$RETRY_PROMPT" "${RUN_DIR:-$AGENT_REPO}" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE"
+      retry_rc=$?
+      retry_reason=""
+      if [ "$retry_rc" -ne 0 ]; then
+        retry_reason="reply retry exited $retry_rc"
+      elif [ ! -s "$RETRY_REPLY_FILE" ]; then
+        retry_reason="reply retry is empty"
+      elif retry_reason="$(python3 "$PLAIN_LANGUAGE_CHECK" < "$RETRY_REPLY_FILE" 2>&1)"; then
+        retry_reason=""
+      fi
+      if [ -z "$retry_reason" ]; then
+        cp "$RETRY_REPLY_FILE" "$REPLY_FILE"
+        log "reply retry for $ref passed the outbound shape check"
+      else
+        {
+          cat "$RETRY_ERR_FILE" 2>/dev/null || true
+          printf 'reply retry failed the outbound shape check: %s\n' "$retry_reason"
+          printf 'posting the original draft with the shape check skipped\n'
+        } >> "$ERRFILE"
+        {
+          printf '<p><strong>Answer:</strong></p>\n'
+          if [ -s "$ORIGINAL_REPLY_FILE" ]; then
+            cat "$ORIGINAL_REPLY_FILE"
+            printf '\n'
+          else
+            printf '<p>I could not produce an answer after one retry.</p>\n'
+          fi
+          printf '<p>Check skipped: the reply did not pass the outbound shape check after one retry.</p>\n'
+        } > "$FALLBACK_REPLY_FILE"
+        if ! python3 "$TICKET_LINK_FORMATTER" --mode html --token-file "$TOKEN_FILE" \
+          < "$FALLBACK_REPLY_FILE" > "$LINKED_FALLBACK_FILE" 2>> "$ERRFILE"; then
+          cp "$FALLBACK_REPLY_FILE" "$LINKED_FALLBACK_FILE"
+        fi
+        if (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; \
+          post_ticket_comment "$ref" raw-file "$LINKED_FALLBACK_FILE"); then
+          reply_posted=yes
+          rc=0
+        else
+          printf 'failed-check fallback could not be posted\n' >> "$ERRFILE"
+          rc=74
+        fi
+      fi
+    fi
+    if [ "$rc" -eq 0 ] && [ "$reply_posted" = "no" ]; then
       cat "$REPLY_FILE" >> "$LOG"
       printf '\n' >> "$LOG"
       if ! (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; post_ticket_comment "$ref" file "$REPLY_FILE"); then
