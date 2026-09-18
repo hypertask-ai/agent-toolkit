@@ -1,0 +1,1 @@
+{"at":"2026-09-18T10:35:00Z","score":95,"band":"amber","top_column":"runner","top_count":1,"line":"One runner needs attention.","violations":[{"what":"tk-dev-1","url":"https://hypertask.app/agents/tk-dev-1","why":"last run is overdue","column":"runner"}]}

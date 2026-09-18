@@ -390,6 +390,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/fleet-progress.test.sh" ]; then
   echo "-- fleet progress and stall checks --"
   bash "$HERE/fleet-progress.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/agent-status.test.sh" ]; then
+  echo ""
+  echo "-- Agents page status snapshot checks --"
+  bash "$HERE/agent-status.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/learned-rules.test.sh" ]; then
   echo ""
   echo "-- learned-rules behavioural checks --"

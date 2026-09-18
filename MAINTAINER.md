@@ -450,6 +450,37 @@ next tick; the acknowledgement stays visible either way.
 
 ## Agent page
 
+`agent-status.timer` runs every 60 seconds and publishes the owner-facing
+Agents page independently of any retired factory loop. It reads every valid
+conf under `~/.config/hypertask-agents`, the runner locks and logs under
+`~/.local/state/agent-board-poll`, and supervisor violations from
+`~/.local/state/ht-supervisor/health.json`. It never calls a model or writes to
+the board.
+
+Each collection atomically writes `factory-status.json`, `agent-feed.json`, and
+`agent-status-metrics.json` beside the runner state. The factory document uses
+schema version 1 and is uploaded through `/api/factory-status?project=hypertask`,
+which stores `ops/factory-status/hypertask.json`. The page KPI document goes to
+`/api/agent-feed`. Both uploads load the Cloudflare Access headers from the
+mode-0600 `~/.config/hypertask-app/credentials.env` and the route's dedicated
+bearer from `~/.config/hypertask-agent-runtime.env`; errors never print a
+credential or response body.
+
+Current work comes from `<slug>.lock`, including the numeric ticket identity
+written by new runner versions. Execution falls back to structured run lines in
+`<slug>.log`. Supervisor violations become unresolved public incidents without
+copying free-form logs. First-pass rate treats the first QA result in seven days
+as authoritative, with `Done` passing and `Handoff` returned. Cost per live
+ticket is each model provider's share of observed run duration divided by live
+QA outcomes, so the dashboard reports a measured percentage without inventing
+dollar prices for subscription models.
+
+Check `systemctl --user status agent-status.timer` and
+`journalctl --user -u agent-status.service`. Run `agent-status collect` to print
+the factory document without credentials or network access. A failed upload
+leaves all three local snapshots available for diagnosis and retries next
+minute.
+
 The same host daemon has a second loop that publishes every valid conf's
 runtime snapshot every 30 seconds, whether chat is on or off. The Operations
 block at `https://app.hypertask.ai/agents/<slug>` then shows runtime, model,
