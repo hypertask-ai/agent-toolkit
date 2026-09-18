@@ -14,7 +14,7 @@ HOME_DIR="$TMP/home"
 CONF_DIR="$HOME_DIR/.config/hypertask-agents"
 HOST_CONFIG="$HOME_DIR/.config/agent-template/config"
 FAKE_REPO="$TMP/repo"
-TEMPLATE="$FAKE_REPO/templates/agent-skills/create-agent"
+TEMPLATE="$FAKE_REPO"
 mkdir -p "$CONF_DIR" "$TEMPLATE/scripts" "$TEMPLATE/evals" "$TMP/bin" "$TMP/units" "$TMP/state"
 printf 'test-version\n' > "$TEMPLATE/VERSION"
 printf '%s\n' '- ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-agents/product-bot.conf`.' > "$TEMPLATE/CHANGELOG.md"
@@ -50,7 +50,7 @@ printf '%s\n' "$*" >> "$GIT_LOG"
 case "$*" in
   *"rev-parse --short HEAD"*) echo deadbee ;;
   *"rev-parse HEAD"*) echo deadbeefdeadbeefdeadbeefdeadbeefdeadbeef ;;
-  *"show stable:templates/agent-skills/create-agent/VERSION"*) echo stable-version ;;
+  *"show stable:VERSION"*) echo stable-version ;;
 esac
 exit 0
 EOF
@@ -116,7 +116,7 @@ if [ "$status" -eq 0 ] \
    && grep -q '^WATCH_SECTIONS="AI Review,QA"$' "$CONF_DIR/current-qa.conf" \
    && compgen -G "$CONF_DIR/current-qa.conf.bak-*" >/dev/null \
    && grep -q 'ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-agents/product-bot.conf`\.' "$TMP/stable.out" \
-   && grep -q 'cache cleaned: templates/agent-skills/create-agent/evals/__pycache__' "$TMP/stable.out" \
+   && grep -q 'cache cleaned: evals/__pycache__' "$TMP/stable.out" \
    && [ ! -e "$TEMPLATE/evals/__pycache__" ] \
    && grep -q 'checkout --detach stable' "$TMP/git.log" \
    && ! grep -q 'checkout --detach origin/main' "$TMP/git.log"; then

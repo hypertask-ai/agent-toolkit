@@ -15,11 +15,11 @@ flag. This file is the conversation; the scripts are the mechanism.
 
 ## Where this comes from
 
-The canonical copy lives in the `vstack` repo under
-`templates/agent-skills/create-agent/`. What sits in `~/.claude/skills` and
-`~/.local/bin` on any machine is an installed copy, put there by that folder's
-`install.sh`. Fix bugs in the repo and re-run `install.sh`, never the other way
-round.
+The canonical copy lives at the root of
+`https://github.com/hypertask-ai/agent-toolkit`. What sits in `~/.claude/skills`
+and `~/.local/bin` on any machine is an installed copy, put there by the
+repository's `install.sh`. Fix bugs in the repo and re-run `install.sh`, never
+the other way round.
 
 ## Channels
 

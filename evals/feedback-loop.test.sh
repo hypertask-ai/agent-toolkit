@@ -64,8 +64,8 @@ else
 fi
 
 TRIAGE_REPO="$TMP/triage-repo"
-mkdir -p "$TRIAGE_REPO/.git" "$TRIAGE_REPO/templates/agent-skills/create-agent"
-printf '# No releases yet\n' > "$TRIAGE_REPO/templates/agent-skills/create-agent/CHANGELOG.md"
+mkdir -p "$TRIAGE_REPO/.git"
+printf '# No releases yet\n' > "$TRIAGE_REPO/CHANGELOG.md"
 cat > "$TMP/triage-board" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TRIAGE_CALLS"

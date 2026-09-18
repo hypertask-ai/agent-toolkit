@@ -496,9 +496,9 @@ EOF
   SOURCE_REPO="$(git -C "$SRC" rev-parse --show-toplevel 2>/dev/null || true)"
   SOURCE_REMOTE="$(git -C "$SOURCE_REPO" remote get-url origin 2>/dev/null || true)"
   case "$SOURCE_REMOTE" in
-    *github.com[:/]valentinyeo/vstack|*github.com[:/]valentinyeo/vstack.git)
+    *github.com[:/]hypertask-ai/agent-toolkit|*github.com[:/]hypertask-ai/agent-toolkit.git)
       if command -v gh >/dev/null 2>&1 && [ -x "$BIN/htbot" ]; then
-        permission="$(gh repo view valentinyeo/vstack --json viewerPermission --jq .viewerPermission 2>/dev/null || true)"
+        permission="$(gh repo view hypertask-ai/agent-toolkit --json viewerPermission --jq .viewerPermission 2>/dev/null || true)"
         case "$permission" in ADMIN|MAINTAIN|WRITE) FEEDBACK_MAINTAINER=yes ;; esac
       fi
       ;;
@@ -556,7 +556,7 @@ EOF
     systemctl --user enable --now agent-template-feedback.timer
     echo "feedback timer: agent-template-feedback.timer, every 4 hours ($(systemctl --user list-timers agent-template-feedback.timer --no-pager 2>/dev/null | sed -n '2p'))"
   else
-    echo "feedback timer: skipped (this is not a writable vstack maintainer checkout with the bot wrapper)"
+    echo "feedback timer: skipped (this is not a writable agent-toolkit maintainer checkout with the bot wrapper)"
   fi
   echo "poll units: $SYSTEMD_USER_DIR/agent-board-poll@.service + .timer (refreshed, daemon-reload done)"
   echo "chat service: agent-chat.service (enabled and restarted)"

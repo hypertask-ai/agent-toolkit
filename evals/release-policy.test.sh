@@ -20,8 +20,8 @@ PYEOF
 )"
   [ -n "$base_sha" ] || base_sha="origin/$GITHUB_BASE_REF"
   protected="$(git diff --name-only "$base_sha"...HEAD -- \
-    templates/agent-skills/create-agent/VERSION \
-    templates/agent-skills/create-agent/CHANGELOG.md)"
+    VERSION \
+    CHANGELOG.md)"
   if [ -n "$protected" ]; then
     printf 'FAIL release-files-merge-only PRs must add changelog.d fragments, not edit:\n%s\n' "$protected"
     exit 1

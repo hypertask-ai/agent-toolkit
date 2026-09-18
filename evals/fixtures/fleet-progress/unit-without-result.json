@@ -10,7 +10,7 @@
   "eligible_work": {"count": 0, "since": null, "ticket": null, "ticket_url": null},
   "repeated_attempt": null,
   "units": [
-    {"kind": "build", "id": "vstack-37", "unit": "codex-vstack-37", "ticket": "https://app.hypertask.ai/detail/project-5500/37", "status": "ended-without-result", "ended_at": "2026-09-18T11:00:00Z", "produced_result": false},
+    {"kind": "build", "id": "agent-toolkit-37", "unit": "codex-agent-toolkit-37", "ticket": "https://app.hypertask.ai/detail/project-5500/37", "status": "ended-without-result", "ended_at": "2026-09-18T11:00:00Z", "produced_result": false},
     {"kind": "instruction", "id": "advisor-ok", "unit": "advisor-product-ok", "ticket": null, "status": "completed", "ended_at": "2026-09-18T11:30:00Z", "produced_result": true}
   ],
   "stall": null,
