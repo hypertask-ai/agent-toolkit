@@ -236,9 +236,15 @@ Direct human questions use the fixed high-effort Codex Sol reply route instead
 of the conf provider. Its five-minute bubblewrap sandbox gets the full thread,
 shared Valentin statement record, exact terminal rules, read-only checkout and
 logs, read-only web research, image access, and writable `/tmp`, but no board
-token. The runner validates and posts the returned HTML after the sandbox
-exits. These reply-only runs default to `Answer:`, with a final
-`Decision needed:` question only when the owner genuinely needs to choose.
+token. Before drafting, the model must write a private state sheet from the
+description and every ticket comment. The selected ticket's full-thread read
+is separate from the capped owned-ticket scan. The sheet records pull request
+states verified with `gh`, the latest QA verdict and date, and relevant
+configuration that exists or is missing. Newer verified facts win conflicts,
+and the answer names superseded older comments. The runner validates and posts
+the returned HTML after the sandbox exits. These reply-only runs default to
+`Answer:`, with a final `Decision needed:` question only when the owner
+genuinely needs to choose.
 
 At ticket-run start the adapter posts `{taskId, source: "runtime"}` to
 `/api/mcp/agents/runs`. Claimed, started, PR opened, red check, fix pushed,

@@ -144,9 +144,15 @@ before answering. Replies always use Codex GPT-5.6 Sol at high effort through
 five-minute limit. Bubblewrap exposes the repository and logs
 read-only, permits writes only under `/tmp`, and does not mount the board token.
 The model returns HTML; the runner checks its shape and posts it afterward.
-Reply-only runs default to `Answer:` and never use `Decision:` merely to frame
-an answer. When a choice is genuinely required, the reply may end with a
-`Decision needed:` line that asks the owner what to choose.
+Its mandatory first step is a private state sheet built from the description
+and every ticket comment; the selected ticket's full-thread read is separate
+from the capped owned-ticket scan. The sheet records current pull request
+states verified with `gh`, the latest dated QA verdict, and relevant
+configuration that exists or is missing. Newer verified facts win conflicts,
+and the answer identifies superseded older comments. Reply-only runs default
+to `Answer:` and never use `Decision:` merely to frame an answer. When a choice
+is genuinely required, the reply may end with a `Decision needed:` line that
+asks the owner what to choose.
 
 ## The three wiring modes
 

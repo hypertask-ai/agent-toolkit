@@ -43,7 +43,12 @@ exit 0
 EOF
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-printf '[]\n'
+[ -z "${GH_CAPTURE:-}" ] || printf '%s\n' "$*" >> "$GH_CAPTURE"
+if [ "${GH_PR_FIXTURE:-}" = "merged-812" ] && [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  printf '{"state":"MERGED","mergedAt":"2026-09-16T14:00:00Z","url":"https://github.com/example/repo/pull/812"}\n'
+else
+  printf '[]\n'
+fi
 EOF
 cat > "$TMP/bin/hax-stub" <<'EOF'
 #!/usr/bin/env bash
@@ -76,7 +81,14 @@ cat > "$TMP/bin/curl" <<'EOF'
 url="${!#}"
 case "$url" in
   *'/mcp/tasks?'*) cat "$TASKS_JSON"; printf '\n200' ;;
-  *'/mcp/comments?'*) cat "$COMMENTS_JSON"; printf '\n200' ;;
+  *'/mcp/comments?'*)
+    if [[ "$url" = *'limit='* ]] && [ -n "${COMMENTS_CAPPED_JSON:-}" ]; then
+      cat "$COMMENTS_CAPPED_JSON"
+    else
+      cat "$COMMENTS_JSON"
+    fi
+    printf '\n200'
+    ;;
   *) printf '%s\n200' '{}' ;;
 esac
 EOF
@@ -220,6 +232,72 @@ if file "$ROOT/evals/fixtures/htpr-3533-redirect-uri-mismatch.png" | grep -qF 'P
   ok screenshot-redirect-fix 'HTPR-3533 image evidence produces the Google authorized redirect-address fix'
 else
   bad screenshot-redirect-fix "prompt=$(cat "$TMP/htpr-3533.prompt" 2>/dev/null) post=$(cat "$TMP/htpr-3533.post" 2>/dev/null)"
+fi
+
+python3 - "$ROOT/evals/fixtures/htpr-4370-state.json" \
+  "$TMP/tasks.json" "$TMP/comments.json" "$TMP/comments-capped.json" <<'PYEOF'
+import json
+import sys
+
+fixture = json.load(open(sys.argv[1], encoding="utf-8"))
+with open(sys.argv[2], "w", encoding="utf-8") as handle:
+    json.dump({"tasks": [fixture["task"]]}, handle)
+with open(sys.argv[3], "w", encoding="utf-8") as handle:
+    json.dump({"comments": fixture["comments"]}, handle)
+with open(sys.argv[4], "w", encoding="utf-8") as handle:
+    json.dump({"comments": fixture["comments"][-40:]}, handle)
+PYEOF
+mkdir -p "$TMP/repo/config"
+printf '{"slackAppId": null, "connectEnabled": false}\n' > "$TMP/repo/config/integrations.json"
+sed -i 's/BOARD_ID="15"/BOARD_ID="1"/' "$TMP/home/.config/agents/test.conf"
+rm -f "$TMP/state/agent-board-poll/test.seen" "$TMP/state/agent-board-poll/test.ticket-runs"
+cat > "$TMP/bin/hax-stub" <<'EOF'
+#!/usr/bin/env bash
+prompt="${!#}"
+printf '%s' "$prompt" > "$PROMPT_CAPTURE"
+printf '%s' "$prompt" | grep -qF '/tmp/reply-state.md'
+printf '%s' "$prompt" | grep -qF 'answered ticket is exempt from comment read caps'
+printf '%s' "$prompt" | grep -qF 'current state verified with `gh`'
+printf '%s' "$prompt" | grep -qF 'latest QA verdict and its date'
+printf '%s' "$prompt" | grep -qF 'configuration that is present or missing'
+printf '%s' "$prompt" | grep -qF 'Connect is available now. Tap Connect'
+printf '%s' "$prompt" | grep -qF 'Connect is greyed out and no Slack app exists'
+gh pr view 812 --repo example/repo --json state,mergedAt,url | grep -qF '"state":"MERGED"'
+grep -qF '"slackAppId": null' "$CONFIG_FIXTURE"
+cat > /tmp/reply-state.md <<'STATE'
+PR 812: merged 16 September 2026
+Latest QA, 17 September 2026: Connect greyed out; Slack app absent
+Configuration: slackAppId absent; Connect disabled
+Superseded: 15 September comments saying Connect was available
+STATE
+cp /tmp/reply-state.md "$STATE_SHEET_CAPTURE"
+rm -f /tmp/reply-state.md
+printf '<p><strong>Answer: Connect is greyed out, and the Slack app is missing.</strong></p><p>QA’s 17 September check supersedes the older comments that say to tap Connect.</p><p>Next: configure the Slack app and enable Connect.</p>\n'
+EOF
+chmod +x "$TMP/bin/hax-stub"
+: > "$TMP/gh-capture"
+PROMPT_CAPTURE="$TMP/htpr-4370.prompt" TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPTURE="$TMP/bwrap" \
+  BOARD_POST_CAPTURE="$TMP/htpr-4370.post" STATE_SHEET_CAPTURE="$TMP/htpr-4370.state" \
+  CONFIG_FIXTURE="$TMP/repo/config/integrations.json" GH_CAPTURE="$TMP/gh-capture" GH_PR_FIXTURE=merged-812 \
+  OWNED_COMMENT_READ_CEILING=40 COMMENTS_CAPPED_JSON="$TMP/comments-capped.json" \
+  REPLY_HAX_BIN="$TMP/bin/hax-stub" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
+  REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
+  TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
+  PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test >/dev/null
+if ! grep -qF '4370001' "$TMP/comments-capped.json" \
+   && grep -qF '"id": 4370001' "$TMP/htpr-4370.prompt" \
+   && grep -qF '"id": 4370043' "$TMP/htpr-4370.prompt" \
+   && grep -qF 'pr view 812 --repo example/repo --json state,mergedAt,url' "$TMP/gh-capture" \
+   && grep -qF 'Latest QA, 17 September 2026' "$TMP/htpr-4370.state" \
+   && grep -qF 'Superseded: 15 September comments' "$TMP/htpr-4370.state" \
+   && grep -qF 'Connect is greyed out' "$TMP/htpr-4370.post" \
+   && grep -qF 'Slack app is missing' "$TMP/htpr-4370.post" \
+   && grep -qF 'supersedes the older comments' "$TMP/htpr-4370.post"; then
+  ok htpr-4370-verified-state 'full uncapped thread, PR, QA, and config state override the stale Connect advice'
+else
+  bad htpr-4370-verified-state "prompt=$(cat "$TMP/htpr-4370.prompt" 2>/dev/null) state=$(cat "$TMP/htpr-4370.state" 2>/dev/null) post=$(cat "$TMP/htpr-4370.post" 2>/dev/null)"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

@@ -1,0 +1,536 @@
+{
+  "task": {
+    "id": "task-4370",
+    "ticketNumber": "HTPR-4370",
+    "section": "Done",
+    "title": "Connect Slack workspace",
+    "description": "<p>Set up Slack using <a href=\"https://github.com/example/repo/pull/812\">PR 812</a>.</p>",
+    "assignees": [
+      {
+        "agent": {
+          "id": "agent-1",
+          "displayName": "Test Bot"
+        }
+      }
+    ],
+    "labels": [],
+    "commentCount": 43,
+    "updatedAt": "2026-09-17T17:26:00Z"
+  },
+  "comments": [
+    {
+      "id": 4370001,
+      "createdAt": "2026-09-15T09:00:00Z",
+      "agent": {
+        "id": "agent-1",
+        "displayName": "Test Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Connect is available now. Tap Connect to finish Slack setup.</p>"
+    },
+    {
+      "id": 4370002,
+      "createdAt": "2026-09-15T10:00:00Z",
+      "agent": {
+        "id": "agent-1",
+        "displayName": "Test Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Done: Shipped in <a href=\"https://github.com/example/repo/pull/812\">PR 812</a>.</p>"
+    },
+    {
+      "id": 4370003,
+      "createdAt": "2026-09-16T00:00:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 3: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370004,
+      "createdAt": "2026-09-16T00:01:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 4: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370005,
+      "createdAt": "2026-09-16T00:02:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 5: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370006,
+      "createdAt": "2026-09-16T00:03:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 6: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370007,
+      "createdAt": "2026-09-16T00:04:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 7: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370008,
+      "createdAt": "2026-09-16T00:05:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 8: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370009,
+      "createdAt": "2026-09-16T00:06:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 9: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370010,
+      "createdAt": "2026-09-16T00:07:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 10: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370011,
+      "createdAt": "2026-09-16T00:08:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 11: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370012,
+      "createdAt": "2026-09-16T00:09:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 12: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370013,
+      "createdAt": "2026-09-16T00:10:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 13: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370014,
+      "createdAt": "2026-09-16T00:11:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 14: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370015,
+      "createdAt": "2026-09-16T00:12:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 15: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370016,
+      "createdAt": "2026-09-16T00:13:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 16: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370017,
+      "createdAt": "2026-09-16T00:14:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 17: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370018,
+      "createdAt": "2026-09-16T00:15:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 18: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370019,
+      "createdAt": "2026-09-16T00:16:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 19: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370020,
+      "createdAt": "2026-09-16T00:17:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 20: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370021,
+      "createdAt": "2026-09-16T00:18:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 21: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370022,
+      "createdAt": "2026-09-16T00:19:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 22: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370023,
+      "createdAt": "2026-09-16T00:20:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 23: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370024,
+      "createdAt": "2026-09-16T00:21:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 24: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370025,
+      "createdAt": "2026-09-16T00:22:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 25: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370026,
+      "createdAt": "2026-09-16T00:23:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 26: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370027,
+      "createdAt": "2026-09-16T00:24:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 27: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370028,
+      "createdAt": "2026-09-16T00:25:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 28: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370029,
+      "createdAt": "2026-09-16T00:26:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 29: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370030,
+      "createdAt": "2026-09-16T00:27:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 30: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370031,
+      "createdAt": "2026-09-16T00:28:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 31: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370032,
+      "createdAt": "2026-09-16T00:29:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 32: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370033,
+      "createdAt": "2026-09-16T00:30:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 33: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370034,
+      "createdAt": "2026-09-16T00:31:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 34: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370035,
+      "createdAt": "2026-09-16T00:32:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 35: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370036,
+      "createdAt": "2026-09-16T00:33:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 36: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370037,
+      "createdAt": "2026-09-16T00:34:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 37: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370038,
+      "createdAt": "2026-09-16T00:35:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 38: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370039,
+      "createdAt": "2026-09-16T00:36:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 39: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370040,
+      "createdAt": "2026-09-16T00:37:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 40: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370041,
+      "createdAt": "2026-09-16T00:38:00Z",
+      "agent": {
+        "id": "agent-2",
+        "displayName": "Build Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>Run activity 41: deployment observation recorded.</p>"
+    },
+    {
+      "id": 4370042,
+      "createdAt": "2026-09-17T16:55:00Z",
+      "agent": {
+        "id": "qa-1",
+        "displayName": "QA Bot"
+      },
+      "creator": {
+        "displayName": "Valentin"
+      },
+      "text": "<p>QA fail, 17 September 2026: Connect is greyed out and no Slack app exists in configuration.</p>"
+    },
+    {
+      "id": 4370043,
+      "createdAt": "2026-09-17T17:26:00Z",
+      "agent": null,
+      "creator": {
+        "id": 6,
+        "displayName": "Valentin"
+      },
+      "text": "<p><span data-label=\"agent-agent-1\">Test Bot</span>, how do I connect Slack?</p>"
+    }
+  ]
+}

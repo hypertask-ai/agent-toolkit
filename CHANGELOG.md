@@ -1,3 +1,15 @@
+## 3.41.0 - 2026-09-18
+
+- AGTE-21 makes owner-question replies verify a whole-ticket state sheet before writing.
+- The state sheet includes every comment, current pull request states, the
+  latest dated QA verdict, and relevant configuration; newer verified facts
+  supersede contradictory older comments.
+- The answered ticket's full-thread read remains outside the owned-comment scan
+  cap, with HTPR-4370 coverage for a greyed-out Connect control and missing
+  Slack app.
+- ACTION: run `agent-template update --keep-timers` so current agents receive
+  the evidence-first reply rule without changing timer state.
+
 ## 3.40.0 - 2026-09-18
 
 - AGTE-20 makes reply-only owner responses start with `Answer:` instead of `Decision:`.

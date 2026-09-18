@@ -88,6 +88,12 @@ Feedback board: https://app.hypertask.ai/detail/project-5500
 Updates: run `agent-template update` to get the latest.
 Owner-question replies start with `Answer:`, not `Decision:`. Add a final
 `Decision needed:` question only when the owner must choose something.
+Before drafting an owner-question reply, first write a private
+`/tmp/reply-state.md` from the full ticket description and every comment. The
+answered ticket is exempt from comment read caps. Record every related pull
+request's current state verified with `gh`, the latest QA verdict and its date,
+and relevant configuration that is present or missing. When comments conflict,
+use the newest verified fact and say which older comments it supersedes.
 <!-- agent-template:end -->
 
 This posts to the Agent Template Inbox as the bot's own identity, never in the
