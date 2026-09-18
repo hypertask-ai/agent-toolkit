@@ -115,6 +115,10 @@ case "$*" in
   'project show 15')
     printf '%s\n' '{"project":{"id":15,"ownerId":6}}' ;;
   task\ create*)
+    if [ "${BOARD_LABEL_WARNING:-no}" = "yes" ] && [[ "$*" == *' --labels '* ]]; then
+      printf '%s\n' 'LabelNotFound: adapter:hypertask'
+      exit 1
+    fi
     printf '%s\n' '{"task":{"ticketNumber":"AGTE-99","projectId":5500,"uniqueIndex":99}}' ;;
 esac
 EOF
@@ -315,7 +319,7 @@ done
 
 feedback="$(AGENT_SLUG=manager run_template feedback --as manager --kind bug --what 'Session feedback' \
   --got 'bad' --expected 'good')"
-if printf '%s' "$feedback" | grep -q '^filed AGTE-99 https://app.hypertask.ai/detail/project-5500/99$' \
+if printf '%s' "$feedback" | grep -qF 'Feedback filed: bug: Session feedback. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99' \
    && grep -q '^task create --project 5500 ' "$TMP/board.log"; then
   ok feedback-as-files "manager --as reads BOARD_CLI and files with the mock"
 else
@@ -342,7 +346,7 @@ fi
 
 feedback_cli="$(AGENT_SLUG= run_template feedback --board-cli "$TMP/bin/board" --kind bug \
   --what 'Direct session feedback' --got 'bad' --expected 'good')"
-if printf '%s' "$feedback_cli" | grep -q '^filed AGTE-99 https://app.hypertask.ai/detail/project-5500/99$'; then
+if printf '%s' "$feedback_cli" | grep -qF 'Feedback filed: bug: Direct session feedback. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99'; then
   ok feedback-board-cli-files "direct --board-cli remains available"
 else
   bad feedback-board-cli-files "output=$feedback_cli"
@@ -350,10 +354,19 @@ fi
 
 feedback_env="$(AGENT_SLUG= AGENT_BOARD_CLI="$TMP/bin/board" run_template feedback --kind bug \
   --what 'Runner session feedback' --got 'bad' --expected 'good')"
-if printf '%s' "$feedback_env" | grep -q '^filed AGTE-99 https://app.hypertask.ai/detail/project-5500/99$'; then
+if printf '%s' "$feedback_env" | grep -qF 'Feedback filed: bug: Runner session feedback. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99'; then
   ok feedback-env-cli-files "AGENT_BOARD_CLI infers the adapter and files"
 else
   bad feedback-env-cli-files "output=$feedback_env"
+fi
+
+feedback_retry="$(BOARD_LABEL_WARNING=yes AGENT_SLUG= run_template feedback \
+  --board-cli "$TMP/bin/board" --kind idea --what 'Clear retry result' \
+  --got 'labels unavailable' --expected 'show only the filed ticket' 2>&1)"
+if [ "$feedback_retry" = 'Feedback filed: idea: Clear retry result. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99' ]; then
+  ok feedback-label-retry-quiet "successful retry hides the internal label warning"
+else
+  bad feedback-label-retry-quiet "output=$feedback_retry"
 fi
 
 if grep -q $'who=regular\twhat=ctl stop worker' "$TMP/state/agent-board-poll/manager-actions.log" \

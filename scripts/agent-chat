@@ -712,7 +712,11 @@ def shape_command_reply(reply: str, message_text: str) -> str:
             return "The delegation could not be completed."
         return "The requested ticket runner action could not be completed."
 
-    filed = re.search(r"(?:^|\n)filed\s+([A-Z][A-Z0-9]*-\d+)\b", reply, re.IGNORECASE)
+    filed = re.search(
+        r"(?:^|\n)(?:filed\s+|Feedback filed:[^\n]*\bTicket:\s*)([A-Z][A-Z0-9]*-\d+)\b",
+        reply,
+        re.IGNORECASE,
+    )
     if filed:
         return f"Feedback was filed as {filed.group(1).upper()}."
 

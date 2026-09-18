@@ -80,6 +80,10 @@ if [ "$1 $2" = "pr view" ]; then
     printf '{"state":"OPEN","baseRefName":"production","mergedAt":null,"mergeCommit":null}\n'
     exit 0
   fi
+  if [ "$scenario" = "status-context" ]; then
+    cat "$PR_FIXTURE"
+    exit 0
+  fi
   checks='[{"name":"ci-tests","status":"IN_PROGRESS","conclusion":"","detailsUrl":"https://github.test/actions/runs/77/job/1"}]'
   reviews='[]'
   comments='[]'
@@ -182,8 +186,9 @@ run_gate() {
   opened="$TMP/home/.local/state/agent-board-poll/$slug.opened-prs"
   mkdir -p "$(dirname "$opened")"
   touch "$opened"
-  PR_TEST_SCENARIO="$scenario" PR_BRANCH_PREFIX="${4:-}" \
-    adapter_pr_gate "$TMP/token" 15 agent-1 "$name" "$slug" "$cache" \
+  PR_TEST_SCENARIO="$scenario" PR_FIXTURE="$ROOT/evals/fixtures/status-context-pr.json" \
+    PR_BRANCH_PREFIX="${4:-}" adapter_pr_gate \
+      "$TMP/token" 15 agent-1 "$name" "$slug" "$cache" \
       "$TMP/home/.config/hypertask-agents" "$opened"
 }
 
@@ -200,6 +205,21 @@ red="$(run_gate red)"
 [[ "$red" == *'CONCERNS: preserve the existing authorization check.'* ]]
 [[ "$red" == *'exact failed log line'* ]]
 echo 'PASS open red PR returns exact checks, review feedback, and logs'
+
+status_context="$(run_gate status-context)"
+STATUS_CONTEXT="$status_context" python3 - <<'PYEOF'
+import json
+import os
+
+result = json.loads(os.environ["STATUS_CONTEXT"])
+assert result["action"] == "fix"
+assert result["state"] == "red"
+assert result["pending"] == ["release-queue"]
+assert "app-smoke [FAILURE] https://ci.test/app-smoke" in result["feedback"]
+assert "deploy-health [ERROR] https://ci.test/deploy-health" in result["feedback"]
+assert "legacy-lint" not in result["feedback"]
+PYEOF
+echo 'PASS StatusContext success, failure, error, and pending states are classified'
 
 pending="$(run_gate pending)"
 [[ "$pending" == *'"action": "wait"'* && "$pending" == *'"state": "checks-pending"'* ]]

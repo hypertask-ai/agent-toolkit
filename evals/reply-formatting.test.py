@@ -43,7 +43,9 @@ print("PASS ticket-link-final-rewrite")
 module = runpy.run_path(str(root / "scripts" / "agent-chat"))
 finalize_chat_reply = module["finalize_chat_reply"]
 feedback = finalize_chat_reply(
-    "diagnostic output\nfiled AGTE-32 https://app.hypertask.ai/detail/project-5500/32\nmore output",
+    "label(s) bug not on this board's project: filing without a label\n"
+    "Feedback filed: bug: Link every reply. Ticket: AGTE-32 "
+    "https://app.hypertask.ai/detail/project-5500/32",
     "file a toolkit ticket",
     lookup,
 )
@@ -74,6 +76,7 @@ assert refused == (
     "[TEST-7 Fix mobile flow](https://app.hypertask.ai/detail/project-42/7) could not be delegated."
 )
 assert "raw command" not in feedback + delegated + controlled + refused
+assert "label(s)" not in feedback
 print("PASS command-result-one-sentence")
 
 assert remove_em_dashes("Ready — ship it.") == "Ready, ship it."

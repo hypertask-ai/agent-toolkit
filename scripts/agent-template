@@ -1898,11 +1898,7 @@ repeated: $REPEATED"
     TITLE="$(cat "$BODY_FILE.title")"
   else
     WRITER_RC=$?
-    if [ "$WRITER_RC" -eq 1 ]; then
-      printf 'Task Writer unavailable; using the original feedback ticket format.\n' >&2
-    else
-      exit "$WRITER_RC"
-    fi
+    [ "$WRITER_RC" -eq 1 ] || exit "$WRITER_RC"
   fi
 fi
 
@@ -2003,7 +1999,6 @@ if [ "$ADAPTER" != "hypertask" ] || [ -z "$BOARD_CLI" ] || [ ! -x "$BOARD_CLI" ]
   exit 0
 fi
 
-LABELS_USED="$LABELS"
 # The real board CLI (`hypertask task create`, checked against its own
 # `capabilities --json` catalog) has no --description-file option, only
 # --description <text>. The call used to send --description-file anyway,
@@ -2024,11 +2019,9 @@ fi
 # A label this board's project does not carry (board 2462 had none of
 # $LABELS) used to fail the whole post, which fell through to the
 # print-and-paste fallback and looked like "feedback never posts". The
-# ticket itself matters more than the label: retry once with no label and
-# say so in one line, instead of losing the post over it.
+# ticket itself matters more than the label: retry once with no label instead
+# of losing the post over a non-actionable board configuration detail.
 if [ "$STATUS" -ne 0 ] && printf '%s' "$OUT" | grep -qi "LabelNotFound"; then
-  echo "label(s) $LABELS_USED not on this board's project: filing without a label"
-  LABELS_USED=""
   if OUT="$("$BOARD_CLI" task create \
         --project "$FEEDBACK_BOARD_ID" \
         --section "$FEEDBACK_BOARD_SECTION" \
@@ -2061,9 +2054,13 @@ if index and project:
 else:
     print("filed: %s" % raw.strip()[:200])
 ')"
-  echo "$FILED_LINE"
   FILED_URL="$(printf '%s\n' "$FILED_LINE" | grep -oE 'https://\S+' | head -1)" || FILED_URL=""
   FILED_REF="$(printf '%s\n' "$FILED_LINE" | sed -n 's/^filed \([A-Z0-9]*-[0-9]*\) .*/\1/p')"
+  if [ -n "$FILED_REF" ] && [ -n "$FILED_URL" ]; then
+    printf 'Feedback filed: %s. Ticket: %s %s\n' "$TITLE" "$FILED_REF" "$FILED_URL"
+  else
+    echo "Feedback was filed, but the board did not return its ticket link."
+  fi
   log_feedback "$FILED_REF" "$BOARD_CLI"
   append_proposed_case "${FILED_URL:-$FEEDBACK_BOARD_URL}"
 else

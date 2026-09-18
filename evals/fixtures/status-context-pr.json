@@ -1,0 +1,45 @@
+{
+  "state": "OPEN",
+  "url": "https://github.test/pull/1",
+  "title": "HTPR-1 fix",
+  "body": "",
+  "headRefName": "agent/dev-1-htpr-1",
+  "headRefOid": "head1",
+  "baseRefName": "production",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "statusCheckRollup": [
+    {
+      "__typename": "StatusContext",
+      "context": "app-smoke",
+      "state": "FAILURE",
+      "targetUrl": "https://ci.test/app-smoke"
+    },
+    {
+      "__typename": "StatusContext",
+      "context": "deploy-health",
+      "state": "ERROR",
+      "targetUrl": "https://ci.test/deploy-health"
+    },
+    {
+      "__typename": "StatusContext",
+      "context": "release-queue",
+      "state": "PENDING",
+      "targetUrl": "https://ci.test/release-queue"
+    },
+    {
+      "__typename": "StatusContext",
+      "context": "legacy-lint",
+      "state": "SUCCESS",
+      "targetUrl": "https://ci.test/legacy-lint"
+    },
+    {
+      "__typename": "CheckRun",
+      "name": "ci-tests",
+      "status": "COMPLETED",
+      "conclusion": "SUCCESS",
+      "detailsUrl": "https://github.test/actions/runs/78/job/1"
+    }
+  ],
+  "reviews": [],
+  "comments": []
+}

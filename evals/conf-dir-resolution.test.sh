@@ -48,7 +48,7 @@ run_template() {
 
 feedback="$(run_template feedback --as "$slug" --kind bug \
   --what 'Adapter config fallback regression' --got 'not found' --expected 'found')"
-if printf '%s\n' "$feedback" | grep -q '^filed AGTE-101 ' \
+if printf '%s\n' "$feedback" | grep -qF 'Ticket: AGTE-101 https://app.hypertask.ai/detail/project-5500/101' \
    && grep -q '^task create --project 5500 ' "$TMP/board.log"; then
   ok feedback-adapter-conf-fallback 'feedback --as finds only the Hypertask default conf'
 else

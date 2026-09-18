@@ -87,7 +87,7 @@ feedback="$(AGENT_AI_WRITER_FIXTURE="$ROOT/evals/fixtures/task-writer-without-do
   run_template feedback --board-cli "$TMP/bin/board" --kind change --what 'Explain the expected result' \
     --got 'The result is buried in setup details.' --expected 'The ticket names one checkable result.')"
 if grep -q '<h2>Done when</h2><p>The ticket names one checkable result.</p>' "$TMP/board/description" \
-   && printf '%s\n' "$feedback" | grep -q '^filed AGTE-77 '; then
+   && [ "$feedback" = 'Feedback filed: Make feedback tickets explain the expected result. Ticket: AGTE-77 https://app.hypertask.ai/detail/project-5500/77' ]; then
   ok feedback-derives-done-when 'missing writer section is derived from --expected'
 else
   bad feedback-derives-done-when "output=$feedback body=$(cat "$TMP/board/description" 2>/dev/null)"

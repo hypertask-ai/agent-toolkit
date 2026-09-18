@@ -1714,9 +1714,15 @@ view, inline = json.loads(os.environ["VIEW"]), json.loads(os.environ["INLINE"])
 failed, pending, review = [], [], []
 for check in view.get("statusCheckRollup") or []:
     name = check.get("name") or check.get("context") or "unnamed check"
+    ctx_state = str(check.get("state") or "").upper()
     status = str(check.get("status") or "").upper()
     conclusion = str(check.get("conclusion") or "").upper()
-    if status != "COMPLETED" or not conclusion:
+    if ctx_state:
+        if ctx_state == "PENDING":
+            pending.append(name)
+        elif ctx_state != "SUCCESS":
+            failed.append({"name": name, "conclusion": ctx_state, "url": check.get("targetUrl") or ""})
+    elif status != "COMPLETED" or not conclusion:
         pending.append(name)
     elif conclusion not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
         failed.append({"name": name, "conclusion": conclusion, "url": check.get("detailsUrl") or ""})
