@@ -230,6 +230,7 @@ echo "source: $SRC"
 echo "skill:  $DEST"
 echo "docs:   $DEST/MAINTAINER.md + $DEST/CONF.md"
 echo "bin:    $BIN/agent-board-poll -> $DEST/scripts/agent-board-poll"
+echo "bin:    $BIN/agent-status -> $DEST/scripts/agent-status"
 echo "bin:    $BIN/agent-chat -> $DEST/scripts/agent-chat"
 echo "bin:    $BIN/agent-events -> $DEST/scripts/agent-events"
 echo "bin:    $BIN/agent-kick -> $DEST/scripts/agent-kick"
@@ -311,7 +312,7 @@ done
 rm -rf "$DEST/core"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-board-poll-tick" "$DEST/scripts/agent-progress" "$DEST/scripts/agent-reply-contract" \
-          "$DEST/scripts/agent-board-health" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-events" "$DEST/scripts/agent-kick" \
+          "$DEST/scripts/agent-board-health" "$DEST/scripts/agent-status" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-events" "$DEST/scripts/agent-kick" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-feedback" \
           "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/agent-rules" "$DEST/scripts/triage.sh" \
@@ -324,6 +325,7 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
 # apart, and so the runner still finds its adapters through readlink -f.
 ln -sfn "$DEST/scripts/agent-board-poll" "$BIN/agent-board-poll"
 ln -sfn "$DEST/scripts/agent-board-poll-tick" "$BIN/agent-board-poll-tick"
+ln -sfn "$DEST/scripts/agent-status" "$BIN/agent-status"
 ln -sfn "$DEST/scripts/agent-chat" "$BIN/agent-chat"
 ln -sfn "$DEST/scripts/agent-events" "$BIN/agent-events"
 ln -sfn "$DEST/scripts/agent-kick" "$BIN/agent-kick"
@@ -364,6 +366,9 @@ bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
 "$BIN/agent-board-poll" --help >/dev/null \
   || fail "the installed agent-board-poll does not run" \
           "check that $BIN is on PATH and the symlink resolves"
+"$BIN/agent-status" --help >/dev/null \
+  || fail "the installed agent-status does not run" \
+          "check that python3 is present and the symlink resolves"
 "$BIN/agent-chat" --help >/dev/null \
   || fail "the installed agent-chat does not run" \
           "check python3 is present and the symlink resolves"
@@ -419,6 +424,30 @@ elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >
   # shellcheck disable=SC1091
   . "$DEST/scripts/lib/core.sh"
   core_write_poll_units "$SYSTEMD_USER_DIR" "$BIN"
+  cat > "$SYSTEMD_USER_DIR/agent-status.service" <<EOF
+[Unit]
+Description=Publish the Hypertask Agents page status snapshot
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$BIN/agent-status publish
+EOF
+  cat > "$SYSTEMD_USER_DIR/agent-status.timer" <<EOF
+[Unit]
+Description=Refresh the Hypertask Agents page status every minute
+
+[Timer]
+OnBootSec=1m
+OnUnitActiveSec=60s
+AccuracySec=5s
+Unit=agent-status.service
+
+[Install]
+WantedBy=timers.target
+EOF
   cat > "$SYSTEMD_USER_DIR/agent-chat.service" <<EOF
 [Unit]
 Description=Hypertask Agent Chat lane for this host
@@ -546,6 +575,7 @@ EOF
     fi
   done
   systemctl --user daemon-reload
+  systemctl --user enable --now agent-status.timer
   systemctl --user enable agent-chat.service
   systemctl --user restart agent-chat.service
   systemctl --user disable --now agent-kick.service >/dev/null 2>&1 || true
@@ -559,6 +589,7 @@ EOF
     echo "feedback timer: skipped (this is not a writable agent-toolkit maintainer checkout with the bot wrapper)"
   fi
   echo "poll units: $SYSTEMD_USER_DIR/agent-board-poll@.service + .timer (refreshed, daemon-reload done)"
+  echo "status timer: agent-status.timer, every 60 seconds"
   echo "chat service: agent-chat.service (enabled and restarted)"
   echo "events service: agent-events.service (enabled and restarted)"
   echo "update timer: agent-template-update.timer, daily 06:30 local ($(systemctl --user list-timers agent-template-update.timer --no-pager 2>/dev/null | sed -n '2p'))"

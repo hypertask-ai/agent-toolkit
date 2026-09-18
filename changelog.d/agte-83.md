@@ -1,0 +1,2 @@
+- The toolkit now publishes a fresh Agents page snapshot every minute from agent confs, runner state, QA outcomes, run duration, and supervisor health.
+- Runner locks now retain the numeric ticket identity needed for valid public current-ticket references.

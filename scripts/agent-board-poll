@@ -2295,11 +2295,12 @@ print(model or os.environ["MODEL_RUNG"])')"
   fi
   run_api_base=""
   if declare -F _ht_api_base >/dev/null 2>&1; then run_api_base="$(_ht_api_base)"; fi
-  REF="$ref" TITLE="$title" BOARD="$board" STARTED_AT="$run_started_at" GRAFT="$GRAFT" python3 -c '
+  REF="$ref" TITLE="$title" BOARD="$board" TASK_ID="$task_id" STARTED_AT="$run_started_at" GRAFT="$GRAFT" python3 -c '
 import json, os
-print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
-                  "board_id": int(os.environ["BOARD"]), "started_at": os.environ["STARTED_AT"],
-                  "graft": os.environ["GRAFT"]}))
+identity = os.environ["TASK_ID"]
+print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if identity.isdigit() else None,
+                  "title": os.environ["TITLE"], "board_id": int(os.environ["BOARD"]),
+                  "started_at": os.environ["STARTED_AT"], "graft": os.environ["GRAFT"]}))
 ' > "$LOCK"
   if [ "$is_pr_fix" = "yes" ]; then
     log "run start $ref key=$key dir=${RUN_DIR:-.} graft=$GRAFT PR-fix-unlimited: $why"
@@ -2409,6 +2410,7 @@ if rows:
         log "QA lifecycle failed for $ref: posted comment had no QA verdict marker"
       else
         IFS=$'\t' read -r qa_marker _ _ <<< "$qa_info"
+        log "QA outcome $ref verdict=$qa_marker"
         if ! qa_apply_verdict "$row" "$qa_marker" "run fallback"; then
           [ "$rc" -ne 0 ] || rc=74
         fi
