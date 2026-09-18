@@ -231,6 +231,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/identity-shim.test.sh" ]; then
   echo "-- identity shim behavioural checks --"
   bash "$HERE/identity-shim.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/token-wrapper-guard.test.sh" ]; then
+  echo ""
+  echo "-- token wrapper guard behavioural checks --"
+  bash "$HERE/token-wrapper-guard.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/hypertask-adapter.test.sh" ]; then
   echo ""
   echo "-- hypertask adapter behavioural checks --"

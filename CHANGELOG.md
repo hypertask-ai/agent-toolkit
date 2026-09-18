@@ -1,3 +1,16 @@
+## 3.48.0 - 2026-09-18
+
+- AGTE-13 fixes quiet mode getting bypassed by a second wrapper outside the
+  identity shim: install.sh now scans the bin dir for any executable that
+  embeds a managed agent's token file but is not that agent's own BOARD_CLI,
+  and rewrites it to exec the BOARD_CLI (backup kept alongside), or warns
+  loudly when it cannot be rewritten.
+- `--dry-run` reports the same finding without changing anything.
+- Focused coverage rewrites a stray wrapper with a backup, leaves the real
+  BOARD_CLI untouched, and checks the dry-run and refuse-to-rewrite paths.
+- ACTION: run `agent-template update` on every bot host so a stray board
+  wrapper on `PATH` gets rewritten to defer to the identity shim's BOARD_CLI.
+
 ## 3.47.0 - 2026-09-18
 
 - AGTE-10 adds learned rules: a correction to a provisioned repo becomes a

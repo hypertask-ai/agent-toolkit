@@ -176,6 +176,82 @@ core_enable_agent_identity() {
   export AGENT_SLUG HYPERTASK_TOKEN_FILE AGENT_IDENTITY_PATH
 }
 
+# core_guard_token_wrappers <bin-dir> [<dry-run: yes|no>]
+# The identity shim only catches a bare `hypertask`/`ht`/`htbot` call made by
+# a provider process that runs with the shim first on PATH (AGTE-13: Product
+# Bot posted an unmarked, unstripped owner mention through ~/.local/bin/htbot,
+# a hand-made wrapper that called the board API directly and never went
+# through a shimmed run). A wrapper like that sits right next to the real
+# board CLIs in <bin-dir>, so that is what this scans: any executable there
+# that embeds a managed agent's TOKEN_FILE path but is not that agent's own
+# BOARD_CLI. It is rewritten to exec the agent's BOARD_CLI (which carries the
+# marker check and owner-mention stripping) with a timestamped backup kept
+# next to it. A target this cannot safely rewrite as a script -- unreadable,
+# unwritable, or not text -- gets a loud warning instead of a silent skip;
+# dry-run reports the same findings and changes nothing.
+core_guard_token_wrappers() {
+  local bin_dir="$1" dry_run="${2:-no}" dir conf found_confs
+  [ -d "$bin_dir" ] || return 0
+
+  local confs
+  confs="$(mktemp)"
+  while IFS= read -r dir; do
+    [ -d "$dir" ] || continue
+    for conf in "$dir"/*.conf; do
+      [ -f "$conf" ] || continue
+      (
+        # shellcheck disable=SC1090
+        . "$conf" 2>/dev/null
+        [ -n "${AGENT_SLUG:-}" ] && [ -n "${TOKEN_FILE:-}" ] || exit 0
+        printf '%s\t%s\t%s\n' "$AGENT_SLUG" "$TOKEN_FILE" "${BOARD_CLI:-}"
+      ) >> "$confs"
+    done
+  done < <(core_conf_dirs)
+
+  found_confs="no"
+  [ -s "$confs" ] && found_confs="yes"
+  if [ "$found_confs" = "no" ]; then
+    rm -f "$confs"
+    return 0
+  fi
+
+  local entry resolved_entry resolved_board line slug token_file board_cli backup
+  for entry in "$bin_dir"/*; do
+    [ -f "$entry" ] && [ -x "$entry" ] || continue
+    resolved_entry="$(readlink -f "$entry" 2>/dev/null || printf '%s' "$entry")"
+    while IFS=$'\t' read -r slug token_file board_cli; do
+      [ -n "$slug" ] || continue
+      if [ -n "$board_cli" ]; then
+        resolved_board="$(readlink -f "$board_cli" 2>/dev/null || printf '%s' "$board_cli")"
+        [ "$resolved_entry" = "$resolved_board" ] && continue
+      fi
+      grep -qF -- "$token_file" "$entry" 2>/dev/null || continue
+
+      if [ "$dry_run" = "yes" ]; then
+        warn "$entry embeds $slug's token file outside the identity shim. Do this next: run install.sh (not --dry-run) so it is rewritten to exec $board_cli"
+        continue
+      fi
+      if [ -z "$board_cli" ] || [ ! -w "$entry" ] || ! head -c2 "$entry" 2>/dev/null | grep -q '^#!'; then
+        warn "$entry embeds $slug's token file outside the identity shim and could not be rewritten. Do this next: remove it or point it at the BOARD_CLI for $slug by hand"
+        continue
+      fi
+      backup="$entry.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+      cp -a "$entry" "$backup"
+      cat > "$entry" <<EOF
+#!/usr/bin/env bash
+# $entry: rewritten by install.sh (AGTE-13). This used to reach the board API
+# directly, outside the identity shim, so the marker check and owner-mention
+# stripping never ran for it. It now defers to $slug's own board CLI.
+set -euo pipefail
+exec "$board_cli" "\$@"
+EOF
+      chmod 755 "$entry"
+      warn "rewrote $entry to exec $board_cli: it embedded $slug's token file outside the identity shim (backup: $backup)"
+    done < "$confs"
+  done
+  rm -f "$confs"
+}
+
 # ---------- command ladder ----------
 # Commands are opaque policy owned by the conf. Core only selects an ordered
 # rung; it never identifies, validates or rewrites a provider, model or harness.
