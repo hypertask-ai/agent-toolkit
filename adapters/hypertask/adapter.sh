@@ -602,8 +602,8 @@ EOF
 
 # ---------- reads ----------
 # adapter_list_candidates <token-file> <board-id> <sections-csv>
-# One JSON object per line: id, ref, section, title, description, agent_ids,
-# comment_count, url. agent_ids holds the AGENT ids on the ticket: an
+# One JSON object per line: id, ref, section, title, description, priority,
+# dueDate, agent_ids, comment_count, url. agent_ids holds the AGENT ids on the ticket: an
 # agent-assigned ticket still carries the owning user's numeric id at the top
 # of each assignee record, with the agent's uuid nested under "agent".
 # An agent may watch more than one board: BOARD_ID takes a comma-separated
@@ -645,6 +645,9 @@ for task in doc.get("tasks") or []:
             name = str(label)
         if name:
             labels.append(str(name).strip().casefold())
+    priority = task.get("priority") or ""
+    if isinstance(priority, dict):
+        priority = priority.get("name") or priority.get("title") or ""
     ref = str(task.get("ticketNumber") or "")
     index = ref.rsplit("-", 1)[-1] if "-" in ref else str(task.get("id"))
     print(json.dumps({
@@ -653,6 +656,8 @@ for task in doc.get("tasks") or []:
         "section": section,
         "title": task.get("title") or "",
         "description": task.get("description") or "",
+        "priority": str(priority),
+        "dueDate": task.get("dueDate") or "",
         "agent_ids": agent_ids,
         # Anyone at all on the ticket, human or agent: a ticket with a name on
         # it belongs to whoever put it there, and is not free to pick up.
@@ -664,6 +669,34 @@ for task in doc.get("tasks") or []:
     }))
 '
   done
+}
+
+# adapter_queue_order <candidate-json>
+# New queued work sorts expedited tickets first, then by due date. Core keeps
+# its ownership ranks ahead of this key and supplies board order as the final tie.
+adapter_queue_order() {
+  printf '%s' "$1" | python3 -c '
+from datetime import datetime, timedelta, timezone
+import json, sys
+
+row = json.load(sys.stdin)
+raw_due = str(row.get("dueDate") or "").strip()
+due = None
+if raw_due:
+    try:
+        due = datetime.fromisoformat(raw_due[:-1] + "+00:00" if raw_due.endswith("Z") else raw_due)
+        if due.tzinfo is None:
+            due = due.replace(tzinfo=timezone.utc)
+        due = due.astimezone(timezone.utc)
+    except ValueError:
+        pass
+urgent = str(row.get("priority") or "").strip().casefold() == "urgent"
+due_soon = due is not None and due <= datetime.now(timezone.utc) + timedelta(hours=48)
+if urgent or due_soon:
+    print("0 %.6f" % (due.timestamp() if due is not None else 253402300799))
+else:
+    print("1 0")
+'
 }
 
 # adapter_ticket_ref <token-file> <ticket-ref-or-url>
@@ -834,11 +867,15 @@ for task in json.load(sys.stdin).get("tasks") or []:
         name = (label.get("name") or label.get("title") or label.get("label") or "") if isinstance(label, dict) else str(label)
         if name:
             labels.append(str(name).strip().casefold())
+    priority = task.get("priority") or ""
+    if isinstance(priority, dict):
+        priority = priority.get("name") or priority.get("title") or ""
     ref = str(task.get("ticketNumber") or "")
     index = ref.rsplit("-", 1)[-1] if "-" in ref else str(task.get("id"))
     print(json.dumps({
         "id": task.get("id"), "ref": ref, "section": str(task.get("section") or ""),
         "title": task.get("title") or "", "description": task.get("description") or "",
+        "priority": str(priority), "dueDate": task.get("dueDate") or "",
         "agent_ids": agent_ids, "assignee_count": len(assignees), "labels": labels,
         "comment_count": task.get("commentCount") or 0, "board": board,
         "url": "https://app.hypertask.ai/detail/project-%s/%s" % (board, index),

@@ -1027,16 +1027,18 @@ row_labels() {
   ROW="$1" python3 -c 'import json,os;print(",".join(json.loads(os.environ["ROW"]).get("labels") or []))'
 }
 
-# rank_order : indices of the eligible tickets, best rank first, board order
-# breaking ties.
+# rank_order : indices of the eligible tickets, best ownership rank first. The
+# adapter may order new queued work inside rank 3; board order breaks every tie.
 rank_order() {
   local i
-  for i in "${!ELIGIBLE[@]}"; do printf '%s %s\n' "${ELIGIBLE[$i]}" "$i"; done \
-    | sort -k1,1n -k2,2n | awk '{print $2}'
+  for i in "${!ELIGIBLE[@]}"; do
+    printf '%s %s %s\n' "${ELIGIBLE[$i]}" "${E_QUEUE_ORDER[$i]}" "$i"
+  done | sort -k1,1n -k2,2n -k3,3n -k4,4n | awk '{print $4}'
 }
 
 # Candidates that passed every gate, waiting to be ranked against each other.
-ELIGIBLE=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=(); E_REASON=(); E_PR_FIX=(); E_REPLY_ONLY=()
+ELIGIBLE=(); E_QUEUE_ORDER=(); E_ROW=(); E_COMMENT=(); E_WHY=(); E_TRIES=()
+E_REASON=(); E_PR_FIX=(); E_REPLY_ONLY=()
 
 # ---------- one tick at a time ----------
 # The systemd unit is Type=oneshot, so systemd already refuses a second run
@@ -1568,12 +1570,22 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
       continue
     fi
   fi
+  queue_order="1 0"
+  if [ "$rank" = "3" ] && [ "$is_reply_only" = "no" ] \
+     && declare -F adapter_queue_order >/dev/null 2>&1; then
+    adapter_order="$(adapter_queue_order "$row" 2>>"$LOG")" || adapter_order=""
+    if [[ "$adapter_order" =~ ^[0-9]+\ [0-9]+([.][0-9]+)?$ ]]; then
+      queue_order="$adapter_order"
+    fi
+  fi
+
   picked=$((picked + 1))
   explain "rank $rank $ref: $why"
 
   # Ranked, not taken. The pick happens after every candidate has been judged,
   # so a ticket this agent still owes beats one that merely appears first.
   ELIGIBLE+=("$rank")
+  E_QUEUE_ORDER+=("$queue_order")
   E_ROW+=("$row")
   E_COMMENT+=("$comment_json")
   E_WHY+=("$why")

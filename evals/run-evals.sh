@@ -236,6 +236,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/hypertask-adapter.test.sh" ]; then
   echo "-- hypertask adapter behavioural checks --"
   bash "$HERE/hypertask-adapter.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/queue-ranking.test.sh" ]; then
+  echo ""
+  echo "-- queue ranking behavioural checks --"
+  bash "$HERE/queue-ranking.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owned-reply-trigger.test.sh" ]; then
   echo ""
   echo "-- owned reply trigger behavioural checks --"

@@ -1,3 +1,13 @@
+## 3.38.0 - 2026-09-18
+
+- AGTE-53 carries Hypertask priority and dueDate into runner candidates.
+- New queued work with Priority Urgent or a due date within 48 hours is picked
+  before ordinary queued work, with due date and then board order breaking ties.
+- Offline coverage proves the urgent ticket starts first and a concurrent tick
+  cannot replace or interrupt its active run.
+- ACTION: run `agent-template update --keep-timers` so current runners receive
+  queue ordering without changing timer state.
+
 ## 3.37.0 - 2026-09-18
 
 - AGTE-39 preserves the original quiet-mode marker through a plain-language
