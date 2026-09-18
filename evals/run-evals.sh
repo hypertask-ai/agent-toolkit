@@ -337,6 +337,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/instruction-tickets.test.sh" ]; then
   echo "-- instruction ticket behavioural checks --"
   bash "$HERE/instruction-tickets.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/task-writer.test.sh" ]; then
+  echo ""
+  echo "-- Task Writer behavioural checks --"
+  bash "$HERE/task-writer.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/feedback-loop.test.sh" ]; then
   echo ""
   echo "-- feedback loop behavioural checks --"

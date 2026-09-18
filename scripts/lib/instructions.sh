@@ -2,6 +2,80 @@
 # Queue-backed publication of maintainer instructions to the toolkit board.
 
 INSTRUCTION_BOARD_ID="${INSTRUCTION_BOARD_ID:-5500}"
+TICKET_FORMAT_CHECK="${TICKET_FORMAT_CHECK:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/adapters/hypertask/plain-language/check-ticket.py}"
+TASK_WRITER_PROMPT='Rewrite this ticket in the house format: title under 80 characters naming the change, then a bold outcome sentence, What went wrong, What changes as a numbered list, Done when. Keep all links and meaning.'
+
+# ticket_writer_rewrite <board-cli> <project> <raw> <title-file> <body-file> [done-when]
+# Returns 1 when the writer itself is unavailable, and 2 when two drafts fail
+# the structural gate. Callers may use their legacy formatter only for rc=1.
+ticket_writer_rewrite() {
+  local board_cli="$1" project="$2" raw="$3" title_file="$4" body_file="$5"
+  local done_when="${6:-}" attempt prompt output reason err_file
+  err_file="$(mktemp "${TMPDIR:-/tmp}/task-writer.XXXXXX")"
+  for attempt in 1 2; do
+    prompt="$TASK_WRITER_PROMPT
+
+Raw ticket text:
+$raw"
+    if [ "$attempt" -eq 2 ]; then
+      prompt="$prompt
+
+The previous draft was rejected because: $reason. Fix every named part."
+    fi
+    if [ -n "${AGENT_AI_WRITER_FIXTURE:-}" ]; then
+      if ! output="$(cat "$AGENT_AI_WRITER_FIXTURE" 2>"$err_file")"; then
+        rm -f "$err_file"
+        return 1
+      fi
+    elif ! output="$("$board_cli" --json ai write "$prompt" --project "$project" --mode task-writer 2>"$err_file")"; then
+      rm -f "$err_file"
+      return 1
+    fi
+    if ! OUTPUT="$output" python3 - "$title_file" "$body_file" <<'PYEOF'
+import json
+import os
+import sys
+
+raw = os.environ["OUTPUT"]
+start, end = raw.find("{"), raw.rfind("}")
+if start < 0 or end <= start:
+    raise SystemExit(1)
+doc = json.loads(raw[start:end + 1])
+title = str(doc.get("title") or "").strip()
+body = str(doc.get("html") or "").strip()
+if doc.get("success") is False or not title or not body:
+    raise SystemExit(1)
+open(sys.argv[1], "w", encoding="utf-8").write(title)
+open(sys.argv[2], "w", encoding="utf-8").write(body)
+PYEOF
+    then
+      rm -f "$err_file"
+      return 1
+    fi
+    if [ -n "$done_when" ]; then
+      DONE_WHEN="$done_when" python3 - "$body_file" <<'PYEOF'
+import html
+import os
+import re
+import sys
+
+path = sys.argv[1]
+body = open(path, encoding="utf-8").read()
+visible = re.sub(r"<[^>]+>", " ", body)
+if not re.search(r"\bdone\s+when\b", visible, re.IGNORECASE):
+    body += "<h2>Done when</h2><p>%s</p>" % html.escape(os.environ["DONE_WHEN"], quote=False)
+    open(path, "w", encoding="utf-8").write(body)
+PYEOF
+    fi
+    if reason="$(python3 "$TICKET_FORMAT_CHECK" "$(cat "$title_file")" "$body_file" 2>&1)"; then
+      rm -f "$err_file"
+      return 0
+    fi
+  done
+  rm -f "$err_file"
+  printf 'ERROR: Task Writer rewrite was refused: %s\n' "$(printf '%s' "$reason" | paste -sd ';' -)" >&2
+  return 2
+}
 
 instruction_conf_value() {
   python3 - "$1" "$2" <<'PYEOF'
@@ -38,7 +112,7 @@ PYEOF
 instruction_publish_file() { # instruction_publish_file <queue-json> <agent-conf>
   local queue_file="$1" conf="$2" adapter board_cli agent_id agent_name slug
   local work instruction_id marker_dir marker marker_fields ticket_ref ticket_url
-  local project_out section create_out create_rc assign_out assign_rc
+  local project_out section create_out create_rc assign_out assign_rc writer_rc
 
   [ -f "$queue_file" ] || {
     printf 'ERROR: queued instruction %s is missing. Do this next: recreate the instruction\n' "$queue_file" >&2
@@ -68,13 +142,13 @@ instruction_publish_file() { # instruction_publish_file <queue-json> <agent-conf
   }
 
   work="$(mktemp -d "${TMPDIR:-/tmp}/agent-instruction.XXXXXX")"
-  if ! python3 - "$queue_file" "$work/title" "$work/body" > "$work/id" <<'PYEOF'
+  if ! python3 - "$queue_file" "$work/title" "$work/body" "$work/raw" > "$work/id" <<'PYEOF'
 import html
 import json
 import re
 import sys
 
-source, title_path, body_path = sys.argv[1:]
+source, title_path, body_path, raw_path = sys.argv[1:]
 row = json.load(open(source, encoding="utf-8"))
 instruction_id = str(row.get("id") or "")
 instruction = str(row.get("instruction") or "")
@@ -83,19 +157,32 @@ if not re.fullmatch(r"[A-Za-z0-9._-]+", instruction_id):
     raise SystemExit("instruction id is missing or unsafe")
 if not instruction.strip():
     raise SystemExit("instruction text is empty")
-summary = " ".join(instruction.split())
-if len(summary) > 120:
-    summary = summary[:117].rstrip() + "..."
-parts = ["<p><strong>Instruction</strong></p>"]
-for paragraph in re.split(r"\n[ \t]*\n", instruction.strip("\n")):
-    escaped = html.escape(paragraph, quote=False).replace("\n", "<br>")
-    parts.append("<p>%s</p>" % escaped)
+body = instruction.strip("\n")
+first, _, rest = body.partition("\n")
+if rest.strip() and len(first.strip()) <= 120 and not first.lstrip().startswith("<"):
+    summary = first.strip()
+    body = rest.strip("\n")
+else:
+    summary = " ".join(instruction.split())
+    if len(summary) > 120:
+        summary = summary[:117].rstrip() + "..."
+parts = []
+if body.lstrip().startswith("<"):
+    parts.append(body)
+else:
+    parts.append("<p><strong>Instruction</strong></p>")
+    for paragraph in re.split(r"\n[ \t]*\n", body):
+        escaped = html.escape(paragraph, quote=False).replace("\n", "<br>")
+        parts.append("<p>%s</p>" % escaped)
+raw = instruction.strip()
 if ticket:
     escaped_ticket = html.escape(ticket, quote=True)
     parts.append('<p><strong>Source ticket</strong>: <a href="%s">%s</a></p>' %
                  (escaped_ticket, html.escape(ticket, quote=False)))
+    raw += "\n\nSource ticket: " + ticket
 open(title_path, "w", encoding="utf-8").write(summary)
 open(body_path, "w", encoding="utf-8").write("".join(parts))
+open(raw_path, "w", encoding="utf-8").write(raw)
 print(instruction_id)
 PYEOF
   then
@@ -104,6 +191,17 @@ PYEOF
     return 1
   fi
   instruction_id="$(cat "$work/id")"
+  if ticket_writer_rewrite "$board_cli" "$INSTRUCTION_BOARD_ID" "$(cat "$work/raw")" "$work/title" "$work/body"; then
+    :
+  else
+    writer_rc=$?
+    if [ "$writer_rc" -eq 1 ]; then
+      printf 'Task Writer unavailable; using the original instruction ticket format.\n' >&2
+    else
+      rm -rf "$work"
+      return "$writer_rc"
+    fi
+  fi
   marker_dir="${INSTRUCTION_TICKET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-template/instruction-tickets}"
   marker="$marker_dir/$slug-$instruction_id.json"
   mkdir -p "$marker_dir"

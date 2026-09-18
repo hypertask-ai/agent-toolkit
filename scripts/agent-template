@@ -1731,7 +1731,7 @@ print("false")
 ')"
 
 BODY_FILE="$(mktemp)"
-trap 'rm -f "$BODY_FILE"' EXIT
+trap 'rm -f "$BODY_FILE" "$BODY_FILE.title"' EXIT
 WHAT="$WHAT" GOT_TEXT="$GOT_TEXT" EXPECTED="$EXPECTED" REPO="$REPO" \
 ADAPTER="$ADAPTER" VERSION="$VERSION" AGENT_NAME="$AGENT_NAME" REPEATED="$REPEATED" \
 python3 - "$BODY_FILE" <<'PYEOF'
@@ -1761,6 +1761,33 @@ parts = [
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     fh.write("".join(parts))
 PYEOF
+
+if [ "$ADAPTER" = "hypertask" ] && [ -n "$BOARD_CLI" ] && [ -x "$BOARD_CLI" ]; then
+  WRITER_RAW="What should change: $WHAT
+
+What went wrong or current context:
+$GOT_TEXT
+
+Expected result:
+$EXPECTED
+
+Where things are:
+repo: $REPO
+adapter: $ADAPTER
+template version: $VERSION
+agent: $AGENT_NAME
+repeated: $REPEATED"
+  if ticket_writer_rewrite "$BOARD_CLI" "$FEEDBACK_BOARD_ID" "$WRITER_RAW" "$BODY_FILE.title" "$BODY_FILE" "$EXPECTED"; then
+    TITLE="$(cat "$BODY_FILE.title")"
+  else
+    WRITER_RC=$?
+    if [ "$WRITER_RC" -eq 1 ]; then
+      printf 'Task Writer unavailable; using the original feedback ticket format.\n' >&2
+    else
+      exit "$WRITER_RC"
+    fi
+  fi
+fi
 
 LABELS="$KIND"
 case "$ADAPTER" in

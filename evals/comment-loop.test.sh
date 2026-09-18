@@ -230,11 +230,11 @@ prompt = Path(os.environ["TMP"], "prompt").read_text()
 rules = root / "adapters" / "hypertask" / "plain-language"
 assert "product owner on a phone" in prompt
 assert str(Path(os.environ["TMP"], "company", "skills", "talk-to-valentin", "SKILL.md")) in prompt
-for name in ("pospeak.md", "unslop.md", "i-have-adhd.md"):
+for name in ("pospeak.md", "ticket-format.md", "unslop.md", "i-have-adhd.md"):
     assert (rules / name).read_text().rstrip() in prompt
 PYEOF
 then
-  ok plain-language-prompt-contract 'all four comment kinds receive the three rule texts verbatim'
+  ok plain-language-prompt-contract 'all four comment kinds receive the four rule texts verbatim'
 else
   bad plain-language-prompt-contract 'the runner prompt omitted the phone reader or verbatim rules'
 fi

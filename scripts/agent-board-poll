@@ -177,12 +177,13 @@ TALK_TO_VALENTIN_SKILL="$COMPANY_SKILLS_DIR/skills/talk-to-valentin/SKILL.md"
 TALK_TO_VALENTIN_REFS="$COMPANY_SKILLS_DIR/skills/talk-to-valentin/reference"
 PLAIN_LANGUAGE_FALLBACK="$CORE_ROOT/adapters/hypertask/plain-language"
 POSPEAK_SKILL="$TALK_TO_VALENTIN_REFS/pospeak.md"
+TICKET_FORMAT_RULE="$PLAIN_LANGUAGE_FALLBACK/ticket-format.md"
 UNSLOP_SKILL="$TALK_TO_VALENTIN_REFS/unslop.md"
 ADHD_SKILL="$TALK_TO_VALENTIN_REFS/i-have-adhd.md"
 [ -r "$POSPEAK_SKILL" ] || POSPEAK_SKILL="$PLAIN_LANGUAGE_FALLBACK/pospeak.md"
 [ -r "$UNSLOP_SKILL" ] || UNSLOP_SKILL="$PLAIN_LANGUAGE_FALLBACK/unslop.md"
 [ -r "$ADHD_SKILL" ] || ADHD_SKILL="$PLAIN_LANGUAGE_FALLBACK/i-have-adhd.md"
-for skill in "$POSPEAK_SKILL" "$UNSLOP_SKILL" "$ADHD_SKILL"; do
+for skill in "$POSPEAK_SKILL" "$TICKET_FORMAT_RULE" "$UNSLOP_SKILL" "$ADHD_SKILL"; do
   [ -r "$skill" ] || die "plain-language rules are missing at $skill" \
     "restore the installed template or company skill pack, then retry"
 done
@@ -196,10 +197,13 @@ TERMINAL_ADHD_SKILL="${VALENTIN_ADHD_SKILL:-$HOME/.claude/skills/i-have-adhd/SKI
 if [ ! -r "$TERMINAL_ADHD_SKILL" ]; then
   TERMINAL_ADHD_SKILL="$HOME/.claude/plugins/marketplaces/i-have-adhd/skills/i-have-adhd/SKILL.md"
 fi
-PLAIN_LANGUAGE_PROMPT="For every Question:, Decision:, Handoff:, or Done: ticket comment, follow the three rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
+PLAIN_LANGUAGE_PROMPT="For every Question:, Decision:, Handoff:, or Done: ticket comment, follow the four rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
 
 POSPEAK RULES, VERBATIM:
 $(cat "$POSPEAK_SKILL")
+
+TICKET FORMAT RULES, VERBATIM:
+$(cat "$TICKET_FORMAT_RULE")
 
 UNSLOP RULES, VERBATIM:
 $(cat "$UNSLOP_SKILL")
@@ -268,8 +272,8 @@ PYEOF
     if [ -n "${AGENT_REPO:-}" ] && [ -d "$AGENT_REPO" ]; then cd "$AGENT_REPO"; fi
     PATH="${AGENT_IDENTITY_PATH:-$PATH}" AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" \
       AGENT_BOARD_CLI="$BOARD_CLI" AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" \
-      AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" \
-      AGENT_ADHD_SKILL="$ADHD_SKILL" "${MODEL_ARGV[@]}" "$(cat "$prompt_file")"
+      AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" \
+      AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL" "${MODEL_ARGV[@]}" "$(cat "$prompt_file")"
   ) >"$reply_file" 2>"$err_file"
   rc=$?
   set -e
@@ -1837,7 +1841,7 @@ Keep fixing this PR until it merges and is live."
 
   if [ "$is_reply_only" = "yes" ]; then
     for rule_source in "$TERMINAL_CLAUDE_RULES" "$TERMINAL_POSPEAK_SKILL" \
-                       "$TERMINAL_UNSLOP_SKILL" "$TERMINAL_ADHD_SKILL"; do
+                       "$TICKET_FORMAT_RULE" "$TERMINAL_UNSLOP_SKILL" "$TERMINAL_ADHD_SKILL"; do
       [ -r "$rule_source" ] || die "reply rule source is missing at $rule_source" \
         "restore Valentin's terminal rule source, then retry this reply"
     done
@@ -1875,6 +1879,9 @@ $(cat "$TERMINAL_CLAUDE_RULES")
 
 POSPEAK SKILL, VERBATIM:
 $(cat "$TERMINAL_POSPEAK_SKILL")
+
+TICKET FORMAT RULES, VERBATIM:
+$(cat "$TICKET_FORMAT_RULE")
 
 UNSLOP SKILL, VERBATIM:
 $(cat "$TERMINAL_UNSLOP_SKILL")
@@ -2082,7 +2089,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       GRAFT="$GRAFT" GRAFT_MCP_COMMAND="$GRAFT_MCP_COMMAND" GRAFT_MCP_CONFIG="$GRAFT_MCP_CONFIG" \
       AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base" \
       AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" \
-      AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL" \
+      AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL" \
       AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER" \
       AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI" \
         "${MODEL_ARGV[@]}" "$PROMPT"
