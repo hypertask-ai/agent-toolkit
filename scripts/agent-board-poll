@@ -896,43 +896,32 @@ qa_backfill() {
   done <<< "$rows"
 }
 
-# A reply model can read the checkout, runner logs, its Codex credential, and
-# the network. Only /tmp is writable, and the board token is never mounted.
+# Reply models get no tools or project context. Run them from a fresh empty
+# directory that cannot be written, so this lane never depends on a checkout.
 run_reply_model() {
-  local prompt="$1" repo="$2" reply_file="$3" err_file="$4"
+  local prompt="$1" reply_file="$2" err_file="$3"
   local hax_bin="${REPLY_HAX_BIN:-/home/valentin/.local/bin/hax}"
-  local bwrap_bin="${REPLY_BWRAP_BIN:-$(command -v bwrap || true)}"
   local timeout_bin="${REPLY_TIMEOUT_BIN:-$(command -v timeout || true)}"
   local codex_auth="${REPLY_CODEX_AUTH:-$HOME/.codex/auth.json}"
-  local token_real repo_real logs_real
+  local reply_dir rc
   [ -x "$hax_bin" ] || { printf 'fixed reply model is missing at %s\n' "$hax_bin" > "$err_file"; return 127; }
-  [ -x "$bwrap_bin" ] || { printf 'reply sandbox requires bwrap\n' > "$err_file"; return 127; }
-  [ -x "$timeout_bin" ] || { printf 'reply sandbox requires timeout\n' > "$err_file"; return 127; }
+  [ -x "$timeout_bin" ] || { printf 'reply runner requires timeout\n' > "$err_file"; return 127; }
   [ -r "$codex_auth" ] || { printf 'Codex credential is missing at %s\n' "$codex_auth" > "$err_file"; return 127; }
-  [ -d "$repo" ] || { printf 'reply repository is missing at %s\n' "$repo" > "$err_file"; return 127; }
-  token_real="$(readlink -f "$TOKEN_FILE")"
-  repo_real="$(readlink -f "$repo")"
-  logs_real="$(readlink -f "$STATE_DIR")"
-  case "$token_real" in
-    "$repo_real"/*|"$logs_real"/*)
-      printf 'reply sandbox refused because the board token is inside a readable mount\n' > "$err_file"
-      return 126 ;;
-  esac
-
-  "$timeout_bin" 300 "$bwrap_bin" \
-    --die-with-parent --new-session \
-    --unshare-user-try --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try \
-    --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
-    --symlink usr/lib64 /lib64 --ro-bind /etc /etc --proc /proc --dev /dev \
-    --tmpfs /tmp --dir /tmp/home --dir /tmp/home/.codex \
-    --ro-bind "$codex_auth" /tmp/home/.codex/auth.json \
-    --tmpfs /opt --ro-bind "$hax_bin" /opt/hax --remount-ro /opt \
-    --ro-bind "$repo" /workspace --ro-bind "$STATE_DIR" /logs \
-    --clearenv --setenv HOME /tmp/home --setenv XDG_STATE_HOME /tmp/state \
-    --setenv TMPDIR /tmp --setenv PATH /opt:/usr/bin \
-    --setenv LANG C.UTF-8 --chdir /workspace -- \
-    /opt/hax --provider=codex --model=gpt-5.6-sol --effort=high \
-      --no-session --bare -p "$prompt" > "$reply_file" 2> "$err_file"
+  reply_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-reply.XXXXXX")" || {
+    printf 'reply runner could not create an empty working directory\n' > "$err_file"
+    return 127
+  }
+  chmod 0555 "$reply_dir"
+  (
+    cd "$reply_dir" || exit 127
+    "$timeout_bin" 300 "$hax_bin" \
+      --provider=codex --model=gpt-5.6-sol --effort=high \
+      --no-session --raw -p "$prompt"
+  ) > "$reply_file" 2> "$err_file"
+  rc=$?
+  chmod 0755 "$reply_dir"
+  rmdir "$reply_dir"
+  return "$rc"
 }
 
 check_maintainer_builds() {
@@ -2282,11 +2271,10 @@ COMPACT SHARED RECORD OF VALENTIN'S PRIOR TICKET STATEMENTS:
 $shared_rules
 
 REPLY CONTRACT:
-- Answer the human's latest addressed comment using the full thread and shared record.
-- Inspect repository code under /workspace and run logs under /logs when they can settle the answer.
-- Browse with read-only HTTP requests when needed.
-- Download every relevant image URL to /tmp and inspect the image before answering.
-- The filesystem outside /tmp is read-only. Do not attempt any board, repository, browser, or external write.
+- Answer the human's latest addressed comment using only the ticket description, full thread, shared record, and rules supplied in this prompt.
+- You have no tools or project context. Your working directory is intentionally empty and read-only.
+- Treat image URLs as evidence named in the thread, but do not claim you inspected content that the thread does not describe.
+- Do not attempt any board, repository, browser, filesystem, or external read or write.
 - Return only one concise HTML comment. Start with <p><strong> and bold the complete first sentence. Stay at or below 80 words. End the last block with a question mark or start it with Next:.
 - Do not add Decision: framing. Use Question:, Handoff:, or Done: only when it is the actual meaning of the answer.
 - Do not include tool traces, a code fence, or an explanation of your process.
@@ -2440,7 +2428,7 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
   fi
   if [ "$is_reply_only" = "yes" ]; then
     RUN_MODEL_RUNG="reply-codex-sol-high"
-    RUN_MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session --bare -p"
+    RUN_MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session --raw -p"
   elif [ "$is_pr_fix" = "yes" ]; then
     RUN_MODEL_RUNG="pr-fix"
     RUN_MODEL_CLI="$MODEL_CLI"
@@ -2516,19 +2504,20 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
   # draft to a file; core validates and posts it only after the sandbox exits.
   if [ "$is_reply_only" = "yes" ]; then
     RUN_MODEL_RUNG="reply-codex-sol-high"
-    RUN_MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session --bare -p"
+    RUN_MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session --raw -p"
     REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.html"
     ORIGINAL_REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.original.html"
     RETRY_REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.retry.html"
     RETRY_ERR_FILE="$STATE_DIR/$SLUG-$ref.reply.retry.err"
     FALLBACK_REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.fallback.html"
     LINKED_FALLBACK_FILE="$STATE_DIR/$SLUG-$ref.reply.fallback-linked.html"
+    ERROR_FALLBACK_FILE="$STATE_DIR/$SLUG-$ref.reply.error-fallback.txt"
     rm -f "$ORIGINAL_REPLY_FILE" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE" \
-      "$FALLBACK_REPLY_FILE" "$LINKED_FALLBACK_FILE"
+      "$FALLBACK_REPLY_FILE" "$LINKED_FALLBACK_FILE" "$ERROR_FALLBACK_FILE"
     reply_posted=no
     shape_reason=""
-    log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI; read-only bwrap, 300s)"
-    run_reply_model "$PROMPT" "${RUN_DIR:-$AGENT_REPO}" "$REPLY_FILE" "$ERRFILE"
+    log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI; empty read-only workdir, 300s)"
+    run_reply_model "$PROMPT" "$REPLY_FILE" "$ERRFILE"
     rc=$?
     if [ "$rc" -eq 0 ]; then
       cp "$REPLY_FILE" "$ORIGINAL_REPLY_FILE"
@@ -2551,7 +2540,7 @@ Return a non-empty HTML comment. Its first block must be <p>, its complete first
 
 Original draft, which must keep its meaning:
 $(cat "$ORIGINAL_REPLY_FILE")"
-      run_reply_model "$RETRY_PROMPT" "${RUN_DIR:-$AGENT_REPO}" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE"
+      run_reply_model "$RETRY_PROMPT" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE"
       retry_rc=$?
       retry_reason=""
       if [ "$retry_rc" -ne 0 ]; then
@@ -2600,6 +2589,15 @@ $(cat "$ORIGINAL_REPLY_FILE")"
       if ! (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; post_ticket_comment "$ref" file "$REPLY_FILE"); then
         printf 'validated reply could not be posted\n' >> "$ERRFILE"
         rc=74
+      fi
+    fi
+    if [ "$rc" -ne 0 ]; then
+      printf 'I could not answer this, error logged\n' > "$ERROR_FALLBACK_FILE"
+      if (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; \
+          post_ticket_comment "$ref" raw-file "$ERROR_FALLBACK_FILE"); then
+        printf 'posted reply failure fallback\n' >> "$ERRFILE"
+      else
+        printf 'reply failure fallback could not be posted\n' >> "$ERRFILE"
       fi
     fi
   else

@@ -158,22 +158,21 @@ the button, (3) what needs rights he may lack, and (4) what the bots do next.
 A human question or direct mention uses a separate reply-only route. The prompt
 contains the complete ticket description and thread, a deduplicated shared
 record of Valentin's prior ticket statements, and the terminal `CLAUDE.md`,
-`pospeak`, `unslop`, and `i-have-adhd` sources verbatim. It explicitly requires
-relevant images, repository code, browsing evidence, and runner logs to be read
-before answering. Replies always use Codex GPT-5.6 Sol at high effort through
-`hax` with `--no-session --bare`, independent of the agent conf, with a
-five-minute limit. Bubblewrap exposes the repository and logs
-read-only, permits writes only under `/tmp`, and does not mount the board token.
-The model returns HTML; the runner checks its shape and posts it afterward. An
-empty or invalid draft gets one retry with the failed shape rules. If that retry
-also fails, the original draft posts under `Answer:` with a line saying the
-check was skipped, so an owner question never ends in silence.
-Its mandatory first step is a private state sheet built from the description
-and every ticket comment; the selected ticket's full-thread read is separate
-from the capped owned-ticket scan. The sheet records current pull request
-states verified with `gh`, the latest dated QA verdict, and relevant
-configuration that exists or is missing. Newer verified facts win conflicts,
-and the answer identifies superseded older comments. Reply-only runs default
+`pospeak`, `unslop`, and `i-have-adhd` sources verbatim. It answers only from
+that supplied context and does not claim to inspect linked evidence it cannot
+read. Replies always use Codex GPT-5.6 Sol at high effort through
+`hax` with `--no-session --raw`, independent of the agent conf, with a
+five-minute limit. The no-tools process starts in a fresh empty directory set
+read-only and does not need a local repository checkout. The model returns HTML;
+the runner checks its shape and posts it afterward. An empty or invalid draft
+gets one retry with the failed shape rules. If that retry also fails, the
+original draft posts under `Answer:` with a line saying the check was skipped.
+A process or posting failure posts `I could not answer this, error logged` so an
+owner question never ends in silence.
+The runner supplies the selected ticket's uncapped full thread separately from
+the capped owned-ticket scan. The model uses newer dated facts when comments
+conflict and identifies superseded older comments without claiming external
+verification. Reply-only runs default
 to `Answer:` and never use `Decision:` merely to frame an answer. When a choice
 is genuinely required, the reply may end with a `Decision needed:` line that
 asks the owner what to choose.
@@ -287,8 +286,9 @@ status page. The agent itself stays on the host.
 
 ## Every agent has a repo
 
-No repo-less mode: `PR_REPO` is required, and `agent-board-poll` refuses to
-tick without it. The repo is the agent's memory. Every output, report or
+No memory-repo-less mode: `PR_REPO` is required, and `create-agent.sh` refuses
+the configuration before creating or changing an identity. `agent-board-poll`
+also rejects invalid legacy configurations. The repo is the agent's memory. Every output, report or
 script it produces is a pull request to it, never a hand edit and never a
 write to a chat log nobody else can read. Skills stay in the packs
 (`SKILLS_INDEX`); the repo is where the agent's own work accumulates.

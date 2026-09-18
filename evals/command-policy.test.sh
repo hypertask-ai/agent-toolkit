@@ -29,6 +29,16 @@ exit 0
 EOF
 cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "${BOARD_CAPTURE:-/dev/null}"
+if [[ " $* " = *" comment add "* ]] && [ -n "${BOARD_POST_CAPTURE:-}" ]; then
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "--file" ] || [ "${args[$i]}" = "--text" ]; then
+      value="${args[$((i + 1))]}"
+      if [ "${args[$i]}" = "--file" ]; then cat "$value" > "$BOARD_POST_CAPTURE"; else printf '%s' "$value" > "$BOARD_POST_CAPTURE"; fi
+    fi
+  done
+fi
 exit 0
 EOF
 cat > "$TMP/bin/gh" <<'EOF'
@@ -120,11 +130,12 @@ seed_failures() {
 
 run_poll() {
   local state="$1" capture="$2"; shift 2
-  env HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
+    HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
     XDG_STATE_HOME="$state" COMPANY_SKILLS_DIR="$TMP/company" \
     BOARD_JSON="$TMP/board.json" MODEL_CAPTURE="$capture" \
-    BOARD_CAPTURE="${BOARD_CAPTURE:-$TMP/board-capture}" COMMENT_JSON="${COMMENT_JSON:-}" \
-    REPLY_HAX_BIN="$TMP/bin/failing-model" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
+    BOARD_CAPTURE="${BOARD_CAPTURE:-$TMP/board-capture}" BOARD_POST_CAPTURE="${BOARD_POST_CAPTURE:-}" \
+    COMMENT_JSON="${COMMENT_JSON:-}" REPLY_HAX_BIN="$TMP/bin/failing-model" \
     REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
     PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" "$@" test
 }
@@ -181,27 +192,29 @@ else
   bad override-full-command "launch=$(cat "$capture" 2>/dev/null || true)"
 fi
 
-# A failed mention writes host status only but still spends the ticket cooldown.
+# A failed owner reply posts the fixed fallback, writes host status, and still
+# spends the ticket cooldown.
 state="$TMP/state-failure"; capture="$TMP/capture-failure"; board_capture="$TMP/board-failure"
 write_board TEST-4
 write_conf "$state"
 sed -i 's#^MODEL_CLI=.*#MODEL_CLI="failing-model"#' "$TMP/home/.config/agents/test.conf"
 seed_failures "$state" TEST-4 0
 COMMENT_JSON='{"comments":[{"id":99,"createdAt":"2026-09-16T00:00:00Z","text":"<p><span data-label=\"agent-agent-1\">@Test Dev</span> please retry</p>","creator":{"displayName":"Valentin"}}]}'
-BOARD_CAPTURE="$board_capture" COMMENT_JSON="$COMMENT_JSON" \
+BOARD_CAPTURE="$board_capture" BOARD_POST_CAPTURE="$TMP/failure.post" COMMENT_JSON="$COMMENT_JSON" \
   run_poll "$state" "$capture" --once >"$TMP/failure.out" 2>"$TMP/failure.err" || true
 BOARD_CAPTURE="$board_capture" COMMENT_JSON="$COMMENT_JSON" \
   run_poll "$state" "$capture" --once --dry-run >"$TMP/failure-next.out" 2>>"$TMP/failure.err" || true
 status_file="$state/agent-board-poll/test.status"
 if [ -f "$status_file" ] \
    && python3 -c 'import json,sys; row=json.load(open(sys.argv[1])); assert row["state"] == "failed" and row["ticket"] == "TEST-4"' "$status_file" \
-   && ! grep -q 'comment add' "$board_capture" 2>/dev/null \
+   && [ "$(cat "$TMP/failure.post")" = 'I could not answer this, error logged' ] \
+   && grep -q 'comment add TEST-4 --text I could not answer this, error logged' "$board_capture" \
    && ! grep -q '^task-TEST-4:99$' "$state/agent-board-poll/test.seen" \
    && grep -q 'no new human or other-agent comment bypasses the 1800s ticket cooldown' "$TMP/failure-next.out" \
    && ! grep -q 'would pick up TEST-4' "$TMP/failure-next.out"; then
-  ok failed-mention-obeys-cooldown "failure posts nothing and cannot rerun the same mention for 30 minutes"
+  ok failed-mention-obeys-cooldown "failure posts the exact fallback and cannot rerun the same mention for 30 minutes"
 else
-  bad failed-mention-obeys-cooldown "status=$(cat "$status_file" 2>/dev/null || true) board=$(cat "$board_capture" 2>/dev/null || true) next=$(cat "$TMP/failure-next.out")"
+  bad failed-mention-obeys-cooldown "status=$(cat "$status_file" 2>/dev/null || true) post=$(cat "$TMP/failure.post" 2>/dev/null || true) board=$(cat "$board_capture" 2>/dev/null || true) next=$(cat "$TMP/failure-next.out")"
 fi
 
 # Migration preserves the old cursor policy and leaves a custom pi conf alone.

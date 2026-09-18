@@ -15,15 +15,38 @@ mkdir -p "$TMP/home" "$TMP/config" "$TMP/bin" "$TMP/repo-default" \
 printf '# QA skills\n' > "$TMP/INDEX.md"
 printf '# company skills\n' > "$TMP/company/INDEX.md"
 printf 'test\n' > "$TMP/company/VERSION"
+cat > "$TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case " $* " in
+  *' repo view '*) exit 0 ;;
+  *' api repos/'*) printf 'false\n'; exit 0 ;;
+  *) exit 0 ;;
+esac
+EOF
+chmod +x "$TMP/bin/gh"
+
+set +e
+missing_repo_output="$(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" AGENT_BIN_DIR="$TMP/bin" \
+  AGENT_SYSTEMD_DIR="$TMP/units" COMPANY_SKILLS_INDEX= PATH="$TMP/bin:$PATH" \
+  "$ROOT/scripts/create-agent.sh" --name 'Missing Repo' --kind qa --board none \
+    --wiring none --repo "$TMP/repo-default" --skills-index "$TMP/INDEX.md" --dry-run 2>&1)"
+missing_repo_rc=$?
+set -e
+if [ "$missing_repo_rc" -ne 0 ] \
+   && printf '%s\n' "$missing_repo_output" | grep -qF -- '--pr-repo is missing: every agent needs a memory repository'; then
+  ok create-requires-pr-repo 'creation rejects a missing memory repository before writing a config'
+else
+  bad create-requires-pr-repo "rc=$missing_repo_rc output=$missing_repo_output"
+fi
 
 create_qa() {
   HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" AGENT_BIN_DIR="$TMP/bin" \
-    AGENT_SYSTEMD_DIR="$TMP/units" COMPANY_SKILLS_INDEX= \
+    AGENT_SYSTEMD_DIR="$TMP/units" COMPANY_SKILLS_INDEX= PATH="$TMP/bin:$PATH" \
     "$ROOT/scripts/create-agent.sh" "$@" --kind qa --board none --wiring none \
       --skills-index "$TMP/INDEX.md" --yes >/dev/null
 }
-create_qa --name 'QA 1' --repo "$TMP/repo-default"
-create_qa --name 'QA 2' --repo "$TMP/repo-explicit" --sections 'AI Review'
+create_qa --name 'QA 1' --repo "$TMP/repo-default" --pr-repo example/qa-1
+create_qa --name 'QA 2' --repo "$TMP/repo-explicit" --pr-repo example/qa-2 --sections 'AI Review'
 
 if grep -q '^WATCH_SECTIONS="AI Review,QA"$' "$TMP/config/qa-1.conf" \
    && grep -q '^WATCH_SECTIONS="AI Review,QA"$' "$TMP/config/qa-2.conf"; then

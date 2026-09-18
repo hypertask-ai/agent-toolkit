@@ -276,21 +276,17 @@ reasons, emits the `Question held: did not pass the plain-language check`
 activity, and sends no raw comment.
 
 Direct human questions use the fixed high-effort Codex Sol reply route instead
-of the conf provider. Its five-minute bubblewrap sandbox gets the full thread,
-shared Valentin statement record, exact terminal rules, read-only checkout and
-logs, read-only web research, image access, and writable `/tmp`, but no board
-token. Before drafting, the model must write a private state sheet from the
-description and every ticket comment. The selected ticket's full-thread read
-is separate from the capped owned-ticket scan. The sheet records pull request
-states verified with `gh`, the latest QA verdict and date, and relevant
-configuration that exists or is missing. Newer verified facts win conflicts,
-and the answer names superseded older comments. The runner validates and posts
-the returned HTML after the sandbox exits. An empty or invalid draft gets one
+of the conf provider. The five-minute process uses `hax --raw`, which provides
+no tools or project context, and starts in a fresh empty directory set read-only.
+It needs no local repository checkout. The prompt supplies the full thread,
+shared Valentin statement record, and exact terminal rules. The selected
+ticket's full-thread read is separate from the capped owned-ticket scan. The
+runner validates and posts the returned HTML. An empty or invalid draft gets one
 retry with the failed shape rules. If that retry also fails, the original draft
-posts under `Answer:` with a line saying the check was skipped, so an owner
-question never ends in silence. These reply-only runs default to `Answer:`, with
-a final `Decision needed:` question only when the owner genuinely needs to
-choose.
+posts under `Answer:` with a line saying the check was skipped. A process or
+posting failure posts `I could not answer this, error logged`. These reply-only
+runs default to `Answer:`, with a final `Decision needed:` question only when the
+owner genuinely needs to choose.
 
 When the owner writes "I don't understand" or asks for a guide, the answering
 agent posts exactly one `Decision:` comment shaped as a numbered guide and
@@ -337,15 +333,13 @@ Run records and runtime heartbeats report `graft` as `on` or `off`.
 
 ## Its own repo
 
-`PR_REPO` in the conf, required: every bot has one, no repo-less mode. The
-repo is the bot's memory. Every output, report or script it produces is a
-pull request to it, never a hand edit and never a write to a chat log
-nobody else can read. Skills stay in the packs above; the repo is where this
-bot's own work accumulates. Created private with `create-agent.sh --pr-repo
-<org/name>` from `repo-skeleton/` in this template (README, `board.yml`,
-`scripts/`, `reports/`, `CHANGELOG.md`, a pr-title check). `agent-board-poll`
-refuses to tick without `PR_REPO`, one line: `PR_REPO is not set: every agent
-needs a repo, run create-agent --repo`.
+`PR_REPO` in the conf is required. It is the bot's memory repository, separate
+from the local `AGENT_REPO` checkout used for build work. Reply-only runs do not
+need that checkout.
+`create-agent.sh` rejects a missing `--pr-repo` before it creates or changes an
+identity. It creates the repository privately from `repo-skeleton/` in this
+template. `agent-board-poll` still rejects legacy configurations without
+`PR_REPO`.
 
 Auto-merge does not turn on for these repos: GitHub refuses
 `allow_auto_merge` on a private repo whose plan does not carry it. Expected,
