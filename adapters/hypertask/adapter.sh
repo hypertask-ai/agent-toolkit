@@ -307,6 +307,10 @@ AGENT_ID="$agent_id"
 BOARD_IDS="$board_ids"
 QUIET="$quiet"
 VERBATIM="\${AGENT_COMMENT_VERBATIM:-no}"
+OWNER_MENTION_REPLY="no"
+if [ "\${AGENT_REPLY_ONLY:-no}" = "yes" ] && [ "\${AGENT_OWNER_MENTION_REPLY:-no}" = "yes" ]; then
+  OWNER_MENTION_REPLY="yes"
+fi
 RUN_LOG="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.log"
 POSTED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.posted-comments"
 MOVED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.moved-tickets"
@@ -660,7 +664,7 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
   if [ -n "\$TEXT" ]; then
     ORIGINAL_TEXT="\$TEXT"
     OWNER_IDS="\$(_board_owner_ids)"
-    if [ "\$QUIET" = "on" ] && [ "\$VERBATIM" != "yes" ]; then
+    if [ "\$QUIET" = "on" ] && [ "\$VERBATIM" != "yes" ] && [ "\$OWNER_MENTION_REPLY" != "yes" ]; then
       TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
       if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
         _comment_cap_note "quiet mode: stripped board-owner mention from comment on \$REF"
@@ -678,7 +682,8 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
     EXISTING="\$(hypertask --token "\$TOKEN" --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
     VERDICT="\$(EXISTING="\$EXISTING" NEW_TEXT="\$TEXT" AGENT_NAME="\$AGENT_NAME" \
       AGENT_ID="\$AGENT_ID" OWNER_IDS="\$OWNER_IDS" REF="\$REF" \
-      OWNER_MENTIONS="\$OWNER_MENTIONS" NOW="\$(date +%s)" python3 -c '
+      OWNER_MENTIONS="\$OWNER_MENTIONS" OWNER_MENTION_REPLY="\$OWNER_MENTION_REPLY" \
+      NOW="\$(date +%s)" python3 -c '
 import datetime, html, json, os, re
 
 def signature(value):
@@ -716,6 +721,7 @@ owner_ids = {value for value in os.environ["OWNER_IDS"].split(",") if value}
 new_text = os.environ["NEW_TEXT"]
 new_mentions = mention_ids(new_text)
 new_owner_mention = bool(new_mentions & owner_ids)
+owner_mention_reply = os.environ["OWNER_MENTION_REPLY"] == "yes"
 now = int(os.environ["NOW"])
 now_at = datetime.datetime.fromtimestamp(now, datetime.timezone.utc)
 new_signature = signature(new_text)
@@ -749,7 +755,7 @@ except (OSError, ValueError):
 
 if new_mentions and not owner_ids:
     print("OWNER_UNKNOWN")
-elif new_owner_mention and recent_owner_mention:
+elif new_owner_mention and recent_owner_mention and not owner_mention_reply:
     print("OWNER")
 elif recent_duplicate:
     print("UPDATE:" + recent_duplicate[1])
@@ -1197,6 +1203,7 @@ for comment in json.load(sys.stdin).get("comments") or []:
         "createdAt": comment.get("createdAt") or "",
         "html": comment.get("text") or comment.get("commentText") or comment.get("html") or "",
         "author": (agent or creator).get("displayName") or "",
+        "author_id": "" if agent else str(creator.get("id") or creator.get("userId") or ""),
         "agent_id": (agent or {}).get("id") or "",
     })
 print(json.dumps(rows))
@@ -1204,7 +1211,7 @@ print(json.dumps(rows))
 }
 
 # adapter_latest_comment <token-file> <task-id> <board-id>
-# JSON {"id":..., "createdAt":..., "html":..., "author":..., "agent_id":...}
+# JSON {"id":..., "createdAt":..., "html":..., "author":..., "author_id":..., "agent_id":...}
 # or an empty line when there is none.
 adapter_latest_comment() {
   local comments
@@ -1214,6 +1221,26 @@ import json, os
 comments = json.loads(os.environ["COMMENTS"])
 if comments:
     print(json.dumps(max(comments, key=lambda c: (c.get("createdAt") or "", c.get("id") or 0))))
+'
+}
+
+# adapter_is_owner_mention <board-cli> <board-id> <comment-json> <agent-mention-token>
+adapter_is_owner_mention() {
+  local board_cli="$1" board_id="$2" comment="$3" mention="$4" project
+  project="$($board_cli --json project show "$board_id" 2>/dev/null)" || return 1
+  COMMENT="$comment" PROJECT="$project" MENTION="$mention" python3 -c '
+import json, os, sys
+try:
+    comment = json.loads(os.environ["COMMENT"])
+    raw = os.environ["PROJECT"]
+    project_doc = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+    project = project_doc.get("project") if isinstance(project_doc.get("project"), dict) else project_doc
+except (json.JSONDecodeError, TypeError):
+    raise SystemExit(1)
+owner_id = str(project.get("ownerId") or (project.get("owner") or {}).get("id") or "")
+author_id = str(comment.get("author_id") or "")
+mentioned = os.environ["MENTION"] in str(comment.get("html") or "")
+sys.exit(0 if owner_id and author_id == owner_id and mentioned else 1)
 '
 }
 
@@ -1554,10 +1581,13 @@ if addressed:
     trigger = max(addressed, key=key)
     if latest_own is None or key(trigger) > key(latest_own):
         _, author = actor(trigger)
+        creator = trigger.get("creator") if isinstance(trigger.get("creator"), dict) else {}
         row["trigger"] = "reply_only"
         row["trigger_comment"] = {
             "id": trigger.get("id"), "createdAt": trigger.get("createdAt") or "",
-            "html": body(trigger), "author": author, "agent_id": "",
+            "html": body(trigger), "author": author,
+            "author_id": str(creator.get("id") or creator.get("userId") or ""),
+            "agent_id": "",
         }
         print(json.dumps(row))
 ')"
@@ -2405,18 +2435,20 @@ $finish_contract
 
 ${AGENT_ADVISOR_GUIDANCE:+$AGENT_ADVISOR_GUIDANCE
 
-}Ticket comments have exactly four allowed kinds. Start one with \`Question:\`
+}Ticket comments have exactly five allowed kinds. Start one with \`Question:\`
 only when a human must answer; name what you need and end it with a question
-mark. Start one with \`Decision:\` for a fact the owner must know. Start one
-with \`Handoff:\` and name the receiving agent. Start one with \`Done:\` as a
-single line containing the pull request link. Claims, plans, progress, checks,
+mark. Start one with \`Answer:\` when replying to a direct owner question or
+mention. Start one with \`Decision:\` for a fact the owner must know. Start one
+with \`Handoff:\` and name the receiving agent. Start one with \`Done:\` and
+explain what shipped with the pull request link. Claims, plans, progress, checks,
 retries, blockers, costs, and gate ledgers are run activity, not comments.
 The board wrapper redirects any unmarked comment to activity.
 
-When QUIET is on, never @mention the board owner. Move the ticket to the review
-lane for attention. The wrapper strips and logs an owner mention before posting.
-The existing maximum of three comments per ticket per day and one reminder per
-day remains. Write as $agent_name, in HTML block tags, with
+When QUIET is on, do not @mention the board owner unless replying to a comment
+where the owner directly mentioned you. That direct reply keeps the owner mention
+even when the daily owner-mention allowance was already used. Otherwise move the
+ticket to the review lane for attention. The existing maximum of three comments
+per ticket per day and one reminder per day remains. Write as $agent_name, in HTML block tags, with
 \`$board_cli comment add $ref --text '<p>Done: https://github.com/org/repo/pull/1</p>'\`.
 
 Do not ask for permission and do not stop halfway.

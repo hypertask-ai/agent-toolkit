@@ -248,9 +248,11 @@ know; `Handoff:` names the receiving agent and explains what shipped; and
 `Done:` explains what shipped and includes the pull request link. Neither
 `Handoff:` nor `Done:` can be only a link. Outside a reply-only run, the board
 wrapper redirects anything else to run activity. `QUIET="on"` is the default
-and strips board-owner mentions from comments, logging the change. The review
-column provides attention instead. The existing one-reminder and
-three-comments-per-day limits still apply.
+and strips board-owner mentions from comments, logging the change. An `Answer:`
+to the owner's direct mention keeps the owner mention even after this agent used
+its daily owner-mention allowance. The review column provides attention in all
+other cases. The existing one-reminder and three-comments-per-day limits still
+apply.
 
 The drafting agent must run all five comment kinds through the real pospeak,
 unslop, and i-have-adhd skills before posting, not only satisfy the mechanical

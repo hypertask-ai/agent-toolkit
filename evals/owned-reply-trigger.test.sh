@@ -30,7 +30,9 @@ exit 0
 EOF
 cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
-if [[ " $* " = *" comment add "* ]] && [ -n "${BOARD_POST_CAPTURE:-}" ]; then
+if [[ " $* " = *" --json project show "* ]]; then
+  printf '{"project":{"ownerId":6}}\n'
+elif [[ " $* " = *" comment add "* ]] && [ -n "${BOARD_POST_CAPTURE:-}" ]; then
   args=("$@")
   for ((i = 0; i < ${#args[@]}; i++)); do
     case "${args[$i]}" in
@@ -53,7 +55,7 @@ EOF
 cat > "$TMP/bin/hax-stub" <<'EOF'
 #!/usr/bin/env bash
 printf '%s' "${!#}" > "$PROMPT_CAPTURE"
-printf '<p><strong>Answer: The feature uses a flag.</strong></p><p>Next: use that answer.</p>\n'
+printf '<p><strong>Answer: <span data-type="mention" data-label="name-6">Valentin</span>, the feature uses a flag.</strong></p><p>Next: use that answer.</p>\n'
 EOF
 cat > "$TMP/bin/timeout-stub" <<'EOF'
 #!/usr/bin/env bash
@@ -132,7 +134,7 @@ cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","section":"Done","title":"Answer the human","description":"Already completed","assignees":[],"labels":[],"commentCount":1,"updatedAt":"2026-01-01T00:02:00Z"}]}
 EOF
 cat > "$TMP/comments.json" <<'EOF'
-{"comments":[{"id":3,"createdAt":"2026-01-01T00:02:00Z","agent":null,"creator":{"displayName":"Valentin"},"text":"<p><span data-label=\"agent-agent-1\">Test Bot</span> is that a feature flag?</p>"}]}
+{"comments":[{"id":3,"createdAt":"2026-01-01T00:02:00Z","agent":null,"creator":{"id":6,"displayName":"Valentin"},"text":"<p><span data-label=\"agent-agent-1\">Test Bot</span> is that a feature flag?</p>"}]}
 EOF
 rm -f "$TMP/state/agent-board-poll/test.seen" "$TMP/state/agent-board-poll/test.ticket-runs"
 output="$(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
@@ -146,6 +148,7 @@ else
   bad done-mention-reply-only "output=$output"
 fi
 
+printf 'TEST-1\t%s\n' "$(date +%s)" > "$TMP/state/agent-board-poll/test.owner-mentions"
 PROMPT_CAPTURE="$TMP/prompt" TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPTURE="$TMP/bwrap" \
   BOARD_POST_CAPTURE="$TMP/answer.post" REPLY_HAX_BIN="$TMP/bin/hax-stub" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
   REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
@@ -162,12 +165,14 @@ if grep -qF 'You are Test Bot in a read-only reply run for TEST-1.' "$TMP/prompt
    && grep -qF 'POSPEAK TERMINAL RULE' "$TMP/prompt" \
    && grep -qF 'UNSLOP TERMINAL RULE' "$TMP/prompt" \
    && grep -qF 'ADHD TERMINAL RULE' "$TMP/prompt" \
-   && grep -qF 'This reply-only run must leave the ticket in its current column.' "$TMP/prompt" \
+   && grep -qF 'The board owner directly @mentioned you.' "$TMP/prompt" \
+   && grep -qF 'This exception keeps the mention even when the daily owner-mention allowance was already used.' "$TMP/prompt" \
    && grep -qF '<strong>Answer:' "$TMP/answer.post" \
+   && grep -qF 'data-label="name-6"' "$TMP/answer.post" \
    && ! grep -qF '<strong>Decision:' "$TMP/answer.post" \
    && ! grep -qF 'COMMENT CONTRACT:' "$TMP/prompt" \
    && ! grep -qF 'Decision: concise answer' "$TMP/prompt"; then
-  ok reply-only-prompt-contract 'reply-only defaults to Answer under the exact terminal rules'
+  ok reply-only-prompt-contract 'an Answer to an owner mention posts with the mention intact after its daily allowance was used'
 else
   bad reply-only-prompt-contract "prompt=$(cat "$TMP/prompt" 2>/dev/null || true)"
 fi

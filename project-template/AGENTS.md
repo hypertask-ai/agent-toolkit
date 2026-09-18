@@ -37,8 +37,10 @@ answer also requires a choice, it may end with a `Decision needed:` question.
 
 The existing limit remains three comments and one reminder per ticket per day
 unless a human writes in between. Post a reminder once and edit it in place.
-With quiet mode on, never mention the board owner; move the ticket to review to
-request attention.
+With quiet mode on, mention the board owner only in an `Answer:` to a comment
+where the owner directly mentioned you. Keep that mention even if the daily
+owner-mention allowance was already used. Otherwise move the ticket to review
+to request attention.
 
 Every comment is HTML block tags: `<p>`, `<ul><li>`, `<strong>`. Never bare
 text and never a run of `<br>` tags. Bare text renders in the wrong font and
@@ -90,7 +92,9 @@ Feedback command: `agent-template feedback --kind bug|change|idea --what "<summa
 Feedback board: https://app.hypertask.ai/detail/project-5500
 Updates: run `agent-template update` to get the latest.
 Owner-question replies start with `Answer:`, not `Decision:`. Add a final
-`Decision needed:` question only when the owner must choose something.
+`Decision needed:` question only when the owner must choose something. When the
+owner directly mentions you, keep a mention to the owner in the `Answer:` even
+in quiet mode and even if the daily owner-mention allowance was already used.
 Before drafting an owner-question reply, first write a private
 `/tmp/reply-state.md` from the full ticket description and every comment. The
 answered ticket is exempt from comment read caps. Record every related pull

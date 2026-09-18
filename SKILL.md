@@ -128,8 +128,10 @@ know; `Handoff:` names the receiving agent and explains what shipped; and
 reminder that qualifies as a decision is posted once and then edited in place,
 never re-posted. The existing limit remains one reminder and three comments per
 ticket per day unless a human writes in between. With `QUIET="on"`, the wrapper
-strips and logs board-owner mentions; moving the ticket to review requests
-attention.
+strips and logs board-owner mentions except when an `Answer:` replies to the
+owner's direct mention. That reply keeps the owner mention even if its daily
+allowance was already used. Moving the ticket to review requests attention in
+all other cases.
 
 All five comment kinds are for a product owner reading on a phone. The agent
 drafting any kind must run the draft through the real pospeak, unslop, and
@@ -354,7 +356,7 @@ our own message rather than "command not found" three layers down.
    activity. A 404 from the runs API switches to local-only activity in the run
    log without stopping work. The runner closes the run with its final status.
 8. The prompt tells the process to read the skills index first, gives it the
-   ticket and latest comment, and limits ticket comments to the four kinds.
+   ticket and latest comment, and limits ticket comments to the five kinds.
 9. Log to `~/.local/state/agent-board-poll/<slug>.log` and exit.
 
 ## One ticket until live
@@ -568,8 +570,8 @@ See `CONF.md` for the complete schema.
 | `CHAT_CLI` | optional chat command; absent uses `MODEL_CLI` |
 | `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
 | `CHAT` | `on` to answer through the host chat daemon, default `on` for non-CLI board agents |
-| `QUIET` | `on` redirects unmarked comments to activity and strips board-owner mentions; default `on` |
-| `ANSWERER_FALLBACK` | fallback answerer slug when no mention, agent assignee, or prior `Done:` or `Decision:` author exists; default empty |
+| `QUIET` | `on` redirects unmarked comments to activity and strips board-owner mentions except in an `Answer:` to the owner's direct mention; default `on` |
+| `ANSWERER_FALLBACK` | fallback answerer slug when no mention, agent assignee, or prior `Answer:`, `Done:`, or `Decision:` author exists; default empty |
 | `MANAGER` | `on` to allow runner control and ticket delegation, default `off` |
 | `MAINTAINER` | `on` to add allowlisted setup builds, merges, and advisor instructions, default `off` |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |

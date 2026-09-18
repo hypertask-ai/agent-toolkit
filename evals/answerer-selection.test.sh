@@ -153,9 +153,9 @@ cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","section":"Review","title":"Owner question","description":"Choose one answerer","assignees":[],"labels":[],"commentCount":3,"updatedAt":"2026-09-17T10:00:00Z"}]}
 EOF
 cat > "$TMP/comments.json" <<'EOF'
-{"comments":[{"id":8,"createdAt":"2026-09-17T08:00:00Z","agent":{"id":"agent-a","displayName":"Alpha Bot"},"creator":{"displayName":"Owner"},"text":"<p>Decision: Use the old route.</p>"},{"id":10,"createdAt":"2026-09-17T09:00:00Z","agent":{"id":"agent-b","displayName":"Beta Bot"},"creator":{"displayName":"Owner"},"text":"<p><strong>Done: The update shipped.</strong></p>"},{"id":20,"createdAt":"2026-09-17T10:00:00Z","agent":null,"creator":{"displayName":"Owner"},"text":"<p>What should happen next?</p>"}]}
+{"comments":[{"id":8,"createdAt":"2026-09-17T08:00:00Z","agent":{"id":"agent-a","displayName":"Alpha Bot"},"creator":{"displayName":"Owner"},"text":"<p>Decision: Use the old route.</p>"},{"id":10,"createdAt":"2026-09-17T09:00:00Z","agent":{"id":"agent-b","displayName":"Beta Bot"},"creator":{"displayName":"Owner"},"text":"<p><strong>Answer: The update is ready.</strong></p>"},{"id":20,"createdAt":"2026-09-17T10:00:00Z","agent":null,"creator":{"displayName":"Owner"},"text":"<p>What should happen next?</p>"}]}
 EOF
-check_case latest-marker-author beta 'last Done/Decision author'
+check_case latest-marker-author beta 'last Answer/Done/Decision author'
 
 cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","section":"Review","title":"Owner question","description":"Choose one answerer","assignees":[],"labels":[],"commentCount":1,"updatedAt":"2026-09-17T10:00:00Z"}]}

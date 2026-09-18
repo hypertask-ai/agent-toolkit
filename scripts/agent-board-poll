@@ -210,7 +210,7 @@ TERMINAL_ADHD_SKILL="${VALENTIN_ADHD_SKILL:-$HOME/.claude/skills/i-have-adhd/SKI
 if [ ! -r "$TERMINAL_ADHD_SKILL" ]; then
   TERMINAL_ADHD_SKILL="$HOME/.claude/plugins/marketplaces/i-have-adhd/skills/i-have-adhd/SKILL.md"
 fi
-PLAIN_LANGUAGE_PROMPT="For every Question:, Decision:, Handoff:, or Done: ticket comment, follow the four rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
+PLAIN_LANGUAGE_PROMPT="For every Question:, Answer:, Decision:, Handoff:, or Done: ticket comment, follow the four rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
 
 POSPEAK RULES, VERBATIM:
 $(cat "$POSPEAK_SKILL")
@@ -944,7 +944,7 @@ run_advisor_instruction() {
     if [ -n "$ticket" ]; then
       IFS= read -r first_line < "$reply_file" || true
       case "$first_line" in
-        Question:*|Decision:*|Handoff:*|Done:*)
+        Question:*|Answer:*|Decision:*|Handoff:*|Done:*)
           if ! post_ticket_comment "$ticket" file "$reply_file"; then comment_status="failed"; fi
           ;;
         *)
@@ -1575,7 +1575,7 @@ sys.exit(0 if own else 1)'; then
         comment_is_human="yes"
       else
         case "$comment_text" in
-          Done:*|Decision:*|Handoff:*) comment_is_other_bot_marker="yes" ;;
+          Answer:*|Done:*|Decision:*|Handoff:*) comment_is_other_bot_marker="yes" ;;
         esac
         if TEXT="$comment_text" NAME="$AGENT_NAME" python3 -c '
 import os, sys
@@ -1598,6 +1598,12 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
     is_reply_only="yes"
   elif [ "$comment_is_human" = "yes" ] && { [ "$mentioned" = "yes" ] || [[ "$comment_text" == *\?* ]]; }; then
     is_reply_only="yes"
+  fi
+
+  owner_mention_reply="no"
+  if [ "$is_reply_only" = "yes" ] && declare -F adapter_is_owner_mention >/dev/null 2>&1 \
+     && adapter_is_owner_mention "$BOARD_CLI" "$board" "$comment_json" "$MENTION"; then
+    owner_mention_reply="yes"
   fi
 
   if [ "$is_reply_only" = "yes" ]; then
@@ -1673,13 +1679,13 @@ else:
             if not comment.get("agent_id") or key(comment) >= question_key:
                 continue
             plain = html.unescape(re.sub(r"<[^>]+>", " ", str(comment.get("html") or "")))
-            if re.match(r"\s*(Done|Decision):", plain, re.I):
+            if re.match(r"\s*(Answer|Done|Decision):", plain, re.I):
                 prior.append(comment)
         if prior:
             marker = max(prior, key=key)
             marker_id = str(marker.get("agent_id") or "")
             owner = by_id.get(marker_id, {"id": marker_id, "slug": ""})
-            reason = "last Done/Decision author"
+            reason = "last Answer/Done/Decision author"
         else:
             owner = {"id": "", "slug": os.environ.get("FALLBACK", "")}
             reason = "fallback"
@@ -2029,7 +2035,7 @@ Latest comment: ${comment_text:-none}
 ${AGENT_ADVISOR_GUIDANCE:+$AGENT_ADVISOR_GUIDANCE
 
 }You are $AGENT_NAME. Do the work. Post a ticket comment only when it fits one
-of the four kinds in the comment contract below, using \`$BOARD_CLI comment add
+of the five kinds in the comment contract below, using \`$BOARD_CLI comment add
 $ref --text '<p>Marker: your reply in HTML block tags</p>'\` as this agent, and
 move the ticket per the skills index. Do not ask for
 permission and do not stop halfway: this process exits when you do.
@@ -2183,17 +2189,23 @@ Ask Graft before grepping: use \`graft ask '<question>'\` or the Graft MCP tools
   fi
 
   if [ "$is_reply_only" = "yes" ]; then
-    PROMPT="$PROMPT
+    if [ "$owner_mention_reply" = "yes" ]; then
+      PROMPT="$PROMPT
+
+QUIET MODE: The board owner directly @mentioned you. Start the Answer: reply with an HTML mention to the owner. This exception keeps the mention even when the daily owner-mention allowance was already used. Leave the ticket in its current column."
+    else
+      PROMPT="$PROMPT
 
 QUIET MODE: Do not @mention the board owner. This reply-only run must leave the ticket in its current column."
+    fi
   else
     PROMPT="$PROMPT
 
-COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent and explains what shipped. \`Done:\` explains what shipped and includes the pull request link. Neither \`Handoff:\` nor \`Done:\` can be only a link. Write every ticket reference as an HTML anchor whose visible text is its full id plus authoritative title, and every PR reference inside a full https HTML anchor. Everything else is run activity, not a ticket comment. Progress, plans, claims, retries, model switches, test output, diagnostics, and routine status never belong in comments. Start directly with the marker; never put a heading before it.
+COMMENT CONTRACT: A ticket comment must start with exactly one of these five markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Answer:\` replies to a direct owner question or mention. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent and explains what shipped. \`Done:\` explains what shipped and includes the pull request link. Neither \`Handoff:\` nor \`Done:\` can be only a link. Write every ticket reference as an HTML anchor whose visible text is its full id plus authoritative title, and every PR reference inside a full https HTML anchor. Everything else is run activity, not a ticket comment. Progress, plans, claims, retries, model switches, test output, diagnostics, and routine status never belong in comments. Start directly with the marker; never put a heading before it.
 
 $PLAIN_LANGUAGE_PROMPT
 
-QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any ticket comment. The board wrapper strips and logs an owner mention before posting. Attention comes from moving the ticket to the review column."
+QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless replying to a comment where the owner directly mentioned you. That Answer: reply keeps the owner's mention. Otherwise attention comes from moving the ticket to the review column."
   fi
 
   RUN_DIR="${AGENT_REPO:-}"
@@ -2323,7 +2335,7 @@ print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
     if [ "$rc" -eq 0 ]; then
       cat "$REPLY_FILE" >> "$LOG"
       printf '\n' >> "$LOG"
-      if ! (export AGENT_REPLY_ONLY=yes; post_ticket_comment "$ref" file "$REPLY_FILE"); then
+      if ! (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; post_ticket_comment "$ref" file "$REPLY_FILE"); then
         printf 'validated reply could not be posted\n' >> "$ERRFILE"
         rc=74
       fi

@@ -20,7 +20,9 @@ Feedback command: \`$FEEDBACK_COMMAND\`
 Feedback board: $FEEDBACK_BOARD_URL
 Updates: run \`agent-template update\` to get the latest.
 Owner-question replies start with \`Answer:\`, not \`Decision:\`. Add a final
-\`Decision needed:\` question only when the owner must choose something.
+\`Decision needed:\` question only when the owner must choose something. When the
+owner directly mentions you, keep a mention to the owner in the \`Answer:\` even
+in quiet mode and even if the daily owner-mention allowance was already used.
 Before drafting an owner-question reply, first write a private
 \`/tmp/reply-state.md\` from the full ticket description and every comment. The
 answered ticket is exempt from comment read caps. Record every related pull
