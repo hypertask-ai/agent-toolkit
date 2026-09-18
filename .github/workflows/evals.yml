@@ -23,7 +23,7 @@ jobs:
             --pattern checksums.txt --pattern hypertask-linux-x86_64 \
             --dir "$RUNNER_TEMP/hypertask-cli"
           cd "$RUNNER_TEMP/hypertask-cli"
-          rg 'hypertask-linux-x86_64$' checksums.txt | sha256sum --check
+          awk '$2 == "hypertask-linux-x86_64"' checksums.txt | sha256sum --check
           chmod 755 hypertask-linux-x86_64
           echo "HYPERTASK_REAL_CLI=$RUNNER_TEMP/hypertask-cli/hypertask-linux-x86_64" >> "$GITHUB_ENV"
       - name: Run evals
