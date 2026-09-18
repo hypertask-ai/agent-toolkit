@@ -43,8 +43,8 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `AGENT_ID` | Identity id on the board. |
 | `AGENT_NAME` | Display name used in prompts. |
 | `AGENT_KIND` | `dev`, `qa`, `worker`, or `cli`. |
-| `AGENT_REPO` | Checkout used for ticket work. |
-| `PR_REPO` | Required `org/name` memory repository. |
+| `AGENT_REPO` | Checkout used for build work. Reply-only runs do not require it. |
+| `PR_REPO` | Required `org/name` memory repository, validated by `create-agent.sh`. |
 | `PR_BRANCH_PREFIX` | Branch prefix that proves this agent owns a PR, default `agent/<slug>-`. |
 | `BOARD_ADAPTER` | Adapter loaded by the runner. |
 | `BOARD_ID` | Board id, or comma-separated ids. |

@@ -38,8 +38,8 @@ BOARD_ID=""
 REPO=""
 SKILLS_REPO=""
 # PR_REPO: the agent's own memory repo, org/name on GitHub, distinct from
-# --repo above (a local working-directory path). Every agent needs one now
-# (agent-board-poll refuses to tick without PR_REPO), so this flag creates it
+# --repo above (a local working-directory path). Every agent needs one, so
+# validation refuses a missing value before creation and this flag creates it
 # private from the skeleton in ../repo-skeleton when it does not exist yet,
 # and always writes PR_REPO into the conf.
 PR_REPO=""
@@ -145,16 +145,6 @@ case "$CHAT_PAGE" in yes|no) ;; *) die "--chat-page must be yes or no" "pass --c
 if [ "$KIND" = "cli" ] || [ "$BOARD" = "none" ]; then CHAT_PAGE="no"; fi
 CHAT="off"
 [ "$CHAT_PAGE" = "yes" ] && CHAT="on"
-if [ -n "$PR_REPO" ]; then
-  case "$PR_REPO" in
-    */*) ;;
-    *) die "--pr-repo must be org/name, got '$PR_REPO'" "pass the GitHub org and repo name, e.g. hypertask-ai/product-bot" ;;
-  esac
-fi
-
-core_load_adapter "$BOARD"
-adapter_require_tools
-
 SLUG="$(core_slug "$NAME")"
 DISPLAY_NAME="$NAME"
 if [ "$KIND" = "cli" ]; then DISPLAY_NAME="$NAME CLI"; fi
@@ -170,9 +160,20 @@ if [ "$KIND" = "cli" ]; then DISPLAY_NAME="$NAME CLI"; fi
 EXISTING_CONF="$(core_config_dir)/$SLUG.conf"
 if [ "$RESUME" = "yes" ] && [ -f "$EXISTING_CONF" ]; then
   [ -n "$REPO" ] || REPO="$(sed -n 's/^AGENT_REPO="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
+  [ -n "$PR_REPO" ] || PR_REPO="$(sed -n 's/^PR_REPO="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
   [ -n "$SKILLS_INDEX" ] || SKILLS_INDEX="$(sed -n 's/^SKILLS_INDEX="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
   [ -n "$BOARD_ID" ] || BOARD_ID="$(sed -n 's/^BOARD_ID="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
 fi
+
+[ -n "$PR_REPO" ] || die "--pr-repo is missing: every agent needs a memory repository" \
+  "pass --pr-repo <org/name>, or restore PR_REPO in the existing agent config"
+case "$PR_REPO" in
+  */*) ;;
+  *) die "--pr-repo must be org/name, got '$PR_REPO'" "pass the GitHub org and repo name, e.g. hypertask-ai/product-bot" ;;
+esac
+
+core_load_adapter "$BOARD"
+adapter_require_tools
 
 if [ -n "$REPO" ]; then core_require_abs "$REPO" "--repo"; fi
 if [ -n "$REPO" ] && [ ! -d "$REPO" ]; then
@@ -268,7 +269,7 @@ echo "  kind      $KIND"
 echo "  board     $BOARD${BOARD_ID:+ (id $BOARD_ID)}"
 echo "  wiring    $WIRING"
 echo "  repo      ${REPO:-none}"
-echo "  pr-repo   ${PR_REPO:-none (agent-board-poll will refuse to tick without one)}"
+echo "  pr-repo   $PR_REPO"
 echo "  skills    $SKILLS_INDEX"
 echo "            (read in order: company pack first, bot pack last)"
 echo "  model CLI $MODEL_CLI"
@@ -456,14 +457,8 @@ MAINTAINER="off"
 GRAFT="off"
 EOF
 )"
-# PR_REPO only when given: an empty PR_REPO="" written to a conf that has
-# none yet would satisfy core_write_missing_keys and still leave the runner's
-# required-key check failing on an empty value, silently hiding the real
-# "run create-agent --pr-repo" fix behind a key that already exists.
-if [ -n "$PR_REPO" ]; then
-  CONF_CONTENT="$CONF_CONTENT
+CONF_CONTENT="$CONF_CONTENT
 PR_REPO=\"$PR_REPO\""
-fi
 if [ "$DRY_RUN" != "yes" ]; then
   mkdir -p "$CONFIG_DIR"
   core_write_missing_keys "$CONF_FILE" "$CONF_CONTENT"
@@ -524,7 +519,7 @@ echo "=== check before you say done ==="
 cat <<EOF
   [ ] $CONF_FILE is 0600 and names the right board, sections and skills index
   [ ] every index in $SKILLS_INDEX exists, and the bot pack ($SKILLS_INDEX_LAST) has a skill whose trigger matches this agent's work
-  [ ] PR_REPO is set in $CONF_FILE, either from --pr-repo above or added by hand: agent-board-poll refuses to tick without it
+  [ ] PR_REPO is set in $CONF_FILE from the required --pr-repo creation check
 EOF
 if [ "$BOARD" != "none" ]; then
   cat <<EOF

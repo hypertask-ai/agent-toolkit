@@ -1,0 +1,1 @@
+- AGTE-95 runs owner replies without a local checkout or bubblewrap, rejects missing memory-repository configuration during agent creation, and posts `I could not answer this, error logged` after reply failures.

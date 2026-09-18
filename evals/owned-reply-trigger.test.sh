@@ -55,6 +55,10 @@ EOF
 cat > "$TMP/bin/hax-stub" <<'EOF'
 #!/usr/bin/env bash
 printf '%s' "${!#}" > "$PROMPT_CAPTURE"
+printf '%s\n' "$@" > "$HAX_CAPTURE"
+pwd > "$REPLY_CWD_CAPTURE"
+stat -c '%a' . > "$REPLY_MODE_CAPTURE"
+find . -mindepth 1 -print -quit > "$REPLY_CONTENT_CAPTURE"
 printf '<p><strong>Answer: <span data-type="mention" data-label="name-6">Valentin</span>, the feature uses a flag.</strong></p><p>Next: use that answer.</p>\n'
 EOF
 cat > "$TMP/bin/timeout-stub" <<'EOF'
@@ -106,7 +110,7 @@ cat > "$TMP/home/.config/agents/test.conf" <<EOF
 AGENT_ID="agent-1"
 AGENT_NAME="Test Bot"
 AGENT_KIND="dev"
-AGENT_REPO="$TMP/repo"
+AGENT_REPO=""
 BOARD_ADAPTER="hypertask"
 BOARD_ID="1"
 TOKEN_FILE="$TMP/token"
@@ -149,8 +153,10 @@ else
 fi
 
 printf 'TEST-1\t%s\n' "$(date +%s)" > "$TMP/state/agent-board-poll/test.owner-mentions"
-PROMPT_CAPTURE="$TMP/prompt" TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPTURE="$TMP/bwrap" \
-  BOARD_POST_CAPTURE="$TMP/answer.post" REPLY_HAX_BIN="$TMP/bin/hax-stub" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
+PROMPT_CAPTURE="$TMP/prompt" TIMEOUT_CAPTURE="$TMP/timeout" HAX_CAPTURE="$TMP/hax" \
+  REPLY_CWD_CAPTURE="$TMP/reply-cwd" REPLY_MODE_CAPTURE="$TMP/reply-mode" \
+  REPLY_CONTENT_CAPTURE="$TMP/reply-content" BOARD_POST_CAPTURE="$TMP/answer.post" \
+  REPLY_HAX_BIN="$TMP/bin/hax-stub" \
   REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
   HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
   XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
@@ -178,20 +184,19 @@ else
 fi
 
 if [ "$(cat "$TMP/timeout")" = 300 ] \
-   && grep -qxF -- '--ro-bind' "$TMP/bwrap" \
-   && grep -qxF '/workspace' "$TMP/bwrap" \
-   && grep -qxF '/logs' "$TMP/bwrap" \
-   && grep -qxF -- '--tmpfs' "$TMP/bwrap" \
-   && grep -qxF -- '--clearenv' "$TMP/bwrap" \
-   && grep -qxF -- '--provider=codex' "$TMP/bwrap" \
-   && grep -qxF -- '--model=gpt-5.6-sol' "$TMP/bwrap" \
-   && grep -qxF -- '--effort=high' "$TMP/bwrap" \
-   && grep -qxF -- '--no-session' "$TMP/bwrap" \
-   && grep -qxF -- '--bare' "$TMP/bwrap" \
-   && ! grep -qF "$TMP/token" "$TMP/bwrap"; then
-  ok reply-only-sandbox-contract 'Codex Sol high gets five minutes, read-only mounts, writable tmp, and no board token'
+   && [ "$(cat "$TMP/reply-mode")" = 555 ] \
+   && [ ! -s "$TMP/reply-content" ] \
+   && [ "$(cat "$TMP/reply-cwd")" != "$TMP/repo" ] \
+   && grep -qxF -- '--provider=codex' "$TMP/hax" \
+   && grep -qxF -- '--model=gpt-5.6-sol' "$TMP/hax" \
+   && grep -qxF -- '--effort=high' "$TMP/hax" \
+   && grep -qxF -- '--no-session' "$TMP/hax" \
+   && grep -qxF -- '--raw' "$TMP/hax" \
+   && ! grep -qxF -- '--bare' "$TMP/hax" \
+   && ! grep -qF "$TMP/token" "$TMP/hax"; then
+  ok reply-only-sandbox-contract 'a repo-less agent runs Codex Sol high without tools in an empty read-only directory'
 else
-  bad reply-only-sandbox-contract "timeout=$(cat "$TMP/timeout" 2>/dev/null) bwrap=$(tr '\n' ' ' < "$TMP/bwrap" 2>/dev/null)"
+  bad reply-only-sandbox-contract "timeout=$(cat "$TMP/timeout" 2>/dev/null) mode=$(cat "$TMP/reply-mode" 2>/dev/null) cwd=$(cat "$TMP/reply-cwd" 2>/dev/null) args=$(tr '\n' ' ' < "$TMP/hax" 2>/dev/null)"
 fi
 
 if printf '%s\n' '<p><strong>Answer: Both options are available.</strong></p><p>Decision needed: Which option should ship?</p>' \
@@ -228,7 +233,7 @@ PROMPT_CAPTURE="$TMP/htpr-3533.prompt" TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPT
   TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
   PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test >/dev/null
 if file "$ROOT/evals/fixtures/htpr-3533-redirect-uri-mismatch.png" | grep -qF 'PNG image data' \
-   && grep -qF 'Download every relevant image URL to /tmp and inspect the image' "$TMP/htpr-3533.prompt" \
+   && grep -qF 'Treat image URLs as evidence named in the thread' "$TMP/htpr-3533.prompt" \
    && grep -qF 'https://screencast2.com/MFrrv.png?raw' "$TMP/htpr-3533.prompt" \
    && grep -qF '<strong>Answer:' "$TMP/htpr-3533.post" \
    && grep -qF 'redirect address does not match' "$TMP/htpr-3533.post" \
