@@ -2053,7 +2053,31 @@ adapter_workdir_remove() {
 #                    <description> <latest-comment>
 adapter_run_prompt() {
   local skills_index="$1" agent_name="$2" board_cli="$3" ref="$4" url="$5"
-  local title="$6" description="$7" latest="$8" why="${9:-}"
+  local title="$6" description="$7" latest="$8" why="${9:-}" finish_contract
+  if [ "${MAINTAINER:-off}" = "on" ]; then
+    IFS= read -r -d '' finish_contract <<'EOF' || true
+FINISH IT AS THE SETUP MAINTAINER. A ticket asking for an allowlisted merge, release, update, or build is direct maintainer work:
+- Merge or release an existing pull request with `agent-template merge <pr-url>`.
+- Start a requested code change with `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]`.
+- Deploy a merged toolkit release with `agent-template update --keep-timers`.
+Run the relevant command in this run. This replaces the ordinary developer pull request workflow. Do not create an implementation branch for a direct operation, delegate it, hand it to a developer, or say that a developer must release it. After a successful direct merge, post a `Done:` comment that names the result and links the pull request. A background build is not done when it starts; its completion checker posts the final result.
+EOF
+  else
+    IFS= read -r -d '' finish_contract <<'EOF' || true
+FINISH IT. The run counts for something only when the work is in a pull
+request that can merge on its own: branch off the production branch, commit,
+push, open the PR, and turn auto-merge on with
+`gh pr merge --auto --squash <number>` in the same breath as opening it. A
+PR sitting green with auto-merge off is work nobody gets. GitHub refuses that
+command on a private repo whose plan does not carry auto-merge; when it is
+refused, do not retry it and do not fail the run over it: leave the PR open,
+say so in your result comment, and move the ticket to the review lane anyway.
+Checks turning green on a PR that could not get auto-merge is what the
+supervisor's pr-hygiene check looks for; it merges those by hand. Then move
+the ticket to the review lane the lifecycle skill names. Do not leave commits
+unpushed: this working directory is thrown away when the process exits.
+EOF
+  fi
   # $skills_index is now a readable phrase naming every pack, so the lifecycle
   # scripts are looked up under the FIRST pack (the company one), which is
   # where ticket-lifecycle lives. The runner exports it.
@@ -2100,18 +2124,7 @@ $skills_index, in that order, company pack before your own.
 Claim the ticket with \`$claim_sh $ref\` before you write any code. Never
 assign userId 6: only Valentin assigns Valentin.
 
-FINISH IT. The run counts for something only when the work is in a pull
-request that can merge on its own: branch off the production branch, commit,
-push, open the PR, and turn auto-merge on with
-\`gh pr merge --auto --squash <number>\` in the same breath as opening it. A
-PR sitting green with auto-merge off is work nobody gets. GitHub refuses that
-command on a private repo whose plan does not carry auto-merge; when it is
-refused, do not retry it and do not fail the run over it: leave the PR open,
-say so in your result comment, and move the ticket to the review lane anyway.
-Checks turning green on a PR that could not get auto-merge is what the
-supervisor's pr-hygiene check looks for; it merges those by hand. Then move
-the ticket to the review lane the lifecycle skill names. Do not leave commits
-unpushed: this working directory is thrown away when the process exits.
+$finish_contract
 
 ${AGENT_ADVISOR_GUIDANCE:+$AGENT_ADVISOR_GUIDANCE
 

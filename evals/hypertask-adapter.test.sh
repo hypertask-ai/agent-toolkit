@@ -14,6 +14,24 @@ CORE_ROOT="$ROOT"
 # shellcheck disable=SC1090
 . "$ROOT/scripts/lib/core.sh"
 core_load_adapter hypertask
+
+maintainer_prompt="$(MAINTAINER=on adapter_run_prompt "/company/INDEX.md" "Product Bot" "/bin/board" \
+  "AGTE-68" "https://app.hypertask.ai/detail/project-5500/68" "Merge PR 7" \
+  "Merge the green allowlisted pull request." "" "assigned instruction")"
+regular_prompt="$(MAINTAINER=off adapter_run_prompt "/company/INDEX.md" "Developer" "/bin/board" \
+  "TEST-1" "https://app.hypertask.ai/detail/project-1/1" "Fix the bug" \
+  "Change the implementation." "" "new work")"
+if printf '%s' "$maintainer_prompt" | grep -qF 'FINISH IT AS THE SETUP MAINTAINER' \
+   && printf '%s' "$maintainer_prompt" | grep -qF 'agent-template merge <pr-url>' \
+   && printf '%s' "$maintainer_prompt" | grep -qF 'Do not create an implementation branch for a direct operation, delegate it, hand it to a developer' \
+   && printf '%s' "$maintainer_prompt" | grep -qF 'post a `Done:` comment that names the result and links the pull request' \
+   && ! printf '%s' "$maintainer_prompt" | grep -qF 'branch off the production branch' \
+   && printf '%s' "$regular_prompt" | grep -qF 'branch off the production branch'; then
+  ok maintainer-direct-action-prompt 'merge instructions execute in the maintainer run instead of entering developer PR workflow'
+else
+  bad maintainer-direct-action-prompt "maintainer=$maintainer_prompt regular=$regular_prompt"
+fi
+
 COMMENTS="$TMP/comments.json"
 _ht_get() { cat "$COMMENTS"; }
 

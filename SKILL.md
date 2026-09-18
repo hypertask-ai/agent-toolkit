@@ -620,7 +620,11 @@ tickets and userId 6. Every accepted or refused manager action is recorded in
 `MAINTAINER="on"` makes one agent the executor for setup changes. Missing or
 any other value is off. Its runner and chat prompts require a build for every
 change to the toolkit, supervisor rules, analytics site, app, CLI, or Slack bot,
-and forbid launching a model harness directly.
+and forbid launching a model harness directly. An allowlisted merge, release,
+update, or build instruction runs the matching maintainer command in the current
+run instead of entering the developer pull request workflow or being delegated.
+A successful direct merge gets a `Done:` comment with the linked pull request;
+the existing completion checker reports background build results.
 
 ```sh
 agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]

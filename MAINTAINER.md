@@ -132,8 +132,13 @@ created by hand on board 5500 and assigned to Product Bot use the same normal
 run, build, and completion-comment path.
 
 Maintainer prompts require a four-part build spec: Ticket, What, Done when, and
-Guardrails. They forbid direct model-harness launches and answer questions
-about completed work from `build list`, not from memory.
+Guardrails. A board instruction to merge, release, update, or build on an
+allowlisted repository runs the matching maintainer command in that run. It
+never enters the ordinary developer pull request workflow or gets delegated to
+a developer. A successful direct merge gets a `Done:` comment with the linked
+pull request; background builds keep using the completion checker. Maintainer
+prompts forbid direct model-harness launches and answer questions about
+completed work from `build list`, not from memory.
 
 ## Channels
 
