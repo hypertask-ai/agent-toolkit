@@ -164,7 +164,10 @@ before answering. Replies always use Codex GPT-5.6 Sol at high effort through
 `hax` with `--no-session --bare`, independent of the agent conf, with a
 five-minute limit. Bubblewrap exposes the repository and logs
 read-only, permits writes only under `/tmp`, and does not mount the board token.
-The model returns HTML; the runner checks its shape and posts it afterward.
+The model returns HTML; the runner checks its shape and posts it afterward. An
+empty or invalid draft gets one retry with the failed shape rules. If that retry
+also fails, the original draft posts under `Answer:` with a line saying the
+check was skipped, so an owner question never ends in silence.
 Its mandatory first step is a private state sheet built from the description
 and every ticket comment; the selected ticket's full-thread read is separate
 from the capped owned-ticket scan. The sheet records current pull request
