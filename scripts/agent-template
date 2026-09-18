@@ -1318,6 +1318,7 @@ block = "\n".join([
     'SKILLS_INDEX="%s"' % esc(skills_index),
     'MODEL_CLI="%s"' % esc(model_cli),
     'MAX_CONCURRENT_RUNS="1"',
+    'ROOM_DAILY_TURN_BUDGET="20"',
     'QUIET="on"',
     'ANSWERER_FALLBACK=""',
     'MANAGER="off"',

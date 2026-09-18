@@ -174,19 +174,29 @@ behind Cloudflare and on hosts with no public port.
 
 `agent-chat.service` is one always-on process per host. Its chat loop finds
 each conf with `CHAT="on"` every three seconds and asks for its newest
-unanswered message. A separate loop publishes runtime state every 30 seconds
-for every valid agent conf, including agents with chat off. Each agent runs
-concurrently with the others and with ticket work. Chat reads conversation
-history, the company skills index first, then the agent's own indexes, and a
-short brief from the conf and latest `agent-board-poll` log. Chat prompts
-forbid board writes and worktrees.
+unanswered private message and room turns on every `BOARD_ID`. A room turn
+wakes only the agent named in its text or target metadata; this includes a bot
+named by Product Bot, the room's chief of staff. Unaddressed agents record the
+turn as seen and stay silent. A separate loop publishes runtime state every 30
+seconds for every valid agent conf, including agents with chat off. Each agent
+runs concurrently with the others and with ticket work.
 
-Replies use `CHAT_CLI` from the conf, falling back to `MODEL_CLI`, with a 90-second
-timeout. The MCP reply uses the human message id as its idempotency key, and
+Room replies read the shared transcript. The fourth bot-to-bot turn in one
+topic is a deterministic `Handoff:` back to its related ticket. Each posted
+turn carries that ticket to the room endpoint, which writes the turn as a run
+note atomically. `ROOM_DAILY_TURN_BUDGET` caps replies per board and UTC day
+across the host; it defaults to 20, while 0 disables room replies.
+
+Private chat reads conversation history, the company skills index first, then
+the agent's own indexes, and a short brief from the conf and latest
+`agent-board-poll` log. Chat prompts forbid board writes and worktrees. Replies
+use `CHAT_CLI` from the conf, falling back to `MODEL_CLI`, with a 90-second
+timeout. The message id is the idempotency key, and
 `~/.local/state/agent-chat/handled.jsonl` records it after the reply lands, so
 a restart cannot duplicate it. Provider errors are logged and answered with a
-one-line error instead of leaving the conversation silent. Per-agent logs are
-`~/.local/state/agent-chat/<slug>.log`.
+one-line error instead of leaving a private conversation silent. Shutdown
+cancels an active provider and bounded HTTP calls keep stop within five
+seconds. Per-agent logs are `~/.local/state/agent-chat/<slug>.log`.
 
 Polling is the default and needs no inbound port. Set
 `AGENT_CHAT_POLL_SECONDS` on the service to change the three-second cadence.

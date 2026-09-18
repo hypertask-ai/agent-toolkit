@@ -59,7 +59,8 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `TRIAGE` | Whether to score difficulty before pickup. |
 | `TRIAGE_MODEL_CLI` | Optional tie-break scoring command, default `MODEL_CLI`. |
 | `ADVISOR_MAX` | Research calls per run, default 2 when `RESEARCH_CLI` exists. |
-| `CHAT` | `on` enables the host chat lane. |
+| `CHAT` | `on` enables the host chat lane, including each configured board's agent room. |
+| `ROOM_DAILY_TURN_BUDGET` | Maximum agent-room replies per board and UTC day across this host; default `20`, and `0` disables room replies. |
 | `QUIET` | `on` redirects unmarked comments to run activity and strips board-owner mentions; default `on`. |
 | `ANSWERER_FALLBACK` | Slug of the agent that answers owner questions when there is no mention, agent assignee, or prior `Done:` or `Decision:` author; default empty. |
 | `MANAGER` | `on` allows the manager control commands; default `off`. |

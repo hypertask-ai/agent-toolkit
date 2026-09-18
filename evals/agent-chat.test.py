@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import os
 import runpy
 import tempfile
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -10,6 +13,7 @@ Agent = module["Agent"]
 ChatDaemon = module["ChatDaemon"]
 prompt_for = module["prompt_for"]
 ERROR_REPLY = module["ERROR_REPLY"]
+real_run_provider = module["run_provider"]
 
 
 with tempfile.TemporaryDirectory() as temporary:
@@ -17,6 +21,7 @@ with tempfile.TemporaryDirectory() as temporary:
     common = (
         'CHAT="on"\nAGENT_SLUG="chat"\nAGENT_NAME="Chat"\nAGENT_ID="id-chat"\n'
         f'TOKEN_FILE="{temporary}/token"\nBOARD_CLI="{temporary}/board"\nMODEL_CLI="model-command --normal"\n'
+        'BOARD_ID="15,5500"\nROOM_DAILY_TURN_BUDGET="7"\n'
     )
     fallback = temporary / "fallback.conf"
     fallback.write_text(common)
@@ -30,6 +35,8 @@ with tempfile.TemporaryDirectory() as temporary:
     assert Agent.from_conf(explicit).model_cli == "chat-command --brief"
     assert Agent.from_conf(fallback).manager is False
     assert Agent.from_conf(fallback).maintainer is False
+    assert Agent.from_conf(fallback).board_ids == (15, 5500)
+    assert Agent.from_conf(fallback).room_daily_turn_budget == 7
     assert Agent.from_conf(manager).manager is True
     assert Agent.from_conf(maintainer).maintainer is True
     print("PASS agent-chat-command-from-conf")
@@ -96,7 +103,7 @@ with tempfile.TemporaryDirectory() as temporary:
     temporary = Path(temporary)
     daemon = ChatDaemon(temporary / "conf", temporary / "state")
     calls = []
-    module["run_provider"].__globals__["run_provider"] = lambda current, prompt: calls.append(current.slug) or "once"
+    module["run_provider"].__globals__["run_provider"] = lambda current, prompt, stop=None: calls.append(current.slug) or "once"
     current = agent("one")
     api = FakeApi()
     message = {"id": "message-once", "sessionId": "session-one", "text": "hello"}
@@ -109,7 +116,7 @@ with tempfile.TemporaryDirectory() as temporary:
 with tempfile.TemporaryDirectory() as temporary:
     temporary = Path(temporary)
     daemon = ChatDaemon(temporary / "conf", temporary / "state")
-    def fail(_agent, _prompt):
+    def fail(_agent, _prompt, stop=None):
         raise RuntimeError("provider unavailable")
     module["run_provider"].__globals__["run_provider"] = fail
     api = FakeApi()
@@ -124,13 +131,100 @@ with tempfile.TemporaryDirectory() as temporary:
 with tempfile.TemporaryDirectory() as temporary:
     temporary = Path(temporary)
     daemon = ChatDaemon(temporary / "conf", temporary / "state")
-    module["run_provider"].__globals__["run_provider"] = lambda current, _prompt: f"reply from {current.slug}"
+    module["run_provider"].__globals__["run_provider"] = lambda current, _prompt, stop=None: f"reply from {current.slug}"
     first_api, second_api = FakeApi(), FakeApi()
     daemon.handle(agent("alpha"), {"id": "message-alpha", "sessionId": "session-alpha", "text": "a"}, first_api)
     daemon.handle(agent("beta"), {"id": "message-beta", "sessionId": "session-beta", "text": "b"}, second_api)
     assert first_api.replies == [("session-alpha", "message-alpha", "reply from alpha")]
     assert second_api.replies == [("session-beta", "message-beta", "reply from beta")]
     print("PASS agent-chat-two-agents-independent")
+
+
+class FakeRoomApi:
+    def __init__(self, history):
+        self.history_rows = history
+        self.replies = []
+
+    def room_history(self, board_id):
+        return self.history_rows
+
+    def room_reply(self, board_id, message_id, text, ticket, topic_id):
+        self.replies.append((board_id, message_id, text, ticket, topic_id))
+
+    def ticket(self, _reference):
+        return {}
+
+
+with tempfile.TemporaryDirectory() as temporary:
+    temporary = Path(temporary)
+    daemon = ChatDaemon(temporary / "conf", temporary / "state")
+    room_calls = []
+    module["run_provider"].__globals__["run_provider"] = (
+        lambda current, _prompt, stop=None: room_calls.append(current.slug) or "I will check it."
+    )
+    current = replace(agent("dev-one"), name="Dev One", board_ids=(5500,), room_daily_turn_budget=5)
+    addressed = {
+        "id": "room-addressed",
+        "topicId": "topic-1",
+        "ticketNumber": "AGTE-22",
+        "text": "Dev One, can you check AGTE-22?",
+        "authorName": "Product Bot",
+        "authorAgentId": "product-bot-id",
+    }
+    api = FakeRoomApi([addressed])
+    daemon.handle_room(current, 5500, addressed, api)
+    daemon.handle_room(current, 5500, addressed, api)
+    assert room_calls == ["dev-one"]
+    assert api.replies == [(5500, "room-addressed", "I will check it.", "AGTE-22", "topic-1")]
+
+    unaddressed = dict(addressed, id="room-unaddressed", text="QA One, can you check AGTE-22?")
+    daemon.handle_room(current, 5500, unaddressed, api)
+    assert room_calls == ["dev-one"]
+    assert len(api.replies) == 1
+    print("PASS agent-room-addressed-once-unaddressed-silent")
+
+with tempfile.TemporaryDirectory() as temporary:
+    temporary = Path(temporary)
+    daemon = ChatDaemon(temporary / "conf", temporary / "state")
+    current = replace(agent("dev-one"), name="Dev One", board_ids=(5500,), room_daily_turn_budget=5)
+    fourth = {
+        "id": "turn-4",
+        "topicId": "topic-limit",
+        "ticketNumber": "AGTE-22",
+        "text": "Dev One, one more thought on AGTE-22?",
+        "authorName": "Product Bot",
+        "authorAgentId": "product-bot-id",
+    }
+    history = [
+        dict(fourth, id=f"turn-{number}", text=f"bot turn {number}")
+        for number in range(1, 4)
+    ]
+    api = FakeRoomApi(history)
+    daemon.handle_room(current, 5500, fourth, api)
+    assert len(api.replies) == 1
+    assert api.replies[0][2].startswith("Handoff:")
+    assert "AGTE-22" in api.replies[0][2]
+    print("PASS agent-room-fourth-bot-turn-handoff")
+
+with tempfile.TemporaryDirectory() as temporary:
+    original_env = real_run_provider.__globals__["agent_process_env"]
+    real_run_provider.__globals__["agent_process_env"] = lambda _agent: dict(os.environ)
+    stop = threading.Event()
+    threading.Timer(0.2, stop.set).start()
+    started = time.monotonic()
+    try:
+        real_run_provider(
+            replace(agent("slow"), model_cli='python3 -c "import time; time.sleep(30)"'),
+            "prompt",
+            stop=stop,
+        )
+        raise AssertionError("stopped provider returned")
+    except RuntimeError as error:
+        assert "stopped" in str(error)
+    finally:
+        real_run_provider.__globals__["agent_process_env"] = original_env
+    assert time.monotonic() - started < 5
+    print("PASS agent-chat-stop-under-five-seconds")
 
 
 def runtime_conf(root, slug, token, model="runner --model test-model", board_ids="15", graft="off"):

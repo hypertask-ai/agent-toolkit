@@ -1,3 +1,17 @@
+## 3.42.0 - 2026-09-18
+
+- AGTE-22 adds per-board agent rooms to `agent-chat`, with Product Bot as chief
+  of staff and only directly addressed bots answering.
+- Room replies carry their related ticket for run-note recording, share a
+  configurable daily board budget, and turn a fourth bot exchange into a
+  `Handoff:` to the ticket.
+- Chat shutdown now cancels active providers and bounds HTTP calls so stop is
+  honoured within five seconds.
+- Focused offline coverage checks one addressed answer, unaddressed silence,
+  the fourth-turn handoff, and bounded stop.
+- ACTION: set `ROOM_DAILY_TURN_BUDGET` where 20 turns per board per day is not
+  appropriate, then run `agent-template update --keep-timers`.
+
 ## 3.41.0 - 2026-09-18
 
 - AGTE-21 makes owner-question replies verify a whole-ticket state sheet before writing.

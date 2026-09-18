@@ -355,20 +355,30 @@ with a chat lane wired.
 ## Chat lane
 
 `agent-chat.service` is shared by every agent on the host whose conf says
-`CHAT="on"`. It polls the agent-authenticated chat inbox every three seconds by
-default, so it works behind Cloudflare and without a public port. Set
-`AGENT_CHAT_POLL_SECONDS` in a systemd override to change that cadence. The
+`CHAT="on"`. It polls the agent-authenticated private inbox and each configured
+board's agent room every three seconds by default, so it works behind
+Cloudflare and without a public port. Agents answer a room turn only when named
+in its text or target metadata. Product Bot is chief of staff and can wake
+another bot by naming it. Unaddressed bots stay silent.
+
+A room answer reads the shared transcript and is posted with its related ticket
+so the app writes the same turn as a run note. After three bot-to-bot turns on
+one topic, the next answer is a `Handoff:` to that ticket. The shared per-board
+UTC-day count is in `~/.local/state/agent-chat/room-budget.json`; configure its
+limit with `ROOM_DAILY_TURN_BUDGET` (default 20, 0 disables room replies).
+
+Set `AGENT_CHAT_POLL_SECONDS` in a systemd override to change the cadence. The
 optional webhook receiver is localhost-only and starts when
 `AGENT_CHAT_WEBHOOK_PORT` is set; each webhook-enabled conf also needs
 `CHAT_WEBHOOK_SECRET_FILE`. Register it only after a public HTTPS route exists.
 
-Chat and ticket runs are separate concurrent processes. A chat prompt reads
-the company skills index first, then the agent's own indexes, plus a short
+Chat and ticket runs are separate concurrent processes. A private-chat prompt
+reads the company skills index first, then the agent's own indexes, plus a short
 brief from the conf and latest ticket log. It explicitly forbids ticket
 comments, board writes, and worktrees. A message id is both the app reply's
-idempotency key and a row in
-`~/.local/state/agent-chat/handled.jsonl`. Provider failures still post `I
-could not answer this, error logged.`
+idempotency key and a row in `~/.local/state/agent-chat/handled.jsonl`.
+Provider failures still post `I could not answer this, error logged.` A stop
+cancels active providers and returns within five seconds.
 
 Check `systemctl --user is-active agent-chat.service`, then read
 `~/.local/state/agent-chat/<slug>.log`. Test through

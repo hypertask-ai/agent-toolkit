@@ -31,6 +31,7 @@ ERROR_REPLY = "I could not answer this, error logged."
 MAX_WEBHOOK_BODY = 1024 * 1024
 RUNTIME_HEARTBEAT_SECONDS = 30
 POLL_CADENCE_SECONDS = 60
+DEFAULT_ROOM_DAILY_TURN_BUDGET = 20
 TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")
 
 
@@ -134,6 +135,8 @@ class Agent:
     skills: tuple[str, ...]
     api_url: str
     webhook_secret_file: Path | None
+    board_ids: tuple[int, ...] = ()
+    room_daily_turn_budget: int = DEFAULT_ROOM_DAILY_TURN_BUDGET
     manager: bool = False
     maintainer: bool = False
 
@@ -165,6 +168,15 @@ class Agent:
         )
         indexes = list(dict.fromkeys(indexes))
         secret = values.get("CHAT_WEBHOOK_SECRET_FILE", "")
+        try:
+            board_ids = tuple(
+                int(item.strip()) for item in values.get("BOARD_ID", "").split(",") if item.strip()
+            )
+            room_budget = int(values.get("ROOM_DAILY_TURN_BUDGET", str(DEFAULT_ROOM_DAILY_TURN_BUDGET)))
+        except ValueError:
+            return None
+        if room_budget < 0:
+            return None
         return cls(
             slug=values["AGENT_SLUG"],
             name=values["AGENT_NAME"],
@@ -177,6 +189,8 @@ class Agent:
             skills=tuple(indexes),
             api_url=api_base(values),
             webhook_secret_file=Path(secret).expanduser() if secret else None,
+            board_ids=board_ids,
+            room_daily_turn_budget=room_budget,
             manager=values.get("MANAGER") == "on",
             maintainer=values.get("MAINTAINER") == "on",
         )
@@ -246,6 +260,30 @@ class JsonState:
         temporary.write_text(json.dumps(self.value, sort_keys=True) + "\n", encoding="utf-8")
         os.chmod(temporary, 0o600)
         temporary.replace(self.path)
+
+
+class RoomBudgetState(JsonState):
+    def claim(self, board_id: int, limit: int, now: datetime | None = None) -> bool:
+        day = (now or datetime.now(timezone.utc)).date().isoformat()
+        key = str(board_id)
+        with self.lock:
+            row = self.value.get(key)
+            count = int(row.get("count", 0)) if isinstance(row, dict) and row.get("day") == day else 0
+            if limit <= 0 or count >= limit:
+                return False
+            self.value[key] = {"day": day, "count": count + 1}
+            self.save()
+            return True
+
+    def release(self, board_id: int) -> None:
+        key = str(board_id)
+        day = datetime.now(timezone.utc).date().isoformat()
+        with self.lock:
+            row = self.value.get(key)
+            if not isinstance(row, dict) or row.get("day") != day:
+                return
+            self.value[key] = {"day": day, "count": max(0, int(row.get("count", 0)) - 1)}
+            self.save()
 
 
 class RuntimeState(JsonState):
@@ -404,7 +442,7 @@ class AgentApi:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=20) as response:
+            with urllib.request.urlopen(request, timeout=4) as response:
                 payload = json.load(response)
         except urllib.error.HTTPError as error:
             raise ApiError(error.code, error.read().decode(errors="replace")) from error
@@ -440,6 +478,35 @@ class AgentApi:
     def ticket(self, reference: str) -> dict[str, Any]:
         quoted = urllib.parse.urlencode({"ticket_number": reference})
         return self.request("GET", f"/mcp/tasks?{quoted}")
+
+    def room_pending(self, board_id: int) -> list[dict[str, Any]]:
+        payload = self.request("GET", f"/mcp/chat/rooms/{board_id}/pending")
+        rows = payload.get("messages")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    def room_history(self, board_id: int) -> list[dict[str, Any]]:
+        payload = self.request("GET", f"/mcp/chat/rooms/{board_id}/messages")
+        rows = payload.get("messages")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+    def room_reply(
+        self,
+        board_id: int,
+        message_id: str,
+        text: str,
+        ticket: str,
+        topic_id: str,
+    ) -> None:
+        self.request(
+            "POST",
+            f"/mcp/chat/rooms/{board_id}/messages",
+            {
+                "text": text[:8000],
+                "replyToMessageId": message_id,
+                "ticketNumber": ticket,
+                "topicId": topic_id,
+            },
+        )
 
     def reply(self, session_id: str, message_id: str, text: str) -> None:
         quoted = urllib.parse.quote(session_id, safe="")
@@ -504,6 +571,108 @@ def finalize_chat_reply(
 ) -> str:
     shaped = shape_command_reply(reply, message_text)
     return format_ticket_links(remove_em_dashes(shaped), "chat", lookup)
+
+
+def room_message_text(message: dict[str, Any]) -> str:
+    return str(message.get("text") or message.get("content") or "")
+
+
+def room_ticket(message: dict[str, Any]) -> str:
+    task = message.get("task")
+    candidates = (
+        message.get("ticketNumber"),
+        message.get("ticketReference"),
+        task.get("ticketNumber") if isinstance(task, dict) else None,
+    )
+    for candidate in candidates:
+        match = TICKET_PATTERN.search(str(candidate or "").upper())
+        if match:
+            return match.group(0)
+    match = TICKET_PATTERN.search(room_message_text(message).upper())
+    return match.group(0) if match else ""
+
+
+def room_topic(message: dict[str, Any]) -> str:
+    return str(message.get("topicId") or message.get("threadId") or room_ticket(message) or message.get("id") or "")
+
+
+def room_message_is_bot(message: dict[str, Any]) -> bool:
+    role = str(message.get("authorType") or message.get("senderType") or message.get("role") or "").lower()
+    author = message.get("author")
+    author_type = str(author.get("type") or author.get("kind") or "").lower() if isinstance(author, dict) else ""
+    return bool(
+        message.get("authorAgentId")
+        or message.get("senderAgentId")
+        or message.get("agentId")
+        or (isinstance(author, dict) and author.get("agentId"))
+        or role in {"agent", "assistant", "bot"}
+        or author_type in {"agent", "assistant", "bot"}
+    )
+
+
+def room_message_addressed_to(agent: Agent, message: dict[str, Any]) -> bool:
+    target_values: list[str] = []
+    for key in (
+        "addressedAgentId", "targetAgentId", "recipientAgentId", "toAgentId",
+        "addressedAgentSlug", "targetAgentSlug",
+    ):
+        if message.get(key):
+            target_values.append(str(message[key]))
+    for key in ("addressedAgent", "targetAgent", "recipientAgent"):
+        value = message.get(key)
+        if isinstance(value, dict):
+            target_values.extend(str(value.get(field) or "") for field in ("agentId", "id", "slug", "name"))
+    for key in ("addressedAgentIds", "targetAgentIds", "mentionedAgentIds", "mentions"):
+        value = message.get(key)
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict):
+                    target_values.extend(str(item.get(field) or "") for field in ("agentId", "id", "slug", "name"))
+                else:
+                    target_values.append(str(item))
+    identities = {agent.agent_id.casefold(), agent.slug.casefold(), agent.name.casefold()}
+    if any(value.casefold() in identities for value in target_values if value):
+        return True
+    text = room_message_text(message)
+    names = (agent.name, agent.slug, agent.slug.replace("-", " "))
+    return any(
+        name and re.search(rf"(?<![\w-])@?{re.escape(name)}(?![\w-])", text, re.IGNORECASE)
+        for name in names
+    )
+
+
+def room_turn_limit_reached(message: dict[str, Any], history: list[dict[str, Any]]) -> bool:
+    explicit = message.get("botTurn") or message.get("botTurnNumber")
+    try:
+        if explicit is not None and int(explicit) >= 4:
+            return True
+    except (TypeError, ValueError):
+        pass
+    if not room_message_is_bot(message):
+        return False
+    topic = room_topic(message)
+    turns = [row for row in history if room_topic(row) == topic and room_message_is_bot(row)]
+    return len(turns) >= 3
+
+
+def room_prompt_for(agent: Agent, message: dict[str, Any], history: list[dict[str, Any]]) -> str:
+    transcript = "\n".join(
+        f"{row.get('authorName') or row.get('userName') or row.get('role') or 'unknown'}: "
+        f"{room_message_text(row)[:4000]}"
+        for row in history[-50:]
+    ) or "(no earlier room turns)"
+    return f"""You are {agent.name}. You are speaking in the shared agent room for board {message.get('boardId') or message.get('projectId') or 'unknown'}.
+Product Bot is the room's chief of staff. Answer only the addressed topic, briefly and concretely.
+Do not inspect or change a worktree or external system. Do not post ticket comments. This room reply is recorded as a run note on {room_ticket(message)}.
+There may be at most three bot-to-bot turns per topic. The daemon enforces that limit; do not continue a topic marked with `Handoff:`.
+
+Shared transcript, oldest first:
+{transcript}
+
+New room turn from {message.get('authorName') or message.get('userName') or 'another participant'}:
+{room_message_text(message)[:8000]}
+
+Return only the concise room reply. Use `[TICKET-ID Ticket title](https://app.hypertask.ai/detail/project-N/ID)` for every ticket reference. Do not use em dashes."""
 
 
 def prompt_for(agent: Agent, message: dict[str, Any], history: list[dict[str, Any]]) -> str:
@@ -580,6 +749,7 @@ def agent_process_env(agent: Agent) -> dict[str, str]:
         text=True,
         capture_output=True,
         check=False,
+        timeout=4,
     )
     if prepared.returncode != 0:
         raise RuntimeError(prepared.stderr.strip() or f"identity shim failed for {agent.slug}")
@@ -594,24 +764,56 @@ def agent_process_env(agent: Agent) -> dict[str, str]:
     return environment
 
 
-def run_provider(agent: Agent, prompt: str, timeout: int = 90) -> str:
+def run_provider(
+    agent: Agent,
+    prompt: str,
+    timeout: int = 90,
+    stop: threading.Event | None = None,
+) -> str:
     argv = shlex.split(agent.model_cli)
     if not argv:
         raise RuntimeError("MODEL_CLI is empty")
     scratch = Path(os.environ.get("AGENT_CHAT_STATE_DIR", str(Path.home() / ".local/state/agent-chat"))) / "scratch" / agent.slug
     scratch.mkdir(parents=True, exist_ok=True, mode=0o700)
-    result = subprocess.run(
+    process = subprocess.Popen(
         [*argv, prompt],
         cwd=scratch,
         env=agent_process_env(agent),
         text=True,
-        capture_output=True,
-        timeout=timeout,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
     )
-    if result.returncode != 0:
-        raise RuntimeError(f"provider exited {result.returncode}: {result.stderr[-1000:]}")
-    reply = result.stdout.strip()
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            stdout, stderr = process.communicate(timeout=0.1)
+            break
+        except subprocess.TimeoutExpired:
+            if stop and stop.is_set():
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    stdout, stderr = process.communicate(timeout=4)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    stdout, stderr = process.communicate()
+                raise RuntimeError("provider stopped with agent-chat")
+            if time.monotonic() >= deadline:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                raise subprocess.TimeoutExpired(argv, timeout)
+    if process.returncode != 0:
+        raise RuntimeError(f"provider exited {process.returncode}: {stderr[-1000:]}")
+    reply = stdout.strip()
     if not reply:
         raise RuntimeError("provider returned an empty reply")
     return reply[:8000]
@@ -629,6 +831,7 @@ class ChatDaemon:
         self.state_dir = state_dir
         self.board_state_dir = board_state_dir or Path.home() / ".local/state/agent-board-poll"
         self.state = HandledState(state_dir / "handled.jsonl")
+        self.room_budget = RoomBudgetState(state_dir / "room-budget.json")
         self.runtime_state = RuntimeState(state_dir / "runtime-sequences.json")
         self.runtime_status = JsonState(state_dir / "runtime-status.json")
         try:
@@ -688,14 +891,22 @@ class ChatDaemon:
         client = api or AgentApi(agent)
         try:
             history = client.history(session_id)
-            reply = run_provider(agent, prompt_for(agent, message, history))
+            if self.stop.is_set():
+                return
+            reply = run_provider(agent, prompt_for(agent, message, history), stop=self.stop)
+            if self.stop.is_set():
+                return
             reply = finalize_chat_reply(
                 reply,
                 str(message.get("text") or ""),
                 lambda reference: client.ticket(reference),
             )
+            if self.stop.is_set():
+                return
         except Exception as error:
             self.log(agent, f"message {message_id} provider error: {type(error).__name__}: {error}")
+            if self.stop.is_set():
+                return
             reply = ERROR_REPLY
         try:
             client.reply(session_id, message_id, reply)
@@ -712,6 +923,65 @@ class ChatDaemon:
         self.state.mark(agent, message_id, reply)
         self.log(agent, f"handled message {message_id}; reply={json.dumps(reply, ensure_ascii=False)}")
 
+    @staticmethod
+    def room_key(agent: Agent, board_id: int, message_id: str) -> str:
+        return f"room:{board_id}:{agent.slug}:{message_id}"
+
+    def handle_room(
+        self,
+        agent: Agent,
+        board_id: int,
+        message: dict[str, Any],
+        api: AgentApi | None = None,
+    ) -> None:
+        message_id = str(message.get("id") or message.get("messageId") or "")
+        key = self.room_key(agent, board_id, message_id)
+        if not message_id or self.state.contains(key):
+            return
+        client = api or AgentApi(agent)
+        if not room_message_addressed_to(agent, message):
+            self.state.mark(agent, key, "")
+            return
+        ticket = room_ticket(message)
+        if not ticket:
+            self.state.mark(agent, key, "")
+            self.log(agent, f"room {board_id} message {message_id} has no related ticket")
+            return
+        if not self.room_budget.claim(board_id, agent.room_daily_turn_budget):
+            self.state.mark(agent, key, "")
+            self.log(agent, f"room {board_id} daily turn budget reached")
+            return
+        try:
+            history = client.room_history(board_id)
+            if self.stop.is_set():
+                self.room_budget.release(board_id)
+                return
+            if room_turn_limit_reached(message, history):
+                reply = f"Handoff: Continue {ticket} on its ticket; this topic has used the room's three bot-to-bot turns."
+            else:
+                reply = run_provider(agent, room_prompt_for(agent, message, history), stop=self.stop)
+                if self.stop.is_set():
+                    self.room_budget.release(board_id)
+                    return
+                reply = finalize_chat_reply(reply, room_message_text(message), lambda reference: client.ticket(reference))
+            if self.stop.is_set():
+                self.room_budget.release(board_id)
+                return
+            client.room_reply(board_id, message_id, reply, ticket, room_topic(message))
+        except ApiError as error:
+            if error.status == 409:
+                self.state.mark(agent, key, "already terminal")
+                return
+            self.room_budget.release(board_id)
+            self.log(agent, f"room {board_id} message {message_id} error: {error}")
+            return
+        except Exception as error:
+            self.room_budget.release(board_id)
+            self.log(agent, f"room {board_id} message {message_id} error: {type(error).__name__}: {error}")
+            return
+        self.state.mark(agent, key, reply)
+        self.log(agent, f"handled room {board_id} message {message_id}; reply={json.dumps(reply, ensure_ascii=False)}")
+
     def submit(self, agent: Agent, message: dict[str, Any]) -> None:
         message_id = str(message.get("id") or message.get("messageId") or "")
         if not message_id or self.state.contains(message_id):
@@ -722,6 +992,18 @@ class ChatDaemon:
             self.inflight.add(message_id)
         future = self.executor.submit(self.handle, agent, message)
         future.add_done_callback(lambda _future: self._finished(message_id))
+
+    def submit_room(self, agent: Agent, board_id: int, message: dict[str, Any]) -> None:
+        message_id = str(message.get("id") or message.get("messageId") or "")
+        key = self.room_key(agent, board_id, message_id)
+        if not message_id or self.state.contains(key):
+            return
+        with self.inflight_lock:
+            if key in self.inflight:
+                return
+            self.inflight.add(key)
+        future = self.executor.submit(self.handle_room, agent, board_id, message)
+        future.add_done_callback(lambda _future: self._finished(key))
 
     def _finished(self, message_id: str) -> None:
         with self.inflight_lock:
@@ -762,11 +1044,22 @@ class ChatDaemon:
 
     def poll_once(self) -> None:
         for agent in self.agents():
+            if self.stop.is_set():
+                break
+            client = AgentApi(agent)
             try:
-                for message in AgentApi(agent).pending():
+                for message in client.pending():
                     self.submit(agent, message)
             except Exception as error:
-                self.log(agent, f"poll error: {type(error).__name__}: {error}")
+                self.log(agent, f"private poll error: {type(error).__name__}: {error}")
+            for board_id in agent.board_ids:
+                if self.stop.is_set():
+                    break
+                try:
+                    for message in client.room_pending(board_id):
+                        self.submit_room(agent, board_id, message)
+                except Exception as error:
+                    self.log(agent, f"room {board_id} poll error: {type(error).__name__}: {error}")
 
     def serve(self, interval: float) -> None:
         while not self.stop.is_set():
