@@ -1,3 +1,16 @@
+## 3.46.0 - 2026-09-18
+
+- AGTE-7: a merged pull request whose base branch history was rewritten (so its
+  merge commit can never become an ancestor of base again) no longer blocks the
+  one-ticket-until-live gate forever; it now reports live and is logged once a
+  day so the rewrite stays visible.
+- Focused coverage verifies the rewritten-base PR unblocks pickup at both the
+  adapter and the runner (the poll loop no longer refuses every ticket),
+  reports live/superseded, and logs once per day even as the 60s live-state
+  cache expires.
+- ACTION: run `agent-template update` on bot hosts so agents whose repo history
+  was rewritten stop deadlocking on old merged PRs.
+
 ## 3.45.0 - 2026-09-18
 
 - AGTE-27 generates the default repository allowlist from each checkout's origin and default branch at install time.

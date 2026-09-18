@@ -64,15 +64,15 @@ JSON
   elif [ "$scenario" = "record-open" ]; then
     printf '[]\n'
   else
-    state="OPEN"; [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ] || state="OPEN"
-    if [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ]; then state="MERGED"; fi
+    state="OPEN"; [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ] || [ "$scenario" = "base-missing" ] || state="OPEN"
+    if [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ] || [ "$scenario" = "base-missing" ]; then state="MERGED"; fi
     printf '[{"number":1,"state":"%s","url":"https://github.test/pull/1","title":"HTPR-1 fix","body":"https://app.hypertask.ai/detail/project-15/1","headRefName":"agent/dev-1-htpr-1","author":{"login":"dev-one"},"createdAt":"2026-01-01T00:00:00Z"}]\n' "$state"
   fi
   exit 0
 fi
 if [ "$1 $2" = "pr view" ]; then
   number="$3"
-  if [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ]; then
+  if [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ] || [ "$scenario" = "base-missing" ]; then
     printf '{"state":"MERGED","baseRefName":"production","mergedAt":"2026-01-02T00:00:00Z","mergeCommit":{"oid":"merge%s"}}\n' "$number"
     exit 0
   fi
@@ -94,7 +94,12 @@ if [ "$1" = "api" ]; then
   endpoint="$2"
   case "$endpoint" in
     */pulls/*/comments*) printf '[]\n' ;;
-    */compare/*) printf '{"status":"ahead"}\n' ;;
+    */compare/*)
+      if [ "$scenario" = "base-missing" ]; then
+        printf '{"status":"diverged"}\n'
+      else
+        printf '{"status":"ahead"}\n'
+      fi ;;
     */deployments\?per_page=100)
       if [ "$scenario" = "fallback" ]; then
         printf '[]\n'
@@ -204,6 +209,22 @@ undeployed="$(run_gate undeployed)"
 [[ "$undeployed" == *'"state": "merged-undeployed"'* ]]
 echo 'PASS merged but undeployed PR remains a blocker'
 
+[[ -z "$(run_gate base-missing)" ]]
+echo 'PASS merged PR whose base history was rewritten never blocks pickup'
+
+base_missing_dir="$TMP/base-missing-direct"
+base_missing_state="$(PR_TEST_SCENARIO=base-missing _ht_pr_live_state example/repo 1 "$base_missing_dir")"
+[[ "$base_missing_state" == *'"live":true'* && "$base_missing_state" == *'"state":"superseded"'* ]]
+echo 'PASS a rewritten base reports live so the deadlock never recurs'
+
+base_missing_log="$TMP/base-missing.log"
+base_missing_dedup_dir="$TMP/base-missing-dedup"
+PR_TEST_SCENARIO=base-missing _ht_pr_live_state example/repo 1 "$base_missing_dedup_dir" >/dev/null 2>"$base_missing_log"
+rm -f "$base_missing_dedup_dir/1.json"
+PR_TEST_SCENARIO=base-missing _ht_pr_live_state example/repo 1 "$base_missing_dedup_dir" >/dev/null 2>>"$base_missing_log"
+[[ "$(grep -cF 'is not contained in base' "$base_missing_log")" = 1 ]]
+echo 'PASS a rewritten base is only logged once per day even as the 60s cache expires'
+
 [[ -z "$(run_gate deployed)" ]]
 echo 'PASS successful Production deployment releases pickup'
 
@@ -288,6 +309,12 @@ undeployed_run="$(PR_TEST_SCENARIO=undeployed BOARD_TEST_SCENARIO=no-emergency H
 echo 'PASS merged but undeployed PR claims no new ticket'
 
 rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
+base_missing_run="$(PR_TEST_SCENARIO=base-missing BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$base_missing_run" == *'would pick up HTPR-1'* ]]
+[[ "$base_missing_run" != *'only that PR or an emergency may run'* ]]
+echo 'PASS a rewritten-base merged PR no longer refuses every ticket'
+
+rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
 deployed_run="$(PR_TEST_SCENARIO=deployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$deployed_run" == *'would pick up HTPR-1'* ]]
 [[ "$deployed_run" == *"skip  HTPR-3: newest comment 0 is by this agent's own identity, so it cannot trigger another run"* ]]
@@ -312,4 +339,4 @@ PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency MODEL_OPEN_MARKER=
 [[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "8" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.opened-prs")" = yes ]]
 echo 'PASS runner persists a PR first seen after its ticket run'
 
-echo '20 one-ticket-until-live checks passed'
+echo '24 one-ticket-until-live checks passed'

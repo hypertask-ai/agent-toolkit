@@ -1407,7 +1407,7 @@ PYEOF
 # _ht_pr_live_state <repo> <number> <cache-dir>: one JSON answer, cached 60s.
 _ht_pr_live_state() {
   local repo="$1" number="$2" cache_dir="$3" cache
-  local now mtime view state base merge merged_at compare deployments deployment dep_id dep_sha dep_at statuses dep_state deploy_contains base_contains_deploy
+  local now mtime view state base merge merged_at compare deployments deployment dep_id dep_sha dep_at statuses dep_state deploy_contains base_contains_deploy marker
   mkdir -p "$cache_dir"
   cache="$cache_dir/$number.json"
   now="$(date +%s)"
@@ -1427,7 +1427,16 @@ _ht_pr_live_state() {
   [ -n "$base" ] && [ -n "$merge" ] && [ -n "$merged_at" ] || return 1
   compare="$(gh api "repos/$repo/compare/$merge...$base" 2>/dev/null)" || return 1
   if ! printf '%s' "$compare" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d.get("status") in ("ahead","identical") else 1)'; then
-    printf '{"live":false,"state":"merged-base-missing","definition":"GitHub Production deployments"}\n' | tee "$cache"
+    # The merge commit can never become an ancestor of base again once base's
+    # history has been rewritten (force-push/reset past the merge), so nothing
+    # the agent does can clear this by waiting. Treat it as done rather than a
+    # permanent gate, and log once a day so the rewrite stays visible.
+    marker="$cache_dir/base-rewritten-${repo//\//-}-$number-$(date -u +%F)"
+    if mkdir "$marker" 2>/dev/null; then
+      printf 'PR #%s merge commit %s is not contained in base %s (base history was rewritten); treating as superseded so it never blocks pickup\n' \
+        "$number" "$merge" "$base" >&2
+    fi
+    printf '{"live":true,"state":"superseded","definition":"merge commit not contained in base (base history rewritten); can never become live, so treated as non-blocking"}\n' | tee "$cache"
     return 0
   fi
 
