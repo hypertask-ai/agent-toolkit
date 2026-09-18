@@ -490,6 +490,7 @@ case "$WIRING" in
     echo "    systemctl --user enable --now agent-board-poll@$SLUG.timer"
     if [ "$DRY_RUN" != "yes" ]; then
       core_write_poll_units "$SYSTEMD_USER_DIR" "$BIN_DIR"
+      core_write_reconcile_units "$SYSTEMD_USER_DIR" "$BIN_DIR"
       if [ "$WIRING" = "events" ]; then
         core_write_event_timer_dropin "$SYSTEMD_USER_DIR" "$SLUG"
       else
@@ -497,7 +498,8 @@ case "$WIRING" in
       fi
       systemctl --user daemon-reload
       systemctl --user enable --now "agent-board-poll@$SLUG.timer"
-      systemctl --user list-timers "agent-board-poll@$SLUG.timer" --no-pager || true
+      systemctl --user enable --now agent-board-reconcile.timer
+      systemctl --user list-timers "agent-board-poll@$SLUG.timer" agent-board-reconcile.timer --no-pager || true
     fi
     ;;
   fleet)

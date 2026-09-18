@@ -43,7 +43,7 @@ cat > "$TMP/bin/hypertask" <<'EOF'
 args=" $* "
 case "$args" in
   *' project show '*)
-    printf '%s\n' '{"project":{"id":15,"ownerId":6,"sections":[{"name":"Bugs","isIntake":true},{"name":"QA"},{"name":"Done"},{"name":"HT Manager Review"}]}}'
+    printf '%s\n' '{"project":{"id":15,"ownerId":6,"sections":[{"name":"Bugs","isIntake":true},{"name":"In Progress"},{"name":"QA"},{"name":"Done"},{"name":"Agent Blocked (Infra)"}]}}'
     ;;
   *' task get '*) cat "$MOCK_TASKS" ;;
   *' comment list '*) cat "$MOCK_COMMENTS" ;;
@@ -145,9 +145,9 @@ else
 fi
 
 run_case Question '[]' '{"comments":[]}'
-if grep -qxF 'move TEST-1 HT Manager Review' "$TMP/board.log" \
+if grep -qxF 'move TEST-1 Agent Blocked (Infra)' "$TMP/board.log" \
    && ! grep -q '^unassign ' "$TMP/board.log"; then
-  ok qa-blocked-manager-review 'a Question verdict moves to the manager review column'
+  ok qa-blocked-manager-review 'a Question verdict moves to the blocked column'
 else
   bad qa-blocked-manager-review "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
 fi

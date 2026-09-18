@@ -335,6 +335,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/qa-lifecycle.test.sh" ]; then
   echo "-- QA lifecycle behavioural checks --"
   bash "$HERE/qa-lifecycle.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/board-state-lifecycle.test.sh" ]; then
+  echo ""
+  echo "-- board state lifecycle behavioural checks --"
+  bash "$HERE/board-state-lifecycle.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/manager-actions.test.sh" ]; then
   echo ""
   echo "-- manager action behavioural checks --"

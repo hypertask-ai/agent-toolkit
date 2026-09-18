@@ -311,7 +311,8 @@ done
 # policy directory from upgrades as well as omitting it from fresh installs.
 rm -rf "$DEST/core"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
-          "$DEST/scripts/agent-board-poll-tick" "$DEST/scripts/agent-progress" "$DEST/scripts/agent-reply-contract" \
+          "$DEST/scripts/agent-board-poll-tick" "$DEST/scripts/agent-board-reconcile" \
+          "$DEST/scripts/agent-progress" "$DEST/scripts/agent-reply-contract" \
           "$DEST/scripts/agent-board-health" "$DEST/scripts/agent-status" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-events" "$DEST/scripts/agent-kick" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-feedback" \
           "$DEST/scripts/agent-template-weekly" \
@@ -325,6 +326,7 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
 # apart, and so the runner still finds its adapters through readlink -f.
 ln -sfn "$DEST/scripts/agent-board-poll" "$BIN/agent-board-poll"
 ln -sfn "$DEST/scripts/agent-board-poll-tick" "$BIN/agent-board-poll-tick"
+ln -sfn "$DEST/scripts/agent-board-reconcile" "$BIN/agent-board-reconcile"
 ln -sfn "$DEST/scripts/agent-status" "$BIN/agent-status"
 ln -sfn "$DEST/scripts/agent-chat" "$BIN/agent-chat"
 ln -sfn "$DEST/scripts/agent-events" "$BIN/agent-events"
@@ -424,6 +426,7 @@ elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >
   # shellcheck disable=SC1091
   . "$DEST/scripts/lib/core.sh"
   core_write_poll_units "$SYSTEMD_USER_DIR" "$BIN"
+  core_write_reconcile_units "$SYSTEMD_USER_DIR" "$BIN"
   cat > "$SYSTEMD_USER_DIR/agent-status.service" <<EOF
 [Unit]
 Description=Publish the Hypertask Agents page status snapshot
@@ -582,6 +585,7 @@ EOF
   systemctl --user enable agent-events.service
   systemctl --user restart agent-events.service
   systemctl --user enable --now agent-template-update.timer
+  systemctl --user enable --now agent-board-reconcile.timer
   if [ "$FEEDBACK_MAINTAINER" = yes ]; then
     systemctl --user enable --now agent-template-feedback.timer
     echo "feedback timer: agent-template-feedback.timer, every 4 hours ($(systemctl --user list-timers agent-template-feedback.timer --no-pager 2>/dev/null | sed -n '2p'))"
@@ -590,6 +594,7 @@ EOF
   fi
   echo "poll units: $SYSTEMD_USER_DIR/agent-board-poll@.service + .timer (refreshed, daemon-reload done)"
   echo "status timer: agent-status.timer, every 60 seconds"
+  echo "reconcile timer: agent-board-reconcile.timer, every 5 minutes"
   echo "chat service: agent-chat.service (enabled and restarted)"
   echo "events service: agent-events.service (enabled and restarted)"
   echo "update timer: agent-template-update.timer, daily 06:30 local ($(systemctl --user list-timers agent-template-update.timer --no-pager 2>/dev/null | sed -n '2p'))"
