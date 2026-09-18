@@ -476,6 +476,35 @@ WantedBy=timers.target
 EOF
 }
 
+core_write_reconcile_units() {
+  local systemd_dir="$1" bin_dir="$2"
+  mkdir -p "$systemd_dir"
+  cat > "$systemd_dir/agent-board-reconcile.service" <<EOF
+[Unit]
+Description=Reconcile agent runs with board columns
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=$bin_dir/agent-board-reconcile
+EOF
+  cat > "$systemd_dir/agent-board-reconcile.timer" <<EOF
+[Unit]
+Description=Reconcile agent board state every five minutes
+
+[Timer]
+OnBootSec=5m
+OnUnitActiveSec=5m
+AccuracySec=30s
+Unit=agent-board-reconcile.service
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
 # Events mode keeps the same poll service as a safety net, but runs its timer
 # hourly. The event receiver starts exact-ticket ticks between safety scans.
 core_write_event_timer_dropin() {
