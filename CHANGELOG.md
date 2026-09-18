@@ -1,3 +1,15 @@
+## 3.50.0 - 2026-09-18
+
+- AGTE-18 adds a ticket-ack lane to `agent-chat.service` so a busy agent
+  acknowledges an owner question within one 60-second tick instead of leaving
+  it unanswered until the ticket work slot frees.
+- The acknowledgement names how many tasks are ahead of the current run and
+  an estimate from the agent's own recent run durations, then a later tick
+  edits that same comment in place with the full answer once the ticket frees
+  up. No second comment is posted.
+- ACTION: run `agent-template update --keep-timers` so the chat lane ships the
+  new ack loop without changing timer state.
+
 ## 3.49.0 - 2026-09-18
 
 - AGTE-16 states in SKILL.md and MAINTAINER.md that owner-facing `Question:`

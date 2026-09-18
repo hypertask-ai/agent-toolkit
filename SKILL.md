@@ -216,6 +216,20 @@ An optional signed receiver can run on localhost by setting
 `CHAT_WEBHOOK_SECRET_FILE` in its conf. Expose and register that receiver only
 on a host with a real public HTTPS route. Both modes call the same handler.
 
+A third loop, the ticket-ack lane, runs every 60 seconds (`AGENT_ACK_SECONDS`)
+for every `CHAT="on"` agent that also has a `BOARD_ID`. It reads
+`agent-board-poll`'s own `<slug>.lock` for the ticket the agent is currently
+running and, if a human posted a comment on that ticket the agent has not
+answered yet, posts one acknowledgement naming how many tasks are ahead
+(`agent-progress`'s `eligible_work.count`) and an estimate built from the
+agent's own recent `run start`/`run done` durations, the current run's
+elapsed time, and that queue length. Once the ticket frees up, the
+next tick asks `CHAT_CLI` (falling back to `MODEL_CLI`) for a real answer from
+the ticket and the run log alone and edits the acknowledgement in place with
+`comment update`, never a second comment. State lives in
+`~/.local/state/agent-chat/ack-state.json`, keyed by ticket and question
+comment id.
+
 Provisioning prints `https://app.hypertask.ai/agents/chat?agent=<slug>`. Send a
 message there with a human account, then quote the timestamped reply from the
 agent log. Never send that test with the owner's CLI token.

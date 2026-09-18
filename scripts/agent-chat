@@ -20,6 +20,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from html import unescape as html_unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -32,7 +33,12 @@ MAX_WEBHOOK_BODY = 1024 * 1024
 RUNTIME_HEARTBEAT_SECONDS = 30
 POLL_CADENCE_SECONDS = 60
 DEFAULT_ROOM_DAILY_TURN_BUDGET = 20
+ACK_CADENCE_SECONDS = 60
+ACK_PROVIDER_TIMEOUT = 60
+DEFAULT_ACK_MINUTES = 15.0
 TICKET_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")
+RUN_START_PATTERN = re.compile(r"run start (\S+)")
+RUN_END_PATTERN = re.compile(r"run (?:done|FAILED) (\S+)")
 
 
 def parse_conf(path: Path) -> dict[str, str]:
@@ -122,6 +128,23 @@ def board_sections(path: Path, watch_sections: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(configured))
 
 
+def board_scope(values: dict[str, str], path: Path) -> tuple[tuple[int, ...], tuple[tuple[int, str], ...]]:
+    try:
+        board_ids = tuple(int(item.strip()) for item in values.get("BOARD_ID", "").split(",") if item.strip())
+    except ValueError:
+        board_ids = ()
+    sections: list[tuple[int, str]] = []
+    for board_id in board_ids:
+        specific = path.parent / f"board-{board_id}.yml"
+        board_file = specific if specific.is_file() else path.parent / "board.yml"
+        described_projects = board_projects(board_file)
+        if not specific.is_file() and described_projects and board_id not in described_projects:
+            continue
+        for section in board_sections(board_file, values.get("WATCH_SECTIONS", "")):
+            sections.append((board_id, section))
+    return board_ids, tuple(sections)
+
+
 @dataclass(frozen=True)
 class Agent:
     slug: str
@@ -139,6 +162,7 @@ class Agent:
     room_daily_turn_budget: int = DEFAULT_ROOM_DAILY_TURN_BUDGET
     manager: bool = False
     maintainer: bool = False
+    source_sections: tuple[tuple[int, str], ...] = ()
 
     @classmethod
     def from_conf(cls, path: Path) -> "Agent | None":
@@ -168,10 +192,8 @@ class Agent:
         )
         indexes = list(dict.fromkeys(indexes))
         secret = values.get("CHAT_WEBHOOK_SECRET_FILE", "")
+        board_ids, source_sections = board_scope(values, path)
         try:
-            board_ids = tuple(
-                int(item.strip()) for item in values.get("BOARD_ID", "").split(",") if item.strip()
-            )
             room_budget = int(values.get("ROOM_DAILY_TURN_BUDGET", str(DEFAULT_ROOM_DAILY_TURN_BUDGET)))
         except ValueError:
             return None
@@ -193,6 +215,7 @@ class Agent:
             room_daily_turn_budget=room_budget,
             manager=values.get("MANAGER") == "on",
             maintainer=values.get("MAINTAINER") == "on",
+            source_sections=source_sections,
         )
 
     def token(self) -> str:
@@ -215,27 +238,15 @@ class RuntimeAgent:
         required = ("AGENT_SLUG", "TOKEN_FILE", "BOARD_ID", "MODEL_CLI")
         if any(not values.get(key) for key in required):
             return None
-        try:
-            board_ids = tuple(int(item.strip()) for item in values["BOARD_ID"].split(",") if item.strip())
-        except ValueError:
-            return None
+        board_ids, source_sections = board_scope(values, path)
         if not board_ids:
             return None
-        sections: list[tuple[int, str]] = []
-        for board_id in board_ids:
-            specific = path.parent / f"board-{board_id}.yml"
-            board_file = specific if specific.is_file() else path.parent / "board.yml"
-            described_projects = board_projects(board_file)
-            if not specific.is_file() and described_projects and board_id not in described_projects:
-                continue
-            for section in board_sections(board_file, values.get("WATCH_SECTIONS", "")):
-                sections.append((board_id, section))
         return cls(
             slug=values["AGENT_SLUG"],
             token_file=Path(values["TOKEN_FILE"]).expanduser(),
             api_url=api_base(values),
             board_ids=board_ids,
-            source_sections=tuple(sections),
+            source_sections=source_sections,
             model=model_name(values["MODEL_CLI"]),
             graft="on" if values.get("GRAFT") == "on" else "off",
         )
@@ -508,6 +519,12 @@ class AgentApi:
             },
         )
 
+    def comments(self, task_id: str, board_id: int) -> list[dict[str, Any]]:
+        quoted = urllib.parse.urlencode({"task_id": task_id, "project_id": board_id})
+        payload = self.request("GET", f"/mcp/comments?{quoted}")
+        rows = payload.get("comments")
+        return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
     def reply(self, session_id: str, message_id: str, text: str) -> None:
         quoted = urllib.parse.quote(session_id, safe="")
         self.request(
@@ -525,6 +542,161 @@ def recent_work(slug: str) -> str:
         return "No recent ticket run log is available."
     useful = [line for line in lines if "run start " in line or "run done " in line or "run FAILED " in line]
     return "\n".join(useful[-8:]) or "No recent ticket run is recorded."
+
+
+def locked_ticket(board_state_dir: Path, slug: str) -> dict[str, Any] | None:
+    lock = read_json(board_state_dir / f"{slug}.lock")
+    ticket = str(lock.get("ticket") or "").upper()
+    if not TICKET_PATTERN.fullmatch(ticket):
+        return None
+    return {"ticket": ticket, "board_id": lock.get("board_id"), "started_at": lock.get("started_at")}
+
+
+def eligible_count(board_state_dir: Path, slug: str) -> int:
+    row = read_json(board_state_dir / f"{slug}.progress.json")
+    eligible = row.get("eligible_work") if isinstance(row.get("eligible_work"), dict) else {}
+    try:
+        return max(int(eligible.get("count") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def average_run_minutes(board_state_dir: Path, slug: str, default: float = DEFAULT_ACK_MINUTES) -> float:
+    try:
+        lines = (board_state_dir / f"{slug}.log").read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return default
+    starts: dict[str, datetime] = {}
+    durations: list[float] = []
+    for line in lines:
+        timestamp_text, _, rest = line.partition(" ")
+        try:
+            at = datetime.fromisoformat(timestamp_text)
+        except ValueError:
+            continue
+        start_match = RUN_START_PATTERN.search(rest)
+        if start_match:
+            starts[start_match.group(1)] = at
+            continue
+        end_match = RUN_END_PATTERN.search(rest)
+        if end_match:
+            started = starts.pop(end_match.group(1), None)
+            if started is not None:
+                minutes = (at - started).total_seconds() / 60
+                if minutes > 0:
+                    durations.append(minutes)
+    if not durations:
+        return default
+    sample = durations[-5:]
+    return sum(sample) / len(sample)
+
+
+def estimate_wait_minutes(board_state_dir: Path, slug: str, queue_count: int, started_at: str | None) -> float:
+    avg = average_run_minutes(board_state_dir, slug)
+    elapsed = 0.0
+    if started_at:
+        try:
+            started = datetime.fromisoformat(started_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            elapsed = max(0.0, (datetime.now(timezone.utc) - started).total_seconds() / 60)
+        except ValueError:
+            elapsed = 0.0
+    remaining_current_run = max(1.0, avg - elapsed)
+    return remaining_current_run + queue_count * avg
+
+
+def ack_text(queue_count: int, estimate_minutes: float) -> str:
+    minutes = max(1, round(estimate_minutes))
+    minute_word = "minute" if minutes == 1 else "minutes"
+    if queue_count <= 0:
+        lead = "this is next up"
+    else:
+        task_word = "task" if queue_count == 1 else "tasks"
+        lead = f"{queue_count} {task_word} ahead"
+    return f"<p><strong>Got it, still working.</strong> {lead}, answer in about {minutes} {minute_word}.</p>"
+
+
+def strip_html(value: str) -> str:
+    return html_unescape(re.sub(r"<[^>]+>", " ", value))
+
+
+def latest_human_comment(comments: list[dict[str, Any]], agent_id: str, agent_name: str) -> dict[str, Any] | None:
+    # A comment's real actor is the "agent" field, not "creator": an
+    # agent-authenticated comment with no agent id still carries the account
+    # owner as creator, so a display-name match is the fallback (mirrors
+    # adapters/hypertask/adapter.sh's is_mine).
+    def is_mine(comment: dict[str, Any]) -> bool:
+        agent = comment.get("agent") if isinstance(comment.get("agent"), dict) else {}
+        found_id = str(agent.get("id") or "")
+        if found_id:
+            return found_id == agent_id
+        author = comment.get("agent") or comment.get("creator") or comment.get("user") or {}
+        author_name = author.get("displayName") or author.get("name") if isinstance(author, dict) else author
+        return str(author_name or "").strip().casefold() == agent_name.strip().casefold()
+
+    humans = [c for c in comments if not is_mine(c) and c.get("id") is not None]
+    if not humans:
+        return None
+    return max(humans, key=lambda c: (str(c.get("createdAt") or ""), c.get("id") or 0))
+
+
+def ack_answer_prompt(agent: Agent, ticket: dict[str, Any], question_text: str, log_tail: str) -> str:
+    return f"""You are {agent.name}, answering one owner question about a ticket you are already working on.
+
+Ticket {ticket.get('ticketNumber', '')}: {ticket.get('title', '')}
+Description:
+{str(ticket.get('description') or '')[:3000]}
+
+Recent run log:
+{log_tail or '(no recent log lines)'}
+
+Owner question:
+{question_text[:2000]}
+
+Reply in plain, short sentences a product owner reads on a phone. Bold the first sentence. No jargon, no em dashes, no code. If you cannot answer confidently from the ticket and log alone, say plainly that you will confirm once the current run finishes. Return only the HTML reply, wrapped in <p> tags."""
+
+
+def _posted_comment_lines(board_state_dir: Path, slug: str) -> list[str]:
+    try:
+        return (board_state_dir / f"{slug}.posted-comments").read_text(
+            encoding="utf-8", errors="replace"
+        ).splitlines()
+    except OSError:
+        return []
+
+
+def board_comment_add(agent: Agent, ticket: str, text: str, board_state_dir: Path) -> str | None:
+    # The wrapper exits 0 without posting on a refusal (owner-mention budget,
+    # daily comment cap), so a clean exit alone does not mean a comment
+    # landed. Only trust the posted-comments file, and only if it grew.
+    before = len(_posted_comment_lines(board_state_dir, agent.slug))
+    try:
+        subprocess.run(
+            [str(agent.board_cli), "comment", "add", ticket, "--text", text],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return None
+    lines = _posted_comment_lines(board_state_dir, agent.slug)
+    if len(lines) <= before:
+        return None
+    for line in reversed(lines):
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == ticket:
+            return parts[1]
+    return None
+
+
+def board_comment_update(agent: Agent, comment_id: str, text: str) -> bool:
+    try:
+        subprocess.run(
+            [str(agent.board_cli), "comment", "update", str(comment_id), "--text", text],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return False
+    return True
 
 
 def shape_command_reply(reply: str, message_text: str) -> str:
@@ -835,6 +1007,7 @@ class ChatDaemon:
         self.room_budget = RoomBudgetState(state_dir / "room-budget.json")
         self.runtime_state = RuntimeState(state_dir / "runtime-sequences.json")
         self.runtime_status = JsonState(state_dir / "runtime-status.json")
+        self.ack_state = JsonState(state_dir / "ack-state.json")
         try:
             self.version = (Path(__file__).resolve().parents[1] / "VERSION").read_text().strip()
         except OSError:
@@ -1043,6 +1216,106 @@ class ChatDaemon:
             self.heartbeat_once()
             self.stop.wait(interval)
 
+    def ack_once(self, api_factory: Any = AgentApi) -> None:
+        for agent in self.agents():
+            if not agent.board_ids:
+                continue
+            try:
+                self._ack_agent(agent, api_factory)
+            except Exception as error:
+                self.log(agent, f"ack lane error: {type(error).__name__}: {error}")
+
+    def _ack_agent(self, agent: Agent, api_factory: Any) -> None:
+        with self.ack_state.lock:
+            entries = dict(self.ack_state.value.get(agent.slug, {}))
+        locked = locked_ticket(self.board_state_dir, agent.slug)
+        locked_ref = locked["ticket"] if locked else None
+
+        for key, entry in entries.items():
+            if entry.get("answered") or entry.get("ticket") == locked_ref:
+                continue
+            self._answer_pending(agent, api_factory, key, entry)
+
+        if not locked:
+            return
+        board_id = locked.get("board_id") or agent.board_ids[0]
+        api = api_factory(agent)
+        try:
+            task_payload = api.ticket(locked_ref)
+        except Exception as error:
+            self.log(agent, f"ack lane could not read {locked_ref}: {error}")
+            return
+        tasks = task_payload.get("tasks")
+        task = tasks[0] if isinstance(tasks, list) and tasks and isinstance(tasks[0], dict) else None
+        if not task or not task.get("id"):
+            return
+        try:
+            comments = api.comments(str(task["id"]), int(board_id))
+        except Exception as error:
+            self.log(agent, f"ack lane could not read comments on {locked_ref}: {error}")
+            return
+        question = latest_human_comment(comments, agent.agent_id, agent.name)
+        if not question or question.get("id") is None:
+            return
+        key = f"{locked_ref}:{question['id']}"
+        with self.ack_state.lock:
+            if key in self.ack_state.value.get(agent.slug, {}):
+                return
+        queue = eligible_count(self.board_state_dir, agent.slug)
+        estimate = estimate_wait_minutes(self.board_state_dir, agent.slug, queue, locked.get("started_at"))
+        ack_id = board_comment_add(agent, locked_ref, ack_text(queue, estimate), self.board_state_dir)
+        if not ack_id:
+            self.log(agent, f"ack lane could not post an acknowledgement on {locked_ref}")
+            return
+        with self.ack_state.lock:
+            self.ack_state.value.setdefault(agent.slug, {})[key] = {
+                "ticket": locked_ref,
+                "question_comment_id": question["id"],
+                "question_text": strip_html(str(question.get("text") or question.get("html") or ""))[:2000],
+                "ack_comment_id": ack_id,
+                "acked_at": datetime.now(timezone.utc).isoformat(),
+                "answered": False,
+            }
+            self.ack_state.save()
+        self.log(agent, f"acked owner question {question['id']} on {locked_ref} (queue={queue}, eta={estimate:.0f}m)")
+
+    def _answer_pending(self, agent: Agent, api_factory: Any, key: str, entry: dict[str, Any]) -> None:
+        ticket = entry.get("ticket")
+        ack_id = entry.get("ack_comment_id")
+        if not ticket or not ack_id:
+            return
+        api = api_factory(agent)
+        try:
+            task_payload = api.ticket(ticket)
+        except Exception as error:
+            self.log(agent, f"ack lane could not re-read {ticket}: {error}")
+            return
+        tasks = task_payload.get("tasks")
+        task = tasks[0] if isinstance(tasks, list) and tasks and isinstance(tasks[0], dict) else {}
+        question_text = str(entry.get("question_text") or "")
+        try:
+            answer = run_provider(
+                agent,
+                ack_answer_prompt(agent, task, question_text, recent_work(agent.slug)),
+                timeout=ACK_PROVIDER_TIMEOUT,
+            )
+        except Exception as error:
+            self.log(agent, f"ack lane provider error for {ticket}: {type(error).__name__}: {error}")
+            return
+        answer = finalize_chat_reply(answer, question_text, lambda reference: api.ticket(reference))
+        if not board_comment_update(agent, str(ack_id), answer):
+            self.log(agent, f"ack lane could not edit the acknowledgement on {ticket}")
+            return
+        with self.ack_state.lock:
+            self.ack_state.value.setdefault(agent.slug, {}).setdefault(key, dict(entry))["answered"] = True
+            self.ack_state.save()
+        self.log(agent, f"answered owner question on {ticket} by editing comment {ack_id}")
+
+    def ack_loop(self, interval: float = ACK_CADENCE_SECONDS) -> None:
+        while not self.stop.is_set():
+            self.ack_once()
+            self.stop.wait(interval)
+
     def poll_once(self) -> None:
         for agent in self.agents():
             if self.stop.is_set():
@@ -1167,10 +1440,13 @@ def main() -> int:
         raise SystemExit(f"unknown option: {sys.argv[1]}")
     interval = float(os.environ.get("AGENT_CHAT_POLL_SECONDS", "3"))
     heartbeat_interval = float(os.environ.get("AGENT_RUNTIME_HEARTBEAT_SECONDS", str(RUNTIME_HEARTBEAT_SECONDS)))
+    ack_interval = float(os.environ.get("AGENT_ACK_SECONDS", str(ACK_CADENCE_SECONDS)))
     if interval <= 0:
         raise SystemExit("AGENT_CHAT_POLL_SECONDS must be greater than zero")
     if heartbeat_interval <= 0:
         raise SystemExit("AGENT_RUNTIME_HEARTBEAT_SECONDS must be greater than zero")
+    if ack_interval <= 0:
+        raise SystemExit("AGENT_ACK_SECONDS must be greater than zero")
     board_state_dir = Path(os.environ.get(
         "AGENT_BOARD_STATE_DIR", str(Path.home() / ".local/state/agent-board-poll")
     ))
@@ -1186,6 +1462,13 @@ def main() -> int:
         name="agent-runtime-heartbeat",
     )
     heartbeat_thread.start()
+    ack_thread = threading.Thread(
+        target=daemon.ack_loop,
+        args=(ack_interval,),
+        daemon=True,
+        name="agent-ticket-ack",
+    )
+    ack_thread.start()
     if port:
         server = ThreadingHTTPServer(("127.0.0.1", port), WebhookHandler)
         server.daemon_ref = daemon  # type: ignore[attr-defined]
@@ -1195,6 +1478,7 @@ def main() -> int:
     finally:
         daemon.stop.set()
         heartbeat_thread.join(timeout=5)
+        ack_thread.join(timeout=5)
         if server:
             server.shutdown()
     return 0
