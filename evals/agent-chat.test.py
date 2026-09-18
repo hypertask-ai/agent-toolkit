@@ -68,10 +68,12 @@ assert "agent-template ctl start|stop|status <slug>" in manager_prompt
 assert 'agent-template delegate <ticket> <slug> --why "<one line reason>"' in manager_prompt
 assert "agent-template mode manual|auto [--board <id>|--runner <slug>]" in manager_prompt
 assert "agent-template model <slug> <preset>" in manager_prompt
+assert "agent-template sections <slug> <list>" in manager_prompt
 assert "agent-template quiet on|off [<slug>|all]" in manager_prompt
 assert "agent-template feedback --as <slug>" in manager_prompt
 assert "switch the product board to manual" in manager_prompt
 assert "put dev 2 on grok fast" in manager_prompt
+assert "watch AI Review and QA for qa-1" in manager_prompt
 assert "quiet off for qa-1" in manager_prompt
 assert "file a toolkit ticket:" in manager_prompt
 assert "agent-template mode" not in regular_prompt

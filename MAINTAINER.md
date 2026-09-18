@@ -58,6 +58,8 @@ and adds the setup commands below. Missing or any other value means off.
   runner. The manager's board is the default.
 - `agent-template model <slug> <preset>` accepts `grok-fast`, `glm-flash`, or
   `codex-sol` and writes only that preset's exact `MODEL_CLI` command.
+- `agent-template sections <slug> <list>` writes a comma-separated
+  `WATCH_SECTIONS` list, or `*`, to one current conf.
 - `agent-template quiet on|off [<slug>|all]` writes `QUIET` to one or every
   current conf.
 - `agent-template feedback --as <slug> ...` reads `BOARD_CLI` from the calling

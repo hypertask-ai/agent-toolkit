@@ -50,7 +50,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `BOARD_ID` | Board id, or comma-separated ids. |
 | `TOKEN_FILE` | Absolute path to the 0600 token file. |
 | `BOARD_CLI` | Agent-authenticated board wrapper. |
-| `WATCH_SECTIONS` | Comma-separated watched columns. |
+| `WATCH_SECTIONS` | Comma-separated watched columns. QA agents include `QA` by default and on template update. |
 | `SKILLS_INDEX` | Optional comma-separated extra indexes. |
 | `MAX_CONCURRENT_RUNS` | Runs started per tick, default 1. |
 | `RETRY_LIMIT` | Total failed attempts allowed per window. By default this is three plus the number of `LADDER` commands. |

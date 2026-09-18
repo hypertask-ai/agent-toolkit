@@ -248,6 +248,17 @@ else
 fi
 
 qa_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'qa.conf.bak-*' | wc -l)"
+sections="$(AGENT_SLUG=manager run_template sections qa 'AI Review, QA')"
+qa_backups_after="$(find "$CONF_DIR" -maxdepth 1 -name 'qa.conf.bak-*' | wc -l)"
+if [ "$sections" = 'sections qa AI Review,QA: changed qa.conf' ] \
+   && grep -q '^WATCH_SECTIONS="AI Review,QA"$' "$CONF_DIR/qa.conf" \
+   && [ "$qa_backups_after" -eq $((qa_backups_before + 1)) ]; then
+  ok sections-one-agent "WATCH_SECTIONS changed to the normalized column list"
+else
+  bad sections-one-agent "output=$sections value=$(sed -n 's/^WATCH_SECTIONS=//p' "$CONF_DIR/qa.conf")"
+fi
+
+qa_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'qa.conf.bak-*' | wc -l)"
 quiet="$(AGENT_SLUG=manager run_template quiet off qa)"
 qa_backups_after="$(find "$CONF_DIR" -maxdepth 1 -name 'qa.conf.bak-*' | wc -l)"
 if [ "$quiet" = 'quiet off qa: changed qa.conf' ] \
@@ -282,10 +293,13 @@ assert_refused_without_change model-refuses-markerless-conf 'model refused: lega
   model legacy grok-fast
 assert_refused_without_change quiet-refuses-credential-path 'quiet refused: credentials is not a current agent slug in the conf dir' "$before" \
   quiet on credentials
+assert_refused_without_change sections-refuses-empty-column 'sections refused: list must be * or comma-separated non-empty section names' "$before" \
+  sections qa 'AI Review,,QA'
 
 for spec in \
   'mode|mode refused: caller regular is not a manager|mode manual' \
   'model|model refused: caller regular is not a manager|model worker grok-fast' \
+  'sections|sections refused: caller regular is not a manager|sections worker QA' \
   'quiet|quiet refused: caller regular is not a manager|quiet on worker'; do
   IFS='|' read -r name expected args <<< "$spec"
   set +e
@@ -345,6 +359,7 @@ fi
 if grep -q $'who=regular\twhat=ctl stop worker' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=mode manual --board 15' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=model worker grok-fast' "$TMP/state/agent-board-poll/manager-actions.log" \
+   && grep -q $'who=manager\twhat=sections qa AI Review, QA' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=quiet off qa' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=feedback --as manager' "$TMP/state/agent-board-poll/manager-actions.log"; then
   ok manager-actions-audited "accepted and refused calls include caller and command"

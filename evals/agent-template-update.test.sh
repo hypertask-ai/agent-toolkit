@@ -30,9 +30,7 @@ EOF
 cat > "$TEMPLATE/scripts/migrate-provider-policy.py" <<'EOF'
 #!/usr/bin/env python3
 EOF
-cat > "$TEMPLATE/scripts/migrate-quiet-mode.py" <<'EOF'
-#!/usr/bin/env python3
-EOF
+cp "$ROOT/scripts/migrate-quiet-mode.py" "$TEMPLATE/scripts/migrate-quiet-mode.py"
 cat > "$TEMPLATE/evals/run-evals.sh" <<'EOF'
 #!/usr/bin/env bash
 if [ -n "${AGENT_TEMPLATE_CORE_ROOT:-}" ]; then
@@ -79,6 +77,12 @@ cat > "$CONF_DIR/current-worker.conf" <<'EOF'
 AGENT_SLUG="current-worker"
 BOARD_ADAPTER="hypertask"
 EOF
+cat > "$CONF_DIR/current-qa.conf" <<'EOF'
+AGENT_SLUG="current-qa"
+AGENT_KIND="qa"
+BOARD_ADAPTER="hypertask"
+WATCH_SECTIONS="AI Review"
+EOF
 
 run_update() {
   HOME="$HOME_DIR" AGENT_CONFIG_DIR="$CONF_DIR" AGENT_TEMPLATE_CONFIG_DIR="$CONF_DIR" \
@@ -107,6 +111,8 @@ if [ "$status" -eq 0 ] \
    && grep -q '^BOARD_ADAPTER="hypertask"$' "$CONF_DIR/old-worker.conf" \
    && grep -q '^GRAFT="off"$' "$CONF_DIR/old-worker.conf" \
    && grep -q '^GRAFT="off"$' "$CONF_DIR/current-worker.conf" \
+   && grep -q '^WATCH_SECTIONS="AI Review,QA"$' "$CONF_DIR/current-qa.conf" \
+   && compgen -G "$CONF_DIR/current-qa.conf.bak-*" >/dev/null \
    && grep -q 'ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-agents/product-bot.conf`\.' "$TMP/stable.out" \
    && grep -q 'checkout --detach stable' "$TMP/git.log" \
    && ! grep -q 'checkout --detach origin/main' "$TMP/git.log"; then

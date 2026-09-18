@@ -693,6 +693,7 @@ Manager commands available in this chat:
 - `agent-template delegate <ticket> <slug> --why "<one line reason>"`. Example: "give HTPR-6550 to dev 2" runs `agent-template delegate HTPR-6550 dev-2 --why "Take the implementation"`.
 - `agent-template mode manual|auto [--board <id>|--runner <slug>]`. Example: "switch the product board to manual" runs `agent-template mode manual`.
 - `agent-template model <slug> <preset>`. Presets are `grok-fast`, `glm-flash`, and `codex-sol`. Example: "put dev 2 on grok fast" runs `agent-template model dev-2 grok-fast`.
+- `agent-template sections <slug> <list>`. Example: "watch AI Review and QA for qa-1" runs `agent-template sections qa-1 "AI Review,QA"`.
 - `agent-template quiet on|off [<slug>|all]`. Example: "quiet off for qa-1" runs `agent-template quiet off qa-1`.
 - `agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"`. Example: "file a toolkit ticket: add a setup report" runs `agent-template feedback --as {agent.slug} --kind idea --what "Add a setup report" --got "No setup report exists" --expected "Provide a setup report"`.
 These commands never change token files, credentials, foreign units, files outside the conf dir, or legacy confs without `BOARD_ADAPTER`. These are the only external changes allowed in chat. After a command, return one plain sentence describing its outcome. Include the affected ticket as a Markdown link with its full id and title when the command concerns a ticket. Never paste raw command output.

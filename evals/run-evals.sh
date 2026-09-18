@@ -268,7 +268,7 @@ if [ -z "$ONLY" ] && [ -x "$HERE/comment-loop.test.sh" ]; then
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/quiet-mode.test.sh" ]; then
   echo ""
-  echo "-- quiet mode migration checks --"
+  echo "-- current conf default migration checks --"
   bash "$HERE/quiet-mode.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/one-ticket-live.test.sh" ]; then
@@ -280,6 +280,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/agent-template-update.test.sh" ]; then
   echo ""
   echo "-- agent-template update behavioural checks --"
   bash "$HERE/agent-template-update.test.sh"
+fi
+if [ -z "$ONLY" ] && [ -x "$HERE/qa-sections.test.sh" ]; then
+  echo ""
+  echo "-- QA section behavioural checks --"
+  bash "$HERE/qa-sections.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/manager-actions.test.sh" ]; then
   echo ""

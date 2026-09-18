@@ -11,6 +11,8 @@
 #
 #   agent-template model <slug> <preset>
 #
+#   agent-template sections <slug> <list>
+#
 #   agent-template quiet on|off [<slug>|all]
 #
 #   agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]
@@ -177,6 +179,7 @@ case "$1" in
   delegate) shift; SUBCOMMAND="delegate" ;;
   mode) shift; SUBCOMMAND="mode" ;;
   model) shift; SUBCOMMAND="model" ;;
+  sections) shift; SUBCOMMAND="sections" ;;
   quiet) shift; SUBCOMMAND="quiet" ;;
   build) shift; SUBCOMMAND="build" ;;
   merge) shift; SUBCOMMAND="merge" ;;
@@ -260,7 +263,7 @@ PYEOF
 manager_set_conf_value() {
   local conf="$1" key="$2" value="$3" backup
   case "$key" in
-    CLAIM_UNASSIGNED|MODEL_CLI|QUIET) ;;
+    CLAIM_UNASSIGNED|MODEL_CLI|QUIET|WATCH_SECTIONS) ;;
     *) manager_refuse "$SUBCOMMAND refused: $key is not a manager-editable setting" ;;
   esac
   grep -q '^BOARD_ADAPTER=' "$conf" \
@@ -545,6 +548,35 @@ if [ "${SUBCOMMAND:-feedback}" = "model" ]; then
     manager_changed_reply "model $target $preset" "$(basename "$target_conf")"
   else
     manager_changed_reply "model $target $preset"
+  fi
+  exit 0
+fi
+
+if [ "${SUBCOMMAND:-feedback}" = "sections" ]; then
+  manager_authorize "$@"
+  [ "$#" -eq 2 ] \
+    || manager_refuse "sections refused: use agent-template sections <slug> <list>"
+  target="$1"
+  sections="$(python3 - "$2" <<'PYEOF'
+import sys
+
+raw = sys.argv[1]
+if raw.strip() == "*":
+    print("*", end="")
+    raise SystemExit(0)
+parts = [part.strip() for part in raw.split(",")]
+if not parts or any(not part or any(ord(char) < 32 for char in part) or part == "*" for part in parts):
+    raise SystemExit(1)
+print(",".join(parts), end="")
+PYEOF
+)" || manager_refuse "sections refused: list must be * or comma-separated non-empty section names"
+  target_conf="$(manager_current_conf "$target")" \
+    || manager_refuse "sections refused: $target is not a current agent slug in the conf dir"
+  MANAGER_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%N)"
+  if manager_set_conf_value "$target_conf" WATCH_SECTIONS "$sections"; then
+    manager_changed_reply "sections $target $sections" "$(basename "$target_conf")"
+  else
+    manager_changed_reply "sections $target $sections"
   fi
   exit 0
 fi
@@ -1386,11 +1418,11 @@ PYEOF
   fi
   [ "$CHAT_ENABLED" -gt 0 ] || echo "  every template-wired agent already declares CHAT"
 
-  echo "== 3d. quiet mode for current-schema agents =="
-  MIGRATE_QUIET="$TEMPLATE_DIR/scripts/migrate-quiet-mode.py"
-  QUIET_ARGS=(--version "$TEMPLATE_VERSION")
-  [ "$DRY_RUN" = "yes" ] && QUIET_ARGS+=(--dry-run)
-  python3 "$MIGRATE_QUIET" "${QUIET_ARGS[@]}" "$CONFIG_DIR"
+  echo "== 3d. current-schema agent defaults =="
+  MIGRATE_DEFAULTS="$TEMPLATE_DIR/scripts/migrate-quiet-mode.py"
+  DEFAULT_ARGS=(--version "$TEMPLATE_VERSION")
+  [ "$DRY_RUN" = "yes" ] && DEFAULT_ARGS+=(--dry-run)
+  python3 "$MIGRATE_DEFAULTS" "${DEFAULT_ARGS[@]}" "$CONFIG_DIR"
 
   echo "== 3e. explicit Graft default for current-schema agents =="
   GRAFT_DEFAULTED=0

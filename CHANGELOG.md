@@ -1,3 +1,15 @@
+## 3.44.0 - 2026-09-18
+
+- AGTE-26 makes QA agents watch the `QA` column by default so handed-off tickets are eligible.
+- Template updates append `QA` to existing QA agent section lists while preserving
+  their configured columns and backing up each changed conf.
+- Managers can change one current agent's watched columns with
+  `agent-template sections <slug> <list>`.
+- Focused offline coverage checks creation, migration, manager edits, and pickup
+  of an assigned ticket in `QA`.
+- ACTION: run `agent-template update --keep-timers` so existing QA agents begin
+  watching `QA` without changing timer state.
+
 ## 3.43.0 - 2026-09-18
 
 - AGTE-24 resolves ticket URLs from cached project prefixes, including boards with more than 100 tickets.

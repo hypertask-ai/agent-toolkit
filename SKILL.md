@@ -532,6 +532,7 @@ agent-template ctl start|stop|status <slug>
 agent-template delegate <ticket> <slug> --why "<one line reason>"
 agent-template mode manual|auto [--board <id>|--runner <slug>]
 agent-template model <slug> <preset>
+agent-template sections <slug> <list>
 agent-template quiet on|off [<slug>|all]
 agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --got "<context>" --expected "<result>"
 ```
@@ -540,8 +541,10 @@ agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --
 dev and QA conf matching the selected board. An omitted board uses the
 manager's `BOARD_ID`. `model` accepts only the named `grok-fast`, `glm-flash`,
 and `codex-sol` presets and writes their exact template policy command, never text
-supplied as a command. `quiet` sets `QUIET` for one current agent or all current
-agents. Each changed conf is first copied to `<conf>.bak-<timestamp>`, and the
+supplied as a command. `sections` sets `WATCH_SECTIONS` to a comma-separated
+list, or `*`, for one current agent. `quiet` sets `QUIET` for one current agent
+or all current agents. Each changed conf is first copied to
+`<conf>.bak-<timestamp>`, and the
 one-line result names every changed conf.
 
 `ctl` starts a runner timer, stops its timer and current service, or reports

@@ -229,7 +229,12 @@ CONFIG_DIR="$(core_config_dir)"
 CONF_FILE="$CONFIG_DIR/$SLUG.conf"
 TOKEN_FILE="$CONFIG_DIR/credentials/$SLUG-agent-token"
 BOARD_CLI="$BIN_DIR/$SLUG-board"
-if [ -z "$SECTIONS" ]; then SECTIONS="In Progress,Backlog"; fi
+if [ -z "$SECTIONS" ]; then
+  [ "$KIND" = "qa" ] && SECTIONS="AI Review,QA" || SECTIONS="In Progress,Backlog"
+elif [ "$KIND" = "qa" ] && [ "$SECTIONS" != "*" ] \
+   && ! printf '%s\n' "$SECTIONS" | tr ',' '\n' | grep -Eiq '^[[:space:]]*QA[[:space:]]*$'; then
+  SECTIONS="$SECTIONS,QA"
+fi
 
 # ---------- mission ----------
 if [ -n "$MISSION_FILE" ]; then
