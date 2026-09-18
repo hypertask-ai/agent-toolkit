@@ -24,6 +24,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from ticket_links import format_ticket_links, remove_em_dashes  # noqa: E402
+
 ERROR_REPLY = "I could not answer this, error logged."
 MAX_WEBHOOK_BODY = 1024 * 1024
 RUNTIME_HEARTBEAT_SECONDS = 30
@@ -431,6 +434,10 @@ class AgentApi:
         rows = payload.get("messages")
         return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
+    def ticket(self, reference: str) -> dict[str, Any]:
+        quoted = urllib.parse.urlencode({"ticket_number": reference})
+        return self.request("GET", f"/mcp/tasks?{quoted}")
+
     def reply(self, session_id: str, message_id: str, text: str) -> None:
         quoted = urllib.parse.quote(session_id, safe="")
         self.request(
@@ -448,6 +455,52 @@ def recent_work(slug: str) -> str:
         return "No recent ticket run log is available."
     useful = [line for line in lines if "run start " in line or "run done " in line or "run FAILED " in line]
     return "\n".join(useful[-8:]) or "No recent ticket run is recorded."
+
+
+def shape_command_reply(reply: str, message_text: str) -> str:
+    reference = TICKET_PATTERN.search(message_text)
+    failure = re.search(r"(?:^|\n)(feedback|ctl|delegate)\s+(?:refused|failed):", reply)
+    if failure:
+        command = failure.group(1)
+        if command == "feedback":
+            return "The feedback ticket could not be filed."
+        if command == "delegate" and reference:
+            return f"{reference.group(0)} could not be delegated."
+        if command == "delegate":
+            return "The delegation could not be completed."
+        return "The requested ticket runner action could not be completed."
+
+    filed = re.search(r"(?:^|\n)filed\s+([A-Z][A-Z0-9]*-\d+)\b", reply, re.IGNORECASE)
+    if filed:
+        return f"Feedback was filed as {filed.group(1).upper()}."
+
+    control = re.search(r"(?:^|\n)ctl\s+(start|stop|status)\s+([a-z0-9-]+):([^\n]*)", reply)
+    if control:
+        action, target, detail = control.groups()
+        name = target.replace("-", " ")
+        if action == "start":
+            return f"The ticket runner for {name} was started."
+        if action == "stop":
+            return f"The ticket runner and current job for {name} were stopped."
+        timer = re.search(r"timer=([^\s]+)", detail)
+        service = re.search(r"service=([^\s]+)", detail)
+        timer_state = timer.group(1) if timer else "unknown"
+        service_state = service.group(1) if service else "unknown"
+        return f"The ticket runner for {name} is {timer_state}, and its current job is {service_state}."
+
+    handoff = re.search(r"(?:^|\n)Handed to (.+?) by [^:\n]+:", reply)
+    if handoff and reference:
+        return f"{reference.group(0)} was delegated to {handoff.group(1).strip()}."
+    return reply
+
+
+def finalize_chat_reply(
+    reply: str,
+    message_text: str,
+    lookup: Any,
+) -> str:
+    shaped = shape_command_reply(reply, message_text)
+    return format_ticket_links(remove_em_dashes(shaped), "chat", lookup)
 
 
 def prompt_for(agent: Agent, message: dict[str, Any], history: list[dict[str, Any]]) -> str:
@@ -470,7 +523,7 @@ Manager commands available in this chat:
 - `agent-template model <slug> <preset>`. Presets are `grok-fast`, `glm-flash`, and `codex-sol`. Example: "put dev 2 on grok fast" runs `agent-template model dev-2 grok-fast`.
 - `agent-template quiet on|off [<slug>|all]`. Example: "quiet off for qa-1" runs `agent-template quiet off qa-1`.
 - `agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"`. Example: "file a toolkit ticket: add a setup report" runs `agent-template feedback --as {agent.slug} --kind idea --what "Add a setup report" --got "No setup report exists" --expected "Provide a setup report"`.
-These commands never change token files, credentials, foreign units, files outside the conf dir, or legacy confs without `BOARD_ADAPTER`. These are the only external changes allowed in chat. Return exactly the command result unchanged, with no other text.
+These commands never change token files, credentials, foreign units, files outside the conf dir, or legacy confs without `BOARD_ADAPTER`. These are the only external changes allowed in chat. After a command, return one plain sentence describing its outcome. Include the affected ticket as a Markdown link with its full id and title when the command concerns a ticket. Never paste raw command output.
 """
     if agent.maintainer:
         external_rule = "- Make setup changes only through the allowlisted maintainer commands below. Never edit a shared checkout or run hax or codex directly."
@@ -482,7 +535,7 @@ Setup maintainer contract:
 - Merge an existing allowlisted pull request only with `agent-template merge <pr-url>`.
 - After a toolkit build merges, deploy it with `agent-template update --keep-timers`.
 - Never launch a model harness directly. Never work around the repository allowlist.
-Return exactly the command result unchanged after a maintainer command.
+After a maintainer command, return one plain outcome sentence and never paste raw command output. Include any affected ticket as a Markdown link with its full id and title.
 """
     return f"""You are {agent.name}. This is a live Hypertask Agent Chat conversation, not ticket work.
 
@@ -510,7 +563,7 @@ Conversation history, oldest first:
 New message from {message.get('userName') or 'the user'}:
 {str(message.get('text') or '')[:8000]}
 
-Return only the concise reply that should appear in Agent Chat. Do not include tool traces or preamble."""
+Return only the concise reply that should appear in Agent Chat. Do not include tool traces or preamble. Use `[TICKET-ID Ticket title](https://app.hypertask.ai/detail/project-N/ID)` for every ticket reference. Do not use em dashes."""
 
 
 def agent_process_env(agent: Agent) -> dict[str, str]:
@@ -632,6 +685,11 @@ class ChatDaemon:
         try:
             history = client.history(session_id)
             reply = run_provider(agent, prompt_for(agent, message, history))
+            reply = finalize_chat_reply(
+                reply,
+                str(message.get("text") or ""),
+                lambda reference: client.ticket(reference),
+            )
         except Exception as error:
             self.log(agent, f"message {message_id} provider error: {type(error).__name__}: {error}")
             reply = ERROR_REPLY

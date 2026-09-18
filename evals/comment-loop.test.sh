@@ -269,13 +269,13 @@ em_dash='<p><strong>Decision: The release is ready — now.</strong></p><p>Next:
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
   AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
   "$TMP/plain-board" comment add TEST-1 --text "$em_dash" >"$TMP/em-dash.out" 2>"$TMP/em-dash.err"
-if [ ! -s "$MECH_POSTS" ] \
-   && [ "$(wc -l < "$REWRITE_CALLS")" -eq 1 ] \
-   && grep -qF 'comment contains an em dash' "$TMP/state/agent-board-poll/plain-test.log" \
-   && grep -qF 'run-activity: action Question held: did not pass the plain-language check' "$TMP/state/agent-board-poll/plain-test.log"; then
-  ok em-dash-comment-held 'an em dash fails twice, logs the draft and posts only held activity'
+if [ "$(wc -l < "$MECH_POSTS")" -eq 1 ] \
+   && [ ! -s "$REWRITE_CALLS" ] \
+   && grep -qF 'Decision: The release is ready, now.' "$MECH_POSTS" \
+   && ! grep -qF '—' "$MECH_POSTS"; then
+  ok em-dash-comment-removed 'the final gate replaces an em dash before posting'
 else
-  bad em-dash-comment-held "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/em-dash.err")"
+  bad em-dash-comment-removed "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/em-dash.err")"
 fi
 
 : > "$MECH_POSTS"

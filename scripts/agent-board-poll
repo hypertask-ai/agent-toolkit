@@ -168,7 +168,7 @@ for skill in "$POSPEAK_SKILL" "$UNSLOP_SKILL" "$ADHD_SKILL"; do
   [ -r "$skill" ] || die "plain-language rules are missing at $skill" \
     "restore the installed template or company skill pack, then retry"
 done
-PLAIN_LANGUAGE_PROMPT="For every Question: or Decision: ticket comment, follow the three rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, put every ticket or PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:.
+PLAIN_LANGUAGE_PROMPT="For every Question: or Decision: ticket comment, follow the three rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:.
 
 POSPEAK RULES, VERBATIM:
 $(cat "$POSPEAK_SKILL")
@@ -1663,7 +1663,7 @@ After any command, echo its result unchanged."
 
   PROMPT="$PROMPT
 
-COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent. \`Done:\` is one line and includes the pull request link. Everything else, including claims, plans, progress, retries, checks, and blockers, is run activity. The board wrapper redirects an unmarked comment to activity instead of posting it. The existing limit remains at one reminder and three total ticket comments per day unless a human wrote in between.
+COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent. \`Done:\` is one line and includes the pull request link. Write every ticket reference as an HTML anchor whose visible text is its full id plus authoritative title. Do not use em dashes. Everything else, including claims, plans, progress, retries, checks, and blockers, is run activity. The board wrapper redirects an unmarked comment to activity instead of posting it. The existing limit remains at one reminder and three total ticket comments per day unless a human wrote in between.
 
 $PLAIN_LANGUAGE_PROMPT
 

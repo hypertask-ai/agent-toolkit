@@ -70,8 +70,9 @@ and adds the setup commands below. Missing or any other value means off.
   in `~/.local/state/agent-board-poll/manager-actions.log`.
 
 Runner and chat prompts expose these commands only when `MANAGER="on"` or
-`MAINTAINER="on"`. A chat reply after a command must be exactly the command's
-result.
+`MAINTAINER="on"`. A chat reply after a command is one plain outcome sentence,
+never raw command output. An affected ticket appears as a Markdown link whose
+visible text is its full id plus authoritative title.
 
 ## Setup maintainer
 
@@ -183,11 +184,13 @@ phone. Paths under the company pack's `skills/talk-to-valentin/` directory are
 canonical; bundled files under `adapters/hypertask/plain-language/` fill any
 missing reference. The generated board wrapper checks the first `<p>` and bold
 sentence, the 80-word cap, code-shaped tokens, commit hashes, em dashes, linked
-ticket and PR references, and the last block. It tries one 60-second rewrite
-with `CHAT_CLI` or `RESEARCH_CLI`, then checks again. A second failure logs the
-draft and reasons, emits the `Question held: did not pass the plain-language
-check` activity, and sends no raw comment. The check does not run for
-`Handoff:` or `Done:`.
+ticket and PR references, and the last block. A final gate fetches every ticket
+title from the board API and writes each reference as an HTML anchor whose
+visible text is the full id plus title. The same gate removes em dashes from all
+four comment kinds. It tries one 60-second rewrite for other plain-language
+failures with `CHAT_CLI` or `RESEARCH_CLI`, then checks again. A second failure
+logs the draft and reasons, emits the `Question held: did not pass the
+plain-language check` activity, and sends no raw comment.
 
 At ticket-run start the adapter posts `{taskId, source: "runtime"}` to
 `/api/mcp/agents/runs`. Claimed, started, PR opened, red check, fix pushed,

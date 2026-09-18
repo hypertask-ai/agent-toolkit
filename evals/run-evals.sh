@@ -205,6 +205,9 @@ if [ -z "$ONLY" ]; then
   echo "-- agent-chat behavioural checks --"
   python3 "$HERE/agent-chat.test.py"
   echo ""
+  echo "-- reply formatting behavioural checks --"
+  python3 "$HERE/reply-formatting.test.py"
+  echo ""
   echo "-- agent-kick behavioural checks --"
   python3 "$HERE/agent-kick.test.py"
 fi

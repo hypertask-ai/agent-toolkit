@@ -42,6 +42,22 @@ PROMPTEOF
   printf '%s' "$output"
 }
 
+_format_ticket_references() {
+  local original="$1" token_path="${TOKEN_FILE:-${token_file:-}}" api_url formatted
+  api_url="${BOARD_API_URL:-}"
+  if [ -z "$api_url" ] && declare -F _ht_api_base >/dev/null 2>&1; then
+    api_url="$(_ht_api_base)"
+  fi
+  api_url="${api_url:-https://app.hypertask.ai/api}"
+  if ! formatted="$(printf '%s' "$original" | python3 "$TICKET_LINK_FORMATTER" \
+      --mode html --api-url "$api_url" --token-file "$token_path" 2>>"$RUN_LOG")"; then
+    _outbound_gate_activity action "Reply held: ticket links could not be verified"
+    _outbound_gate_note "Reply held: ticket links could not be verified through the board API"
+    return 1
+  fi
+  TEXT="$formatted"
+}
+
 _enforce_plain_comment() {
   local original="$1" plain kind reasons rewritten final_draft final_reasons
   plain="$(_plain_comment "$original")"
@@ -77,7 +93,7 @@ rewrite model did not return a replacement within 60 seconds"
 }
 
 _outbound_text_gate() {
-  local original="$1" verbatim="${2:-no}" plain
+  local original="$1" verbatim="${2:-no}" plain finalized
   TEXT="$original"
   plain="$(_plain_comment "$TEXT")"
   case "$plain" in
@@ -87,7 +103,12 @@ _outbound_text_gate() {
       _outbound_gate_note "quiet mode: redirected unmarked ticket comment to run activity"
       return 1 ;;
   esac
+  _format_ticket_references "$TEXT" || return 1
+  finalized="$TEXT"
   if [ "$verbatim" != "yes" ]; then
     _enforce_plain_comment "$TEXT" || return 1
+  fi
+  if [ "$TEXT" != "$finalized" ]; then
+    _format_ticket_references "$TEXT" || return 1
   fi
 }

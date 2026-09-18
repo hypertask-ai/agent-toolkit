@@ -127,11 +127,13 @@ verbatim. It reads the canonical `skills/talk-to-valentin/` company-pack copy
 when present and uses the template's bundled copy when a reference is absent.
 Before either kind posts, the board wrapper requires a bold first sentence in
 a first `<p>`, at most 80 words, no code-shaped detail or em dash, linked ticket
-and PR references, and a final question or `Next:` block. A failure gets one
-60-second rewrite through `CHAT_CLI`, falling back to `RESEARCH_CLI`. If the
-rewrite still fails, the wrapper keeps the draft and reasons in the run log,
-posts `Question held: did not pass the plain-language check` as activity, and
-posts no comment. `Handoff:` and `Done:` keep their existing short shape.
+and PR references, and a final question or `Next:` block. A final gate applies
+to all four comment kinds. It fetches authoritative titles through the board
+API, writes ticket references as HTML anchors with the full id plus title, and
+removes em dashes. A failure gets one 60-second rewrite through `CHAT_CLI`,
+falling back to `RESEARCH_CLI`. If the rewrite still fails, the wrapper keeps
+the draft and reasons in the run log, posts `Question held: did not pass the
+plain-language check` as activity, and posts no comment.
 
 ## The three wiring modes
 
@@ -510,6 +512,9 @@ both states. `delegate` uses the manager's own `BOARD_CLI`, assigns the target
 agent UUID, and posts one handoff comment. `feedback --as` reads `BOARD_CLI`
 from that manager's conf and files the toolkit ticket as that identity. Direct
 feedback with `--board-cli` remains available outside the manager command path.
+Chat turns command output into one plain outcome sentence instead of exposing
+raw output. Affected tickets use Markdown links with the full id and board API
+title.
 
 Manager commands reject token or credential settings, foreign unit names,
 paths outside the configured conf directory, and confs without the

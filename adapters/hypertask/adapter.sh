@@ -15,6 +15,7 @@ PLAIN_LANGUAGE_CHECK="${PLAIN_LANGUAGE_CHECK:-$PLAIN_LANGUAGE_DIR/check-comment.
 POSPEAK_SKILL="${POSPEAK_SKILL:-$PLAIN_LANGUAGE_DIR/pospeak.md}"
 UNSLOP_SKILL="${UNSLOP_SKILL:-$PLAIN_LANGUAGE_DIR/unslop.md}"
 ADHD_SKILL="${ADHD_SKILL:-$PLAIN_LANGUAGE_DIR/i-have-adhd.md}"
+TICKET_LINK_FORMATTER="${TICKET_LINK_FORMATTER:-$_ADAPTER_DIR/../../scripts/ticket_links.py}"
 # shellcheck source=plain-language/outbound-text-gate.sh
 . "$PLAIN_LANGUAGE_DIR/outbound-text-gate.sh"
 
@@ -279,6 +280,8 @@ OUTBOUND_TEXT_GATE="\$PLAIN_LANGUAGE_DIR/outbound-text-gate.sh"
 POSPEAK_SKILL="\${AGENT_POSPEAK_SKILL:-\$PLAIN_LANGUAGE_DIR/pospeak.md}"
 UNSLOP_SKILL="\${AGENT_UNSLOP_SKILL:-\$PLAIN_LANGUAGE_DIR/unslop.md}"
 ADHD_SKILL="\${AGENT_ADHD_SKILL:-\$PLAIN_LANGUAGE_DIR/i-have-adhd.md}"
+TICKET_LINK_FORMATTER="$plain_language_dir/../../../scripts/ticket_links.py"
+BOARD_API_URL="\${BOARD_API_URL:-$(_ht_api_base)}"
 [ -r "\$TOKEN_FILE" ] || {
   echo "ERROR: cannot read \$TOKEN_FILE. Do this next: capture the agent token into that file" >&2
   exit 1

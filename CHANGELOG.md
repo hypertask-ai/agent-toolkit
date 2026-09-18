@@ -1,3 +1,14 @@
+## 3.34.0 - 2026-09-18
+
+- AGTE-32 applies a final outbound check to agent chat and ticket comments that
+  fetches authoritative titles and turns ticket ids into full clickable links.
+- Manager command replies become one plain outcome sentence instead of exposing
+  command output, and the final check removes em dashes from replies.
+- Offline coverage separately verifies ticket-link rewriting, command reply
+  shaping, and em-dash removal.
+- ACTION: run `agent-template update --keep-timers` so current agents receive
+  the outbound reply checks without changing timer state.
+
 ## 3.33.0 - 2026-09-17
 
 - AGTE-25 keeps the installed core path private to the update re-exec so staged

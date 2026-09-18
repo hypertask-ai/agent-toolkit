@@ -68,7 +68,8 @@ assert "put dev 2 on grok fast" in manager_prompt
 assert "quiet off for qa-1" in manager_prompt
 assert "file a toolkit ticket:" in manager_prompt
 assert "agent-template mode" not in regular_prompt
-assert "Return exactly the command result unchanged" in manager_prompt
+assert "return one plain sentence describing its outcome" in manager_prompt
+assert "Never paste raw command output" in manager_prompt
 assert "agent-template build --repo <key>" not in regular_prompt
 assert "agent-template build --repo <key>" not in manager_prompt
 assert "agent-template build --repo <key>" in maintainer_prompt
