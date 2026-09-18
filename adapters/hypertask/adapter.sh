@@ -298,8 +298,8 @@ adapter_install_board_cli() {
   plain_language_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/plain-language" && pwd)"
   mkdir -p "$(dirname "$dest")"
   native_cli="hypertask"
-  native_path="$(command -v hypertask)"
-  if [ "$(readlink -f "$native_path")" = "$(readlink -m "$dest")" ]; then
+  native_path="$(command -v hypertask 2>/dev/null || true)"
+  if [ -n "$native_path" ] && [ "$(readlink -f "$native_path")" = "$(readlink -m "$dest")" ]; then
     if [ ! -x "$dest.native" ]; then
       cp "$native_path" "$dest.native"
       chmod 755 "$dest.native"
