@@ -14,7 +14,7 @@ nobody else can read.
 
 - `reports/` - dated files, one per report this agent writes about its own work.
 - `scripts/` - anything this agent runs on its own behalf (not the shared
-  `create-agent` template, which lives in the vstack repo).
+  `create-agent` template, which lives at https://github.com/hypertask-ai/agent-toolkit).
 - `board.yml` - this agent's board columns, named as roles, read by
   `supervise-board`.
 - `CHANGELOG.md` - one entry per change this agent's own scripts or reports go

@@ -44,7 +44,7 @@
 # to it: pull the template repo, reinstall, and bring every conf that is
 # still on the old HT_* fleet schema forward onto the current one, so a bot
 # host nobody is watching does not silently drift. Steps:
-#   1. git pull --ff-only in AGENT_TEMPLATE_REPO (default ~/projects/vstack)
+#   1. git pull --ff-only in AGENT_TEMPLATE_REPO (default ~/projects/agent-toolkit)
 #   2. run install.sh, which also refreshes the shared systemd units, clones
 #      or fast-forwards the shared company skills pack to
 #      ~/projects/company-skills, and runs the eval suite; either failing
@@ -95,7 +95,7 @@
 #               turns sending off for every run)
 #   --case      also propose this as a replayable eval case, appended to
 #               evals/proposed.jsonl in the AGENT_TEMPLATE_REPO checkout
-#               (default ~/projects/vstack) for the accepted fix to use.
+#               (default ~/projects/agent-toolkit) for the accepted fix to use.
 #               Needs --check.
 #   --check     a predicate name from the allowlist in evals/run-evals.sh
 #               (starts_with_block_tag, has_section "<title>",
@@ -1087,7 +1087,7 @@ if [ "${SUBCOMMAND:-feedback}" = "promote" ]; then
     echo "promote skipped: this is not a maintainer host"
     exit 0
   }
-  REPO="${AGENT_TEMPLATE_REPO:-$HOME/projects/vstack}"
+  REPO="${AGENT_TEMPLATE_REPO:-$HOME/projects/agent-toolkit}"
   INSTALL_STATE="${AGENT_TEMPLATE_INSTALL_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-template/install-state}"
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "no git checkout at $REPO" "set AGENT_TEMPLATE_REPO to the maintainer checkout"
   [ -f "$INSTALL_STATE" ] || die "no install state at $INSTALL_STATE" "run agent-template update and wait 24 hours"
@@ -1181,7 +1181,7 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
     esac
   done
 
-  REPO="${AGENT_TEMPLATE_REPO:-$HOME/projects/vstack}"
+  REPO="${AGENT_TEMPLATE_REPO:-$HOME/projects/agent-toolkit}"
   CONFIG_DIR="${AGENT_TEMPLATE_CONFIG_DIR:-$HOME/.config/hypertask-agents}"
   SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
   INSTALLED_TEMPLATE="${AGENT_TEMPLATE_INSTALL_DIR:-$CORE_ROOT}"
@@ -1189,14 +1189,14 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   AUTO_UPDATE="$(host_config_value AUTO_UPDATE on)"
   if [ "$TIMER_RUN" = "yes" ] && [ "$AUTO_UPDATE" = "off" ]; then
     current="$(cat "$INSTALLED_TEMPLATE/VERSION" 2>/dev/null || echo unknown)"
-    stable="$(git -C "$REPO" show stable:templates/agent-skills/create-agent/VERSION 2>/dev/null || echo unknown)"
+    stable="$(git -C "$REPO" show stable:VERSION 2>/dev/null || echo unknown)"
     echo "auto-update off, current $current, stable $stable"
     exit 0
   fi
   case "$CHANNEL" in stable|latest) ;; *) die "CHANNEL must be stable or latest, got '$CHANNEL'" "fix $HOST_CONFIG" ;; esac
 
   git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "no git checkout at $REPO" \
-    "set AGENT_TEMPLATE_REPO to the vstack clone, or clone it there"
+    "set AGENT_TEMPLATE_REPO to the agent-toolkit clone, or clone it there"
 
   echo "== 1. select $CHANNEL release in $REPO =="
   git -C "$REPO" fetch origin --tags || die "git fetch failed in $REPO" \
@@ -1211,9 +1211,9 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
       && git -C "$REPO" merge --ff-only origin/main \
       || die "could not fast-forward main to origin/main" "clean or save local checkout changes, then re-run"
   fi
-  TEMPLATE_DIR="$REPO/templates/agent-skills/create-agent"
+  TEMPLATE_DIR="$REPO"
   [ -x "$TEMPLATE_DIR/install.sh" ] || die "no install.sh at $TEMPLATE_DIR" \
-    "check AGENT_TEMPLATE_REPO points at the vstack checkout"
+    "check AGENT_TEMPLATE_REPO points at the agent-toolkit checkout"
   TARGET_VERSION="$(cat "$TEMPLATE_DIR/VERSION")"
   TARGET_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
   echo "channel $CHANNEL selected: $TARGET_VERSION ($(git -C "$REPO" rev-parse --short HEAD))"
@@ -1240,7 +1240,7 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   INSTALLED_VERSION="$(cat "$INSTALLED_TEMPLATE/VERSION" 2>/dev/null || echo unknown)"
   LOCAL_PATCH_DIR="$INSTALLED_TEMPLATE/local-patches/${INSTALLED_VERSION:-unknown}"
   if [ ! -f "$MANIFEST" ] && [ "$INSTALLED_VERSION" != "unknown" ]; then
-    VERSION_PATH="templates/agent-skills/create-agent/VERSION"
+    VERSION_PATH="VERSION"
     RELEASE_COMMIT="$(git -C "$REPO" log --all -S"$INSTALLED_VERSION" --format=%H -- "$VERSION_PATH" 2>/dev/null \
       | while IFS= read -r candidate; do
           [ "$(git -C "$REPO" show "$candidate:$VERSION_PATH" 2>/dev/null || true)" = "$INSTALLED_VERSION" ] || continue
@@ -1256,11 +1256,11 @@ import subprocess
 import sys
 
 repo, commit, output = sys.argv[1:]
-prefix = "templates/agent-skills/create-agent/"
+prefix = ""
 tops = {"SKILL.md", "MAINTAINER.md", "CONF.md", "VERSION", "CHANGELOG.md", "repos.allow"}
 dirs = ("scripts/", "adapters/", "evals/", "repo-skeleton/", "project-template/")
 listed = subprocess.check_output(
-    ["git", "-C", repo, "ls-tree", "-r", "--name-only", commit, prefix], text=True
+    ["git", "-C", repo, "ls-tree", "-r", "--name-only", commit], text=True
 )
 lines = []
 for tracked in listed.splitlines():
@@ -2000,16 +2000,16 @@ print(json.dumps({
 }
 
 # append_proposed_case <source-url> : evals/proposed.jsonl lives in the
-# vstack checkout, not $CORE_ROOT -- install.sh empties $CORE_ROOT/evals on
+# agent-toolkit checkout, not $CORE_ROOT -- install.sh empties $CORE_ROOT/evals on
 # every install, so anything appended to the installed copy is thrown away
 # on the next one.
 append_proposed_case() {
   local source="$1" repo_dir proposed
   [ "$CASE_IT" = "yes" ] || return 0
-  repo_dir="${AGENT_TEMPLATE_REPO:-$HOME/projects/vstack}"
-  proposed="$repo_dir/templates/agent-skills/create-agent/evals/proposed.jsonl"
+  repo_dir="${AGENT_TEMPLATE_REPO:-$HOME/projects/agent-toolkit}"
+  proposed="$repo_dir/evals/proposed.jsonl"
   if [ ! -d "$(dirname "$proposed")" ]; then
-    warn "no evals folder at $(dirname "$proposed"): the proposed case was not written. Do this next: set AGENT_TEMPLATE_REPO to the vstack checkout"
+    warn "no evals folder at $(dirname "$proposed"): the proposed case was not written. Do this next: set AGENT_TEMPLATE_REPO to the agent-toolkit checkout"
     return 0
   fi
   CASE_ID="$(WHAT="$WHAT" python3 -c '

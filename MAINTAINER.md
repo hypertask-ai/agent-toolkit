@@ -31,7 +31,8 @@ until you do it.
   gives a stuck agent two read-only research calls per run. Without it, there
   is no research step.
 - **Feedback timer** — `agent-template-feedback.timer`, runs every four hours
-  on the writable vstack maintainer host only. It judges Backlog tickets, opens
+  on the writable agent-toolkit maintainer host only. It judges Backlog
+  tickets, opens
   one auto-merge fix pull request per accepted ticket, and closes shipped work.
   `agent-template-weekly` is a compatibility alias. `agent-template report`
   prints the local filing scorecard.

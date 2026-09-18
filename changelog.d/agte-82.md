@@ -1,0 +1,1 @@
+- AGTE-82 moved the canonical toolkit repository and updater source to `hypertask-ai/agent-toolkit`.

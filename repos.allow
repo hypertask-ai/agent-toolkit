@@ -1,5 +1,5 @@
 # key,path (install.sh discovers each checkout's origin and default branch)
-vstack,/home/valentin/projects/vstack
+agent-toolkit,/home/valentin/projects/agent-toolkit
 company-skills,/home/valentin/projects/company-skills
 analytics,/home/valentin/projects/hypertask-analytics
 hypertask,/home/valentin/projects/hypertasks
