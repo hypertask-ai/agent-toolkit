@@ -1167,7 +1167,7 @@ push_skill_commits() {
       [ -n "$index" ] || continue
       SKILL_PACK_ONE="$index" push_skill_commits "$ref"
     done <<EOF
-$(core_skill_indexes "$SKILLS_INDEX")
+$(core_skill_indexes "${SKILLS_INDEX:-}")
 EOF
     return 0
   fi
