@@ -63,6 +63,11 @@ core_load_adapter() {
     "pass one of: $(cd "$CORE_ROOT/adapters" 2>/dev/null && ls -1 | paste -sd '|' -)"
   # shellcheck disable=SC1090
   . "$dir/adapter.sh"
+  local extension="$CORE_ROOT/scripts/lib/adapters/$name.sh"
+  if [ -f "$extension" ]; then
+    # shellcheck disable=SC1090
+    . "$extension"
+  fi
   local fn
   for fn in $CORE_ADAPTER_FUNCTIONS; do
     declare -F "$fn" >/dev/null 2>&1 || die \

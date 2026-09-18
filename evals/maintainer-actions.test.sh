@@ -135,7 +135,8 @@ cat > "$BIN/hypertask" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$BOARD_NATIVE_LOG"
 case " $* " in
-  *' project show '*) printf '{"project":{"id":15,"ownerId":6}}\n' ;;
+  *' project show 1 '*) printf '{"project":{"id":1,"ticketPrefix":"ONE","ownerId":6}}\n' ;;
+  *' project show 15 '*) printf '{"project":{"id":15,"ticketPrefix":"OWNER","ownerId":6}}\n' ;;
   *' comment list '*) printf '{"comments":[]}\n' ;;
   *' comment add ONE-3 '*) printf 'exact cli failure from hypertask\n' >&2; exit 37 ;;
   *' comment add '*)

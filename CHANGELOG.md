@@ -1,3 +1,9 @@
+## 3.43.0 - 2026-09-18
+
+- AGTE-24 resolves ticket URLs from cached project prefixes, including boards with more than 100 tickets.
+- Unknown projects now fail with a project-specific error, without candidate scans or broken pipes.
+- ACTION: run `agent-template update --keep-timers` so current agents receive direct ticket URL resolution.
+
 ## 3.42.0 - 2026-09-18
 
 - AGTE-22 adds per-board agent rooms to `agent-chat`, with Product Bot as chief

@@ -10,8 +10,10 @@ fail=0
 ok() { printf 'PASS %-36s %s\n' "$1" "$2"; pass=$((pass + 1)); }
 bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
 
+CORE_ROOT="$ROOT"
 # shellcheck disable=SC1090
-. "$ROOT/adapters/hypertask/adapter.sh"
+. "$ROOT/scripts/lib/core.sh"
+core_load_adapter hypertask
 COMMENTS="$TMP/comments.json"
 _ht_get() { cat "$COMMENTS"; }
 
@@ -45,13 +47,41 @@ else
   bad owned-row-parse-error "status=$status error=$(cat "$TMP/bad.err")"
 fi
 
-printf '%s\n' '{"tasks":[{"id":"task-19","ticketNumber":"AGTE-19","section":"Inbox","title":"URL conversion","uniqueIndex":19}]}' > "$COMMENTS"
-resolved="$(adapter_ticket_ref "$TMP/token" 'https://app.hypertask.ai/detail/project-5500/19')"
+PROJECT_CALLS="$TMP/project-calls"
+HYPERTASK_PROJECT_PREFIX_CACHE="$TMP/project-prefixes.tsv"
+BOARD_CLI="$TMP/board"
+export PROJECT_CALLS HYPERTASK_PROJECT_PREFIX_CACHE BOARD_CLI
+cat > "$BOARD_CLI" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$PROJECT_CALLS"
+case "$*" in
+  '--json project show 5500')
+    printf '%s\n' '{"project":{"id":5500,"ticketPrefix":"AGTE","taskCount":250}}' ;;
+  '--json project show 999') exit 1 ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "$BOARD_CLI"
+resolved="$(adapter_ticket_ref "$TMP/token" 'https://app.hypertask.ai/detail/project-5500/150')"
+cached="$(adapter_ticket_ref "$TMP/token" 'https://app.hypertask.ai/detail/project-5500/151')"
 unchanged="$(adapter_ticket_ref "$TMP/token" 'AGTE-19')"
-if [ "$resolved" = 'AGTE-19' ] && [ "$unchanged" = 'AGTE-19' ]; then
-  ok ticket-url-to-ref 'ticket URLs reuse normalized adapter rows to produce PREFIX-NNN'
+if [ "$resolved" = 'AGTE-150' ] && [ "$cached" = 'AGTE-151' ] \
+   && [ "$unchanged" = 'AGTE-19' ] && [ "$(wc -l < "$PROJECT_CALLS")" -eq 1 ]; then
+  ok ticket-url-to-ref 'a board over 100 tickets resolves from one cached project-prefix lookup'
 else
-  bad ticket-url-to-ref "resolved=$resolved unchanged=$unchanged"
+  bad ticket-url-to-ref "resolved=$resolved cached=$cached unchanged=$unchanged calls=$(cat "$PROJECT_CALLS")"
+fi
+
+set +e
+adapter_ticket_ref "$TMP/token" 'https://app.hypertask.ai/detail/project-999/7' \
+  >"$TMP/unknown.out" 2>"$TMP/unknown.err"
+status=$?
+set -e
+if [ "$status" -ne 0 ] && [ ! -s "$TMP/unknown.out" ] \
+   && grep -qF 'project 999 was not found' "$TMP/unknown.err"; then
+  ok ticket-url-unknown-project 'an unknown project fails with a clear project-specific error'
+else
+  bad ticket-url-unknown-project "status=$status output=$(cat "$TMP/unknown.out") error=$(cat "$TMP/unknown.err")"
 fi
 
 printf 'token\n' > "$TMP/token"
