@@ -476,6 +476,24 @@ WantedBy=timers.target
 EOF
 }
 
+# Events mode keeps the same poll service as a safety net, but runs its timer
+# hourly. The event receiver starts exact-ticket ticks between safety scans.
+core_write_event_timer_dropin() {
+  local systemd_dir="$1" slug="$2" dir="$systemd_dir/agent-board-poll@$slug.timer.d"
+  mkdir -p "$dir"
+  cat > "$dir/events.conf" <<EOF
+[Timer]
+OnUnitActiveSec=
+OnUnitActiveSec=1h
+EOF
+}
+
+core_remove_event_timer_dropin() {
+  local systemd_dir="$1" slug="$2" dir="$systemd_dir/agent-board-poll@$slug.timer.d"
+  rm -f "$dir/events.conf"
+  rmdir "$dir" 2>/dev/null || true
+}
+
 # core_workdir_remove <source> <dir>
 # The adapter gets the last word. If it refuses, the directory stays: it knows
 # what is in there, and losing an agent's only copy of its work to a tidy-up is

@@ -3,6 +3,9 @@
 #
 # Commands:
 #
+#   agent-template events register <slug> --url <public-url>
+#   agent-template events status
+#
 #   agent-template ctl start|stop|status <slug>
 #
 #   agent-template delegate <ticket> <slug> --why "<one line reason>"
@@ -176,6 +179,7 @@ fi
 case "$1" in
   -h|--help|help) usage; exit 0 ;;
   version) cat "$CORE_ROOT/VERSION"; exit 0 ;;
+  events) shift; SUBCOMMAND="events" ;;
   ctl) shift; SUBCOMMAND="ctl" ;;
   delegate) shift; SUBCOMMAND="delegate" ;;
   mode) shift; SUBCOMMAND="mode" ;;
@@ -412,6 +416,21 @@ with open(os.environ["ALLOW_FILE"], encoding="utf-8", newline="") as handle:
 raise SystemExit(1)
 PYEOF
 }
+
+if [ "${SUBCOMMAND:-feedback}" = "events" ]; then
+  case "${1:-}" in
+    status)
+      [ "$#" -eq 1 ] || die "events status takes no arguments" "run agent-template events status"
+      exec "$CORE_ROOT/scripts/agent-events" status
+      ;;
+    register)
+      [ "$#" -eq 4 ] && [ "${3:-}" = "--url" ] \
+        || die "events register needs a slug and public URL" "run agent-template events register <slug> --url <public-url>"
+      exec "$CORE_ROOT/scripts/agent-events" register "$2" --url "$4"
+      ;;
+    *) die "unknown events command ${1:-}" "run agent-template events register <slug> --url <public-url>, or agent-template events status" ;;
+  esac
+fi
 
 if [ "${SUBCOMMAND:-feedback}" = "ctl" ]; then
   manager_authorize "$@"

@@ -1,0 +1,4 @@
+- AGTE-38 makes ordinary poll ticks page task lists, rank only tickets changed since the prior tick, cap ranking at 60 seconds, and run no more than one full safety scan per hour.
+- `WIRING="events"` adds a signed localhost receiver with durable per-agent queues and immediate exact-ticket runs for comments, mentions, and assignments.
+- `agent-template events register <slug> --url <public-url>` configures delivery, while `agent-template events status` reports the URL, last event, and queue length.
+- ACTION: choose a public HTTPS URL for each events host, such as a Cloudflare tunnel or local-helper route, then register each events-wired agent; doing nothing keeps the hourly poll fallback.

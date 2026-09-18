@@ -10,8 +10,9 @@ until you do it.
 
 ## What the bot is made of
 
-- **Runner timer** — `agent-board-poll@<slug>.timer`, ticks every 60s, runs
-  `agent-board-poll --once <slug>` once per tick.
+- **Runner timer** — `agent-board-poll@<slug>.timer` runs a cheap delta tick
+  every 60 seconds in poll mode. Events mode uses the same runner hourly as a
+  safety net, while `agent-events.service` starts exact-ticket ticks immediately.
 - **Update timer** — `agent-template-update.timer`, daily at 06:30 local,
   runs `agent-template update`: pulls the template repo, reinstalls, brings
   any old-schema conf on this host forward, and clears out systemd drop-ins
@@ -169,21 +170,30 @@ untracked Python and pytest cache artifacts before staging the release. File eac
 patch with `agent-template feedback` so the host override can eventually be
 removed.
 
-## Mentions
+## Events
 
-`agent-kick.service` receives signed Hypertask mention events on localhost and runs
-`systemctl --user start agent-board-poll@<slug>.service`. Put the full public HTTPS
-receiver address in host-config `WEBHOOK_URL`; install and update configure every
-agent through `hypertask agents webhook configure` when available, otherwise through
-`POST /mcp/webhooks`. Signing secrets are 0600 files under
-`~/.config/agent-template/webhooks/`. With no public URL, the installer prints `no
-WEBHOOK_URL, mentions wait for the poll` and leaves the minute timer as fallback.
+Set `WIRING="events"` for an agent that should react immediately. The shared
+`agent-events.service` listens on localhost, verifies each signed delivery with
+the agent's 0600 secret under `~/.config/agent-template/webhooks/`, and queues an
+exact-ticket tick for `comment.created`, `comment.mention`, and assignment events.
+The queue is durable under `~/.local/state/agent-events/` and serializes targeted
+ticks behind an active run without exceeding `MAX_CONCURRENT_RUNS`.
 
-A failed ticket run writes its host log and
-`~/.local/state/agent-board-poll/<slug>.status`, posts blocked activity, and closes
-the app run as failed. It posts no ticket comment and does not add the mention key
-to `<slug>.seen`, so the next tick may retry the same mention. A later successful
-run removes the status file.
+The host owner must provide the public HTTPS route. A Cloudflare tunnel or
+local-helper can forward it to `http://127.0.0.1:8793/webhook/hypertask`. Register
+one agent with `agent-template events register <slug> --url <public-url>`, or put
+`EVENTS_URL` in `~/.config/agent-template/config` before installation. If no URL
+is configured, the receiver still runs and the hourly timer remains the path.
+
+Run `agent-template events status` to see the registered URL, last event time,
+and queue length per agent. The 60-second poll mode remains available as a
+fallback. Its ordinary ticks use paginated task lists and `updatedAt` cursors,
+retain the existing `<slug>.comment-cursor.<board>` files, stop ranking after 60
+seconds, and perform at most one full board scan per hour.
+
+A failed ticket run writes its normal host status and leaves the board trigger
+eligible for the hourly safety scan. Event delivery never bypasses the existing
+claim, cooldown, pull request, identity, or comment rules.
 
 ## Fleet progress contract
 

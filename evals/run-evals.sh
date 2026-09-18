@@ -236,6 +236,9 @@ if [ -z "$ONLY" ]; then
   echo ""
   echo "-- ticket ack lane behavioural checks --"
   python3 "$HERE/ticket-ack.test.py"
+  echo ""
+  echo "-- agent-events behavioural checks --"
+  python3 "$HERE/agent-events.test.py"
 fi
 
 # The case file replays text corrections. sync-project.sh is about what lands
@@ -271,6 +274,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/queue-ranking.test.sh" ]; then
   echo ""
   echo "-- queue ranking behavioural checks --"
   bash "$HERE/queue-ranking.test.sh"
+fi
+if [ -z "$ONLY" ] && [ -x "$HERE/fast-tick.test.sh" ]; then
+  echo ""
+  echo "-- fast tick API budget checks --"
+  bash "$HERE/fast-tick.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owned-reply-trigger.test.sh" ]; then
   echo ""

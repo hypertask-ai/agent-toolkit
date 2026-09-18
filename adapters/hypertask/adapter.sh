@@ -779,30 +779,15 @@ EOF
 }
 
 # ---------- reads ----------
-# adapter_list_candidates <token-file> <board-id> <sections-csv>
-# One JSON object per line: id, ref, section, title, description, priority,
-# dueDate, agent_ids, comment_count, url. agent_ids holds the AGENT ids on the ticket: an
-# agent-assigned ticket still carries the owning user's numeric id at the top
-# of each assignee record, with the agent's uuid nested under "agent".
-# An agent may watch more than one board: BOARD_ID takes a comma-separated
-# list, and every row says which board it came from, because the later reads
-# for that ticket have to go back to the same one.
-adapter_list_candidates() {
-  local token_file="$1" board_id="$2" sections="$3" json one
-  for one in $(printf '%s' "$board_id" | tr ',' ' '); do
-    [ -n "$one" ] || continue
-    json="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&limit=100")"
-  # The board reply is far too large for an environment variable, so it goes in
-  # on stdin and the program goes in as one argv.
-  printf '%s' "$json" | SECTIONS="$sections" BOARD_ID="$one" python3 -c '
+# Normalize one task-list response to the candidate JSONL core consumes.
+_ht_candidate_rows() {
+  local sections="$1" board="$2"
+  SECTIONS="$sections" BOARD_ID="$board" python3 -c '
 import json, os, sys
-# "*" means every column: an agent answering @mentions cannot know in advance
-# which column the person asking was looking at.
 raw = os.environ["SECTIONS"].strip()
 wanted = [] if raw == "*" else [s.strip().casefold() for s in raw.split(",") if s.strip()]
 board = os.environ["BOARD_ID"]
-doc = json.load(sys.stdin)
-for task in doc.get("tasks") or []:
+for task in json.load(sys.stdin).get("tasks") or []:
     section = str(task.get("section") or "")
     if wanted and section.casefold() not in wanted:
         continue
@@ -822,10 +807,8 @@ for task in doc.get("tasks") or []:
     # off whichever one is present and lowercase it once, here.
     labels = []
     for label in task.get("labels") or []:
-        if isinstance(label, dict):
-            name = label.get("name") or label.get("title") or label.get("label") or ""
-        else:
-            name = str(label)
+        name = ((label.get("name") or label.get("title") or label.get("label") or "")
+                if isinstance(label, dict) else str(label))
         if name:
             labels.append(str(name).strip().casefold())
     priority = task.get("priority") or ""
@@ -833,6 +816,7 @@ for task in doc.get("tasks") or []:
         priority = priority.get("name") or priority.get("title") or ""
     ref = str(task.get("ticketNumber") or "")
     index = ref.rsplit("-", 1)[-1] if "-" in ref else str(task.get("id"))
+    actual_board = str(task.get("projectId") or board)
     print(json.dumps({
         "id": task.get("id"),
         "ref": ref,
@@ -841,6 +825,7 @@ for task in doc.get("tasks") or []:
         "description": task.get("description") or "",
         "priority": str(priority),
         "dueDate": task.get("dueDate") or "",
+        "updated_at": task.get("updatedAt") or "",
         "agent_ids": agent_ids,
         "human_assignee_ids": human_assignee_ids,
         # Anyone at all on the ticket, human or agent: a ticket with a name on
@@ -848,11 +833,176 @@ for task in doc.get("tasks") or []:
         "assignee_count": len(assignees),
         "labels": labels,
         "comment_count": task.get("commentCount") or 0,
-        "board": board,
-        "url": "https://app.hypertask.ai/detail/project-%s/%s" % (board, index),
+        "board": actual_board,
+        "url": "https://app.hypertask.ai/detail/project-%s/%s" % (actual_board, index),
     }))
 '
+}
+
+# adapter_list_candidates <token-file> <board-id> <sections-csv>
+# Full paginated list, retained for URL resolution and explicit full scans.
+adapter_list_candidates() {
+  local token_file="$1" board_id="$2" sections="$3" one offset path json returned
+  for one in $(printf '%s' "$board_id" | tr ',' ' '); do
+    [ -n "$one" ] || continue
+    offset=0
+    while :; do
+      path="/mcp/tasks?project_id=${one}&limit=100"
+      [ "$offset" -eq 0 ] || path="$path&offset=$offset"
+      json="$(_ht_get "$token_file" "$path")"
+      printf '%s' "$json" | _ht_candidate_rows "$sections" "$one"
+      returned="$(printf '%s' "$json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("tasks") or []))')"
+      [ "$returned" -eq 100 ] || break
+      offset=$((offset + returned))
+    done
   done
+}
+
+# adapter_list_tick_candidates <token-file> <board-id> <sections-csv> <ticket-or-empty> <target-board-or-empty>
+# Ordinary ticks rank only rows newer than their last successful list. A full
+# safety scan is allowed once an hour. Event ticks query exactly one ticket.
+adapter_list_tick_candidates() {
+  local token_file="$1" board_id="$2" sections="$3" ticket="${4:-}" target_board="${5:-}"
+  local one offset path json returned cursor_file full_file pending_file cutoff full now latest rows merged
+  if [ -n "$ticket" ]; then
+    json="$(_ht_get "$token_file" "/mcp/tasks?ticket_number=${ticket}")"
+    for one in $(printf '%s' "${target_board:-$board_id}" | tr ',' ' '); do
+      case ",$board_id," in *",$one,"*) : ;; *) continue ;; esac
+      printf '%s' "$json" | _ht_candidate_rows "*" "$one" | REF="$ticket" BOARD="$one" python3 -c '
+import json, os, sys
+for line in sys.stdin:
+    row = json.loads(line)
+    if str(row.get("ref") or "").casefold() == os.environ["REF"].casefold() and str(row.get("board")) == os.environ["BOARD"]:
+        print(json.dumps(row))
+        break
+'
+    done
+    return 0
+  fi
+
+  now="$(date +%s)"
+  for one in $(printf '%s' "$board_id" | tr ',' ' '); do
+    [ -n "$one" ] || continue
+    cursor_file="$STATE_DIR/$SLUG.updated-cursor.$one"
+    full_file="$STATE_DIR/$SLUG.full-rescan.$one"
+    cutoff=""; [ -r "$cursor_file" ] && read -r cutoff < "$cursor_file" || true
+    full="no"
+    if [ ! -r "$full_file" ] || [ "$((now - $(cat "$full_file" 2>/dev/null || printf 0)))" -ge 3600 ]; then
+      full="yes"
+    fi
+    rows=""; latest="$cutoff"; offset=0
+    while :; do
+      path="/mcp/tasks?project_id=${one}&limit=100"
+      [ "$offset" -eq 0 ] || path="$path&offset=$offset"
+      json="$(_ht_get "$token_file" "$path")"
+      page="$(printf '%s' "$json" | _ht_candidate_rows "$sections" "$one")"
+      [ -z "$page" ] || rows="${rows}${rows:+$'\n'}${page}"
+      page_latest="$(printf '%s\n' "$page" | python3 -c 'import json,sys; values=[json.loads(x).get("updated_at") or "" for x in sys.stdin if x.strip()]; print(max(values or [""]))')"
+      [[ "$page_latest" > "$latest" ]] && latest="$page_latest"
+      returned="$(printf '%s' "$json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("tasks") or []))')"
+      [ "$returned" -eq 100 ] || break
+      offset=$((offset + returned))
+    done
+    pending_file="$STATE_DIR/$SLUG.ranking-pending.$one.jsonl"
+    merged="$(printf '%s\n' "$rows" | CUTOFF="$cutoff" FULL="$full" PENDING="$pending_file" python3 -c '
+import json, os, sys
+rows, order = {}, []
+def keep(row):
+    key = str(row.get("id") or "")
+    if not key or key in rows:
+        return
+    rows[key] = row
+    order.append(key)
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    updated = str(row.get("updated_at") or "")
+    if os.environ["FULL"] == "yes" or not os.environ["CUTOFF"] or not updated or updated > os.environ["CUTOFF"]:
+        keep(row)
+try:
+    with open(os.environ["PENDING"], encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                keep(json.loads(line))
+except OSError:
+    pass
+for key in order:
+    print(json.dumps(rows[key]))
+')"
+    printf '%s\n' "$merged"
+    if [ "${DRY_RUN:-no}" != "yes" ]; then
+      printf '%s\n' "$merged" | sed '/^$/d' > "$pending_file.new"
+      mv "$pending_file.new" "$pending_file"
+      [ -z "$latest" ] || { printf '%s\n' "$latest" > "$cursor_file.new"; mv "$cursor_file.new" "$cursor_file"; }
+      [ "$full" = "no" ] || { printf '%s\n' "$now" > "$full_file.new"; mv "$full_file.new" "$full_file"; }
+    fi
+  done
+}
+
+
+# Persist the final de-duplicated candidate set, including owned-comment rows
+# outside WATCH_SECTIONS, before ranking can hit its time boundary.
+adapter_persist_tick_candidates() {
+  [ "${DRY_RUN:-no}" != "yes" ] || { cat >/dev/null; return 0; }
+  STATE="$STATE_DIR" SLUG_VALUE="$SLUG" python3 -c '
+import json, os, sys
+from pathlib import Path
+state = Path(os.environ["STATE"])
+slug = os.environ["SLUG_VALUE"]
+by_board = {}
+for line in sys.stdin:
+    if not line.strip():
+        continue
+    row = json.loads(line)
+    by_board.setdefault(str(row.get("board") or ""), []).append(row)
+for board, incoming in by_board.items():
+    if not board:
+        continue
+    path = state / (slug + ".ranking-pending." + board + ".jsonl")
+    rows, order = {}, []
+    for row in incoming:
+        key = str(row.get("id") or "")
+        if key and key not in rows:
+            rows[key] = row; order.append(key)
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            row = json.loads(line)
+            key = str(row.get("id") or "")
+            if key and key not in rows:
+                rows[key] = row; order.append(key)
+    except OSError:
+        pass
+    temporary = Path(str(path) + ".new")
+    temporary.write_text("".join(json.dumps(rows[key]) + "\n" for key in order), encoding="utf-8")
+    temporary.replace(path)
+'
+}
+
+# Remove one row from the durable ranking tail immediately before core ranks it.
+# Rows after the 60-second boundary remain for the next minute's tick.
+adapter_mark_tick_candidate() {
+  local task_id="$1" board="$2" file
+  file="$STATE_DIR/$SLUG.ranking-pending.$board.jsonl"
+  [ "${DRY_RUN:-no}" != "yes" ] || return 0
+  [ -f "$file" ] || return 0
+  TASK_ID="$task_id" python3 - "$file" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+rows = []
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if str(row.get("id") or "") != os.environ["TASK_ID"]:
+            rows.append(row)
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    for row in rows:
+        handle.write(json.dumps(row) + "\n")
+os.replace(temporary, path)
+PYEOF
 }
 
 # adapter_queue_order <candidate-json>
@@ -1147,7 +1297,7 @@ adapter_new_comments_on_owned() {
   local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4"
   local one status tasks rows task task_id task_ref comments page_stats page_count page_max
   local page_caught page_cursor comments_cursor remaining direct offset returned
-  local cursor_file last_seen max_seen read_count hit_ceiling ceiling_board page_has_new comments_file
+  local cursor_file updated_cursor_file updated_cutoff last_seen max_seen read_count hit_ceiling ceiling_board page_has_new comments_file
   local ceiling="${OWNED_COMMENT_READ_CEILING:-500}"
   read_count=0
   hit_ceiling="no"
@@ -1156,6 +1306,9 @@ adapter_new_comments_on_owned() {
   for one in $(printf '%s' "$board_id" | tr ',' ' '); do
     [ -n "$one" ] || continue
     cursor_file="$STATE_DIR/$SLUG.comment-cursor.$one"
+    updated_cursor_file="$STATE_DIR/$SLUG.updated-cursor.$one"
+    updated_cutoff=""
+    [ -r "$updated_cursor_file" ] && read -r updated_cutoff < "$updated_cursor_file" || true
     last_seen=0
     if [ -r "$cursor_file" ]; then
       read -r last_seen < "$cursor_file" || last_seen=0
@@ -1169,10 +1322,14 @@ adapter_new_comments_on_owned() {
       offset=0
       while [ "$read_count" -lt "$ceiling" ]; do
         tasks="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&status=${status}&sort_by=updatedAt&sort_order=desc&limit=100&offset=${offset}")"
-        rows="$(printf '%s' "$tasks" | BOARD="$one" python3 -c '
+        rows="$(printf '%s' "$tasks" | BOARD="$one" CUTOFF="$updated_cutoff" python3 -c '
 import json, os, sys
 board = os.environ["BOARD"]
+cutoff = os.environ["CUTOFF"]
 for task in json.load(sys.stdin).get("tasks") or []:
+    updated = str(task.get("updatedAt") or "")
+    if cutoff and updated and updated <= cutoff:
+        continue
     if not (task.get("commentCount") or 0):
         continue
     assignees = task.get("assignees") or []

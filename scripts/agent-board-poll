@@ -8,7 +8,7 @@
 # the agent's conf.
 #
 # Usage:
-#   agent-board-poll [--once] [--dry-run] [--explain] [-h|--help] <slug>
+#   agent-board-poll [--once] [--dry-run] [--explain] [--ticket REF] [-h|--help] <slug>
 #
 # --explain prints one line per candidate saying why it was chosen or skipped,
 # in the order they were ranked. Implied by --dry-run.
@@ -38,6 +38,8 @@ usage() {
 DRY_RUN="no"
 EXPLAIN="no"
 INSTRUCTION_WORKER=""
+TARGET_TICKET=""
+TARGET_BOARD=""
 SLUG=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,12 +47,20 @@ while [ $# -gt 0 ]; do
     --dry-run) DRY_RUN="yes"; shift ;;
     --explain) EXPLAIN="yes"; shift ;;
     --instruction-worker) INSTRUCTION_WORKER="${2:?--instruction-worker needs a state file}"; shift 2 ;;
+    --ticket) TARGET_TICKET="${2:?--ticket needs a ticket reference}"; shift 2 ;;
+    --board) TARGET_BOARD="${2:?--board needs a board id}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     -*) die "unknown option $1" "run agent-board-poll --help for the accepted flags" ;;
     *) [ -z "$SLUG" ] || die "more than one slug given ($SLUG and $1)" \
          "pass exactly one agent slug"; SLUG="$1"; shift ;;
   esac
 done
+if [ -n "$TARGET_TICKET" ] && ! [[ "$TARGET_TICKET" =~ ^[A-Za-z][A-Za-z0-9]*-[0-9]+$ ]]; then
+  die "invalid ticket reference $TARGET_TICKET" "pass a reference like AGTE-38"
+fi
+if [ -n "$TARGET_BOARD" ] && ! [[ "$TARGET_BOARD" =~ ^[0-9]+$ ]]; then
+  die "invalid board id $TARGET_BOARD" "pass the numeric project id from the signed event"
+fi
 [ -n "$SLUG" ] || die "no agent slug given" \
   "run: agent-board-poll --once --dry-run <slug>"
 
@@ -1408,12 +1418,18 @@ fi
 # adapter_pick_rank and adapter_run_prompt are: an adapter that has not
 # implemented it is simply skipped, never a hard stop. Rows are merged and
 # de-duplicated by id, first occurrence wins.
-if declare -F adapter_new_comments_on_owned >/dev/null 2>&1; then
+if [ -z "$TARGET_TICKET" ] && declare -F adapter_new_comments_on_owned >/dev/null 2>&1; then
   OWNED_ROWS="$(adapter_new_comments_on_owned "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" 2>>"$LOG")" || OWNED_ROWS=""
 else
   OWNED_ROWS=""
 fi
-CANDIDATES="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "$WATCH_SECTIONS")"
+if declare -F adapter_list_tick_candidates >/dev/null 2>&1; then
+  CANDIDATES="$(adapter_list_tick_candidates "$TOKEN_FILE" "$BOARD_ID" "$WATCH_SECTIONS" "$TARGET_TICKET" "$TARGET_BOARD")"
+elif [ -n "$TARGET_TICKET" ]; then
+  CANDIDATES="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "*" | REF="$TARGET_TICKET" python3 -c 'import json,os,sys; [print(line,end="") for line in sys.stdin if str(json.loads(line).get("ref") or "").casefold() == os.environ["REF"].casefold()]')"
+else
+  CANDIDATES="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "$WATCH_SECTIONS")"
+fi
 if [ -n "$OWNED_ROWS" ]; then
   CANDIDATES="$(printf '%s\n%s\n' "$CANDIDATES" "$OWNED_ROWS" | python3 -c '
 import json, sys
@@ -1441,6 +1457,9 @@ for key in order:
     print(json.dumps(rows[key]))
 ')"
 fi
+if [ -z "$TARGET_TICKET" ] && declare -F adapter_persist_tick_candidates >/dev/null 2>&1; then
+  printf '%s\n' "$CANDIDATES" | adapter_persist_tick_candidates
+fi
 # A red owed PR is represented as a candidate so it uses the normal isolated
 # workdir and model launch. It is never a board claim or part of the failure
 # retry ladder, but it shares the per-ticket run cooldown.
@@ -1460,10 +1479,20 @@ fi
 
 started=0
 picked=0
+RANKING_STARTED="$(date +%s)"
+RANKING_PASS_SECONDS="${RANKING_PASS_SECONDS:-60}"
 while IFS= read -r row; do
+  if [ -z "$TARGET_TICKET" ] && [ "$(( $(date +%s) - RANKING_STARTED ))" -ge "$RANKING_PASS_SECONDS" ]; then
+    log "ranking pass capped at ${RANKING_PASS_SECONDS}s; remaining changed tickets wait for the hourly rescan"
+    break
+  fi
   [ -n "$row" ] || continue
 
   task_id="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["id"])')"
+  row_board="$(row_field "$row" board)"; [ -n "$row_board" ] || row_board="${BOARD_ID%%,*}"
+  if [ -z "$TARGET_TICKET" ] && declare -F adapter_mark_tick_candidate >/dev/null 2>&1; then
+    adapter_mark_tick_candidate "$task_id" "$row_board"
+  fi
   ref="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["ref"])')"
   title="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["title"])')"
   url="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["url"])')"

@@ -51,18 +51,27 @@ listed, and reapplied after the release installs. Untracked Python and pytest
 cache artifacts are removed before staging. File the change as feedback with
 `agent-template feedback` so the source-of-truth fix can move into the repository.
 
-## Mentions
+## Events
 
-`agent-kick.service` is one localhost HTTP receiver per host. When
-`WEBHOOK_URL` is present in the host config, install and update register each agent
-for signed `comment.mention` events. A valid request immediately starts
-`agent-board-poll@<slug>.service`; the unit's existing lock still prevents overlap.
-Without a public URL, installation prints `no WEBHOOK_URL, mentions wait for the
-poll` and the 60-second timer remains the fallback.
+`WIRING="events"` uses one `agent-events.service` per host. The receiver listens
+only on `127.0.0.1:8793`, verifies Hypertask HMAC signatures, and durably queues
+`comment.created`, `comment.mention`, and assignment events for the addressed
+agent. Each event runs `agent-board-poll --ticket <ref> <slug>`, so the normal
+per-ticket gates and `MAX_CONCURRENT_RUNS` policy still apply without scanning
+the whole board.
 
-A failed run posts no board comment and never writes the triggering comment key to
-`<slug>.seen`, so the mention remains eligible next tick. Its detail goes to
-`<slug>.log` and one-line `<slug>.status` JSON for the agents feed instead.
+The host owner provides the public HTTPS URL through a Cloudflare tunnel or
+local-helper. Register it with `agent-template events register <slug> --url
+<public-url>`, or set `EVENTS_URL` in the host config for installation to
+register every events-wired agent. Signing secrets remain in 0600 files under
+`~/.config/agent-template/webhooks/` and are never printed by the toolkit.
+
+`agent-template events status` shows each events-wired agent's registered URL,
+last event time, and durable queue length. With no public URL, the receiver still
+runs and the hourly poll safety net remains the path. Ordinary poll ticks page
+board lists in batches, rank only tickets whose `updatedAt` changed, retain the
+existing per-board comment cursor, cap ranking at 60 seconds, and do no more
+than one full safety scan per hour.
 
 ## Example dialogue
 
@@ -164,11 +173,12 @@ to `Answer:` and never use `Decision:` merely to frame an answer. When a choice
 is genuinely required, the reply may end with a `Decision needed:` line that
 asks the owner what to choose.
 
-## The three wiring modes
+## The four wiring modes
 
 | Mode | What it needs | What you get | When to pick it |
 |---|---|---|---|
-| **poll** (default) | the board CLI and a model CLI on this machine, nothing else | a 60-second board timer plus the shared 3-second chat lane | almost always, and always for a growth, CRO or support bot |
+| **poll** (default) | the board CLI and a model CLI on this machine, nothing else | a cheap 60-second delta tick plus the shared 3-second chat lane | hosts with no public HTTPS route |
+| **events** | poll requirements plus a host-owner-provided public HTTPS route | immediate exact-ticket runs plus an hourly poll safety net | hosts using a Cloudflare tunnel or local-helper |
 | **fleet** | a long-lived worker runtime already installed on this machine, which the adapter checks for | webhooks, the shared chat lane, the runtime's own queue and retries | only where that runtime is already running |
 | **none** | nothing | an identity, a conf, a skills index; you trigger it from cron, CI or by hand | repo-only agents, and CLI identities |
 
@@ -177,8 +187,9 @@ needs no shared fleet infrastructure and no second machine.** If `--wiring
 fleet` is asked for where the runtime is absent, the script stops and names
 poll mode instead of dead-ending.
 
-Chat is independent of board wiring. Poll mode is the default because it works
-behind Cloudflare and on hosts with no public port.
+Chat is independent of board wiring. Poll mode remains the default because it works
+on hosts with no public port. Events mode is the faster option when the host owner
+provides a public HTTPS route.
 
 ## Chat lane
 

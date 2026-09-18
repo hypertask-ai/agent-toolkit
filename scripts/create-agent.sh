@@ -84,7 +84,7 @@ Options:
   --skills-repo PATH       folder holding INDEX.md
   --skills-index PATH      the index file itself, if it is not <skills-repo>/INDEX.md
   --mission-file PATH      plain-text mission, used verbatim
-  --wiring poll|fleet|none how work reaches the agent               (default poll)
+  --wiring poll|events|fleet|none how work reaches the agent        (default poll)
   --sections "A,B"         board columns the poll watches
   --provider cursor|pi     starter command to write                     (default cursor)
   --model-cli "CMD"        full command; overrides --provider
@@ -140,7 +140,7 @@ fi
 
 [ -n "$NAME" ] || die "--name is missing" "pass --name \"<Display Name>\""
 case "$KIND" in dev|qa|worker|cli) ;; *) die "--kind must be dev, qa, worker or cli, got '$KIND'" "pick one of those four" ;; esac
-case "$WIRING" in poll|fleet|none) ;; *) die "--wiring must be poll, fleet or none, got '$WIRING'" "use poll unless you know this machine runs a worker runtime" ;; esac
+case "$WIRING" in poll|events|fleet|none) ;; *) die "--wiring must be poll, events, fleet or none, got '$WIRING'" "use poll unless this host has a public HTTPS event route" ;; esac
 case "$CHAT_PAGE" in yes|no) ;; *) die "--chat-page must be yes or no" "pass --chat-page yes or --chat-page no" ;; esac
 if [ "$KIND" = "cli" ] || [ "$BOARD" = "none" ]; then CHAT_PAGE="no"; fi
 CHAT="off"
@@ -219,7 +219,7 @@ if [ "$WIRING" = "fleet" ] && ! adapter_supports_fleet_wiring; then
   die "fleet wiring was asked for, but this machine has no worker runtime for the '$BOARD' adapter" \
       "re-run with --wiring poll, which needs only the board CLI and a model CLI on this machine"
 fi
-if [ "$BOARD" = "none" ] && [ "$WIRING" = "poll" ]; then
+if [ "$BOARD" = "none" ] && { [ "$WIRING" = "poll" ] || [ "$WIRING" = "events" ]; }; then
   WIRING="none"
   warn "no board adapter, so there is nothing to poll: wiring set to none"
 fi
@@ -474,14 +474,27 @@ fi
 
 # ---------- 4. wiring ----------
 case "$WIRING" in
-  poll)
-    step 4 "install the poll units and start the timer"
+  poll|events)
+    if [ "$WIRING" = "events" ]; then
+      step 4 "install event wiring and start the hourly poll safety net"
+    else
+      step 4 "install the poll units and start the timer"
+    fi
     SERVICE="$SYSTEMD_USER_DIR/agent-board-poll@.service"
     TIMER="$SYSTEMD_USER_DIR/agent-board-poll@.timer"
-    echo "    $SERVICE (Type=oneshot) + $TIMER (every 60s)"
+    if [ "$WIRING" = "events" ]; then
+      echo "    agent-events.service + $TIMER (hourly safety net)"
+    else
+      echo "    $SERVICE (Type=oneshot) + $TIMER (every 60s)"
+    fi
     echo "    systemctl --user enable --now agent-board-poll@$SLUG.timer"
     if [ "$DRY_RUN" != "yes" ]; then
       core_write_poll_units "$SYSTEMD_USER_DIR" "$BIN_DIR"
+      if [ "$WIRING" = "events" ]; then
+        core_write_event_timer_dropin "$SYSTEMD_USER_DIR" "$SLUG"
+      else
+        core_remove_event_timer_dropin "$SYSTEMD_USER_DIR" "$SLUG"
+      fi
       systemctl --user daemon-reload
       systemctl --user enable --now "agent-board-poll@$SLUG.timer"
       systemctl --user list-timers "agent-board-poll@$SLUG.timer" --no-pager || true
@@ -517,11 +530,11 @@ if [ "$BOARD" != "none" ]; then
   [ ] $BOARD_CLI runs as the agent, not as you
 EOF
 fi
-if [ "$WIRING" = "poll" ]; then
+if [ "$WIRING" = "poll" ] || [ "$WIRING" = "events" ]; then
   cat <<EOF
   [ ] agent-board-poll --once --dry-run $SLUG lists the tickets you expect
   [ ] agent-board-poll --once $SLUG posts a reply on a test ticket as the agent
-  [ ] agent-board-poll@$SLUG.timer is active
+  [ ] agent-board-poll@$SLUG.timer is active${WIRING:+ ($WIRING mode)}
 EOF
 fi
 if [ "$CHAT_PAGE" = "yes" ]; then

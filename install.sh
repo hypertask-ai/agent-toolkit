@@ -231,6 +231,7 @@ echo "skill:  $DEST"
 echo "docs:   $DEST/MAINTAINER.md + $DEST/CONF.md"
 echo "bin:    $BIN/agent-board-poll -> $DEST/scripts/agent-board-poll"
 echo "bin:    $BIN/agent-chat -> $DEST/scripts/agent-chat"
+echo "bin:    $BIN/agent-events -> $DEST/scripts/agent-events"
 echo "bin:    $BIN/agent-kick -> $DEST/scripts/agent-kick"
 echo "bin:    $BIN/agent-template -> $DEST/scripts/agent-template"
 echo "bin:    $BIN/agent-template-feedback -> $DEST/scripts/agent-template-feedback"
@@ -310,7 +311,7 @@ done
 rm -rf "$DEST/core"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-board-poll-tick" "$DEST/scripts/agent-progress" "$DEST/scripts/agent-reply-contract" \
-          "$DEST/scripts/agent-board-health" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-kick" \
+          "$DEST/scripts/agent-board-health" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-events" "$DEST/scripts/agent-kick" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-feedback" \
           "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/agent-rules" "$DEST/scripts/triage.sh" \
@@ -324,6 +325,7 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
 ln -sfn "$DEST/scripts/agent-board-poll" "$BIN/agent-board-poll"
 ln -sfn "$DEST/scripts/agent-board-poll-tick" "$BIN/agent-board-poll-tick"
 ln -sfn "$DEST/scripts/agent-chat" "$BIN/agent-chat"
+ln -sfn "$DEST/scripts/agent-events" "$BIN/agent-events"
 ln -sfn "$DEST/scripts/agent-kick" "$BIN/agent-kick"
 ln -sfn "$DEST/scripts/agent-template" "$BIN/agent-template"
 ln -sfn "$DEST/scripts/agent-template-feedback" "$BIN/agent-template-feedback"
@@ -364,6 +366,9 @@ bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
           "check that $BIN is on PATH and the symlink resolves"
 "$BIN/agent-chat" --help >/dev/null \
   || fail "the installed agent-chat does not run" \
+          "check python3 is present and the symlink resolves"
+"$BIN/agent-events" --help >/dev/null \
+  || fail "the installed agent-events does not run" \
           "check python3 is present and the symlink resolves"
 "$BIN/agent-kick" --help >/dev/null \
   || fail "the installed agent-kick does not run" \
@@ -431,16 +436,16 @@ TimeoutStopSec=100
 [Install]
 WantedBy=default.target
 EOF
-  cat > "$SYSTEMD_USER_DIR/agent-kick.service" <<EOF
+  cat > "$SYSTEMD_USER_DIR/agent-events.service" <<EOF
 [Unit]
-Description=Start poll agents immediately when Hypertask mentions them
+Description=Receive signed Hypertask events for agents on this host
 After=network-online.target
 
 [Service]
 Type=simple
 Environment=HOME=%h
 Environment=PATH=%h/.local/bin:%h/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ExecStart=$BIN/agent-kick serve
+ExecStart=$BIN/agent-events serve
 Restart=always
 RestartSec=2
 
@@ -531,11 +536,21 @@ EOF
           "$SYSTEMD_USER_DIR/agent-template-feedback.timer"
   fi
 
+  for conf in "$AGENT_CONF_DIR"/*.conf; do
+    [ -f "$conf" ] || continue
+    slug="$(basename "$conf" .conf)"
+    if grep -qE '^WIRING="?events"?$' "$conf"; then
+      core_write_event_timer_dropin "$SYSTEMD_USER_DIR" "$slug"
+    else
+      core_remove_event_timer_dropin "$SYSTEMD_USER_DIR" "$slug"
+    fi
+  done
   systemctl --user daemon-reload
   systemctl --user enable agent-chat.service
   systemctl --user restart agent-chat.service
-  systemctl --user enable agent-kick.service
-  systemctl --user restart agent-kick.service
+  systemctl --user disable --now agent-kick.service >/dev/null 2>&1 || true
+  systemctl --user enable agent-events.service
+  systemctl --user restart agent-events.service
   systemctl --user enable --now agent-template-update.timer
   if [ "$FEEDBACK_MAINTAINER" = yes ]; then
     systemctl --user enable --now agent-template-feedback.timer
@@ -545,13 +560,13 @@ EOF
   fi
   echo "poll units: $SYSTEMD_USER_DIR/agent-board-poll@.service + .timer (refreshed, daemon-reload done)"
   echo "chat service: agent-chat.service (enabled and restarted)"
-  echo "kick service: agent-kick.service (enabled and restarted)"
+  echo "events service: agent-events.service (enabled and restarted)"
   echo "update timer: agent-template-update.timer, daily 06:30 local ($(systemctl --user list-timers agent-template-update.timer --no-pager 2>/dev/null | sed -n '2p'))"
 else
   echo "WARNING: no systemd --user session here: skipped refreshing agent-board-poll@.service/.timer and agent-template-update.timer" >&2
 fi
 
-"$BIN/agent-kick" register || echo "WARNING: mention webhook registration failed; mentions still wait for the poll" >&2
+"$BIN/agent-events" register-all || echo "WARNING: event webhook registration failed; hourly polls remain the path" >&2
 
 sync_company_skills
 feedback_update_host_notes "$(cat "$SRC/VERSION")" "$NO_HOST_NOTES"
