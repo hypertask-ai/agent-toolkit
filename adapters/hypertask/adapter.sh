@@ -2205,7 +2205,7 @@ for check in json.load(sys.stdin)["failed"]:
   action="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("fix" if d["failed"] or d["review"] else "wait")')"
   wait_state="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("checks-pending" if d["pending"] else "awaiting-merge")')"
   PR="$pr" VIEW="$view" LIVE="$live" FEEDBACK="$feedback" LOGS="$logs" ACTION="$action" WAIT_STATE="$wait_state" python3 -c '
-import json, os
+import datetime, json, os
 pr, view = json.loads(os.environ["PR"]), json.loads(os.environ["VIEW"])
 live, feedback = json.loads(os.environ["LIVE"]), json.loads(os.environ["FEEDBACK"])
 parts = []
@@ -2215,13 +2215,24 @@ if feedback["review"]:
     parts.append("Review feedback (verbatim):\n" + "\n\n".join("[%s %s]\n%s" % (r["author"], r["state"], r["body"]) for r in feedback["review"]))
 if os.environ["LOGS"].strip():
     parts.append("Failing check logs:\n" + os.environ["LOGS"].strip())
-print(json.dumps({"action":os.environ["ACTION"],
-                  "state":"red" if os.environ["ACTION"] == "fix" else os.environ["WAIT_STATE"],
+action = os.environ["ACTION"]
+state = "red" if action == "fix" else os.environ["WAIT_STATE"]
+created = datetime.datetime.fromisoformat(str(pr["createdAt"]).replace("Z", "+00:00"))
+now_value = os.environ.get("PR_GATE_NOW")
+now = (datetime.datetime.fromisoformat(now_value.replace("Z", "+00:00"))
+       if now_value else datetime.datetime.now(datetime.timezone.utc))
+stale = (now - created).total_seconds() >= 2 * 60 * 60
+if state == "awaiting-merge" or stale:
+    action = "observe"
+failed_names = [check["name"] for check in feedback["failed"]]
+wait_reason = "red: " + ", ".join(failed_names) if state == "red" else state
+print(json.dumps({"action":action, "state":state, "wait_reason":wait_reason,
                   "definition":live["definition"], "number":pr["number"], "url":pr["url"],
                   "ticket":pr["ticket"], "title":view.get("title") or pr["title"],
                   "branch":view.get("headRefName") or pr["headRefName"],
                   "base":view.get("baseRefName") or "main", "since":pr["createdAt"],
-                  "feedback":"\n\n".join(parts), "pending":feedback["pending"]}))
+                  "feedback":"\n\n".join(parts), "pending":feedback["pending"],
+                  "failed_checks":failed_names}))
 '
 }
 

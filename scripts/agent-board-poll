@@ -1483,7 +1483,9 @@ PR_GATE_STATE=""
 PR_GATE_TICKET=""
 PR_GATE_URL=""
 PR_GATE_SINCE=""
+PR_GATE_REASON=""
 PR_GATE_MERGED_AT=""
+PR_NONBLOCKING_TICKETS=""
 if declare -F adapter_pr_gate >/dev/null 2>&1; then
   PR_GATES="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
               "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" "$OPENED_PRS" 2>>"$LOG")" || die \
@@ -1491,14 +1493,29 @@ if declare -F adapter_pr_gate >/dev/null 2>&1; then
     "read $LOG and restore GitHub or board access; no ticket was claimed"
 fi
 if [ -n "$PR_GATES" ]; then
-  PR_GATE="$(printf '%s\n' "$PR_GATES" | head -1)"
-  PR_GATE_COUNT="$(printf '%s\n' "$PR_GATES" | grep -c .)"
+  PR_GATE="$(printf '%s\n' "$PR_GATES" | python3 -c '
+import json, sys
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+blocking = [row for row in rows if row.get("action") in ("fix", "wait")]
+print(json.dumps((blocking or rows)[0]))
+')"
+  PR_GATE_COUNT="$(printf '%s\n' "$PR_GATES" | python3 -c '
+import json, sys
+print(sum(json.loads(line).get("action") in ("fix", "wait") for line in sys.stdin if line.strip()))
+')"
+  PR_NONBLOCKING_TICKETS="$(printf '%s\n' "$PR_GATES" | python3 -c '
+import json, sys
+for line in sys.stdin:
+    row = json.loads(line)
+    if row.get("action") == "observe": print(row.get("ticket") or "")
+')"
   PR_GATE_ACTION="$(row_field "$PR_GATE" action)"
   PR_GATE_NUMBER="$(row_field "$PR_GATE" number)"
   PR_GATE_STATE="$(row_field "$PR_GATE" state)"
   PR_GATE_TICKET="$(row_field "$PR_GATE" ticket)"
   PR_GATE_URL="$(row_field "$PR_GATE" url)"
   PR_GATE_SINCE="$(row_field "$PR_GATE" since)"
+  PR_GATE_REASON="$(row_field "$PR_GATE" wait_reason)"
   PR_GATE_MERGED_AT="$(row_field "$PR_GATE" merged_at)"
   case "$PR_GATE_STATE" in
     merged-*)
@@ -1508,13 +1525,14 @@ if [ -n "$PR_GATES" ]; then
   esac
   gate_rows="$BLOCKED.gates.$$"
   printf '%s\n' "$PR_GATES" > "$gate_rows"
-  python3 - "$gate_rows" "$BLOCKED" <<'PYEOF'
+  if [ "$PR_GATE_COUNT" -gt 0 ]; then
+    python3 - "$gate_rows" "$BLOCKED" <<'PYEOF'
 import json, os, sys
 source, path = sys.argv[1:]
 with open(source, encoding="utf-8") as handle:
     rows = [json.loads(line) for line in handle if line.strip()]
 items = [{"pr": row["number"], "state": row["state"], "since": row["since"],
-          "ticket": row["ticket"]} for row in rows]
+          "ticket": row["ticket"]} for row in rows if row.get("action") in ("fix", "wait")]
 oldest = dict(items[0])
 oldest["prs"] = items
 temporary = path + ".new"
@@ -1523,6 +1541,9 @@ with open(temporary, "w", encoding="utf-8") as handle:
     handle.write("\n")
 os.replace(temporary, path)
 PYEOF
+  else
+    rm -f "$BLOCKED"
+  fi
   rm -f "$gate_rows"
   PR_GATE_SUMMARY="$(printf '%s\n' "$PR_GATES" | python3 -c '
 import json, sys
@@ -1536,7 +1557,7 @@ print("owned non-live PRs oldest first: " + ", ".join(parts))
 else
   rm -f "$BLOCKED"
 fi
-if [ "$PR_GATE_ACTION" = "wait" ] || [ "$PR_GATE_ACTION" = "fix" ]; then
+if [ "$PR_GATE_ACTION" = "wait" ] || [ "$PR_GATE_ACTION" = "fix" ] || [ "$PR_GATE_ACTION" = "observe" ]; then
   PROGRESS_WAIT_TICKET="$PR_GATE_TICKET"
   PROGRESS_WAIT_PR="$PR_GATE_NUMBER"
   PROGRESS_WAIT_PR_URL="$PR_GATE_URL"
@@ -1545,7 +1566,7 @@ if [ "$PR_GATE_ACTION" = "wait" ] || [ "$PR_GATE_ACTION" = "fix" ]; then
     checks-pending|awaiting-merge) PROGRESS_WAIT_STATE="$PR_GATE_STATE" ;;
     *)
       PROGRESS_WAIT_STATE="blocked"
-      PROGRESS_WAIT_REASON="$PR_GATE_STATE"
+      PROGRESS_WAIT_REASON="${PR_GATE_REASON:-$PR_GATE_STATE}"
       ;;
   esac
 fi
@@ -1895,7 +1916,12 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     explain "skip  $ref: carries the label $hit, which this agent stays away from"
     continue
   fi
-  if [ "$is_reply_only" = "no" ] && [ -n "$PR_GATE" ] && [ "$is_pr_fix" = "no" ]; then
+  if [ "$is_reply_only" = "no" ] && [ "$is_pr_fix" = "no" ] \
+     && printf '%s\n' "$PR_NONBLOCKING_TICKETS" | grep -qxF "$ref"; then
+    explain "skip  $ref: its open PR is monitored without blocking new work"
+    continue
+  fi
+  if [ "$is_reply_only" = "no" ] && [ "$PR_GATE_COUNT" -gt 0 ] && [ "$is_pr_fix" = "no" ]; then
     if [ "$PR_GATE_COUNT" -gt 1 ]; then
       explain "skip  $ref: $PR_GATE_COUNT owned PRs are not live, so only oldest PR #$PR_GATE_NUMBER may run"
       continue

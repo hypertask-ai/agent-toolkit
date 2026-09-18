@@ -386,12 +386,17 @@ def make_findings(row: dict[str, Any], current: dt.datetime) -> list[dict[str, A
             detail = str(wait.get("reason") or "the current work is blocked")
             reason = f"{slug}: PR {pr_number or 'work'} is {detail} for {hours_text((current - wait_since).total_seconds())}."
             html_reason = f"{finding_link('PR ' + str(pr_number), pr.get('url')) if pr_number else 'The current work'} has been blocked since {html.escape(str(wait.get('since')))} because it is {html.escape(detail)}."
+        wait_reason = str(wait.get("reason") or "")
+        red = wait_state == "blocked" and (wait_reason == "red" or wait_reason.startswith("red: "))
+        failing_checks = wait_reason.removeprefix("red: ") if red and wait_reason != "red" else ""
         findings.append({
             "key": f"wait:{slug}:pr:{pr_number}" if pr_number else f"wait:{slug}:{wait_state}:{wait.get('ticket') or 'none'}",
             "rule": "wait-over-two-hours", "runner": slug, "since": iso(wait_since),
             "ticket": wait.get("ticket"), "reason": reason, "html_reason": html_reason,
-            "pr_bug": bool(pr_number and (wait_state in {"checks-pending", "awaiting-merge"} or (wait_state == "blocked" and str(wait.get("reason") or "") == "red"))),
-            "pr_number": pr_number, "pr_url": pr.get("url"), "pr_state": wait.get("reason") or wait_state,
+            "pr_bug": bool(pr_number and (wait_state in {"checks-pending", "awaiting-merge"} or red)),
+            "pr_number": pr_number, "pr_url": pr.get("url"),
+            "pr_state": "red" if red else wait_reason or wait_state,
+            "failing_checks": failing_checks,
         })
 
     eligible = row.get("eligible_work") if isinstance(row.get("eligible_work"), dict) else {}
@@ -506,11 +511,16 @@ def file_pr_bug(board_cli: str, finding: dict[str, Any]) -> str | None:
     title = f"Bug: PR #{number} stayed {finding.get('pr_state') or 'unmerged'} for two hours"
     link = finding_link(f"PR {number}", finding.get("pr_url"))
     source = html.escape(str(finding.get("ticket") or "unknown"))
+    failing_checks = str(finding.get("failing_checks") or "")
+    check_detail = (
+        f"<p>Failing checks: {html.escape(failing_checks)}.</p>" if failing_checks else ""
+    )
     description = (
         f"<p><strong>{link} has stayed red or unmerged for more than two hours.</strong></p>"
         f"<p>Runner: {html.escape(str(finding['runner']))}.</p>"
         f"<p>Source ticket: {source}.</p>"
         f"<p>First observed: {html.escape(str(finding['since']))}.</p>"
+        f"{check_detail}"
     )
     base = [board_cli, "task", "create", "--project", "5500", "--section", "Backlog",
             "--title", title, "--description", description]
