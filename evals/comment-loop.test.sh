@@ -92,6 +92,34 @@ run_dry() {
     PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once --dry-run --explain test
 }
 
+cat > "$TMP/home/.config/agents/product-bot.conf" <<EOF
+AGENT_ID="agent-product"
+AGENT_NAME="Product Bot"
+AGENT_KIND="manager"
+AGENT_REPO="$TMP/repo"
+AGENT_SLUG="product-bot"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="1"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$TMP/board"
+WATCH_SECTIONS="*"
+SKILLS_INDEX=""
+MODEL_CLI="claude -p"
+PR_REPO="example/repo"
+TRIAGE="no"
+CLAIM_UNASSIGNED="no"
+GRAFT="off"
+EOF
+run_product_dry() {
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+    XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
+    TASKS_JSON="$TMP/product-tasks.json" COMMENTS_JSON="$TMP/product-comments.json" \
+    PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once --dry-run --explain product-bot
+}
+cat > "$TMP/product-tasks.json" <<'EOF'
+{"tasks":[{"id":"task-product","ticketNumber":"TEST-2","section":"Review","title":"Quiet routing","description":"Check bot comments","assignees":[],"labels":[],"commentCount":1,"updatedAt":"2026-01-01T00:01:00Z"}]}
+EOF
+
 cat > "$TMP/comments.json" <<'EOF'
 {"comments":[{"id":1,"createdAt":"2026-01-01T00:00:00Z","agent":{"id":"other-agent","displayName":"Other Bot"},"text":"Earlier"},{"id":2,"createdAt":"2026-01-01T00:01:00Z","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p><span data-label=\"agent-agent-1\">Test Bot</span> done</p>"}]}
 EOF
@@ -101,6 +129,27 @@ if printf '%s\n' "$output" | grep -qF "newest comment 2 is by this agent's own i
   ok own-comment-never-triggers 'own agent id is rejected in mention and assigned paths'
 else
   bad own-comment-never-triggers "output=$output"
+fi
+
+cat > "$TMP/product-comments.json" <<'EOF'
+{"comments":[{"id":6,"createdAt":"2026-01-01T00:01:00Z","agent":{"id":"agent-builder","displayName":"Builder Bot"},"text":"<p>Done: The quiet-mode fixes shipped. Did it work?</p>"}]}
+EOF
+output="$(run_product_dry)"
+if printf '%s\n' "$output" | grep -qF "newest comment 6 is another bot's status marker and does not address this agent" \
+   && ! printf '%s\n' "$output" | grep -q '^would pick up TEST-2 '; then
+  ok other-bot-done-does-not-trigger "another bot's Done is status, not new Product Bot work"
+else
+  bad other-bot-done-does-not-trigger "output=$output"
+fi
+
+cat > "$TMP/product-comments.json" <<'EOF'
+{"comments":[{"id":7,"createdAt":"2026-01-01T00:02:00Z","agent":{"id":"agent-builder","displayName":"Builder Bot"},"text":"<p>Question: Can <span data-label=\"agent-agent-product\">Product Bot</span> confirm the release?</p>"}]}
+EOF
+output="$(run_product_dry)"
+if printf '%s\n' "$output" | grep -q '^would pick up TEST-2 '; then
+  ok bot-question-mention-triggers-product 'a bot Question mentioning Product Bot remains new work'
+else
+  bad bot-question-mention-triggers-product "output=$output"
 fi
 
 cat > "$TMP/comments.json" <<'EOF'
@@ -185,7 +234,7 @@ for name in ("pospeak.md", "unslop.md", "i-have-adhd.md"):
     assert (rules / name).read_text().rstrip() in prompt
 PYEOF
 then
-  ok plain-language-prompt-contract 'Question and Decision prompts contain all three rule texts verbatim'
+  ok plain-language-prompt-contract 'all four comment kinds receive the three rule texts verbatim'
 else
   bad plain-language-prompt-contract 'the runner prompt omitted the phone reader or verbatim rules'
 fi
@@ -238,8 +287,8 @@ fi
 for allowed in \
   '<p><strong>Question: Which release number is needed?</strong></p>' \
   '<p><strong>Decision: Legal approval is required.</strong></p><p>Next: wait for approval.</p>' \
-  '<p>Handoff: QA Bot owns verification.</p>' \
-  '<p>Done: https://github.com/example/repo/pull/1</p>'
+  '<p><strong>Handoff: The quiet-mode fixes shipped.</strong></p><p>Next: QA Bot owns verification.</p>' \
+  '<p><strong>Done: The quiet-mode fixes shipped.</strong></p><p>Next: Review <a href="https://github.com/example/repo/pull/1">PR 1</a>.</p>'
 do
   HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/kind-board" comment add TEST-1 --text "$allowed" >/dev/null
 done
@@ -267,10 +316,25 @@ HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
 if [ "$(wc -l < "$REWRITE_CALLS")" -eq 1 ] \
    && grep -qF '<p><strong>Question: Should this change ship today?</strong></p>' "$MECH_POSTS" \
    && grep -qF 'comment contains a file path' "$REWRITE_PROMPT" \
+   && grep -qF 'Preserve the exact Question: prefix' "$REWRITE_PROMPT" \
    && grep -qF 'POSPEAK RULES, VERBATIM:' "$REWRITE_PROMPT"; then
-  ok technical-comment-rewritten 'a technical draft is rewritten once and the passing replacement posts'
+  ok technical-comment-rewritten 'a technical draft keeps its marker through the passing rewrite'
 else
   bad technical-comment-rewritten "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/technical.err")"
+fi
+
+: > "$MECH_POSTS"
+: > "$REWRITE_CALLS"
+REWRITE_OUTPUT='<p><strong>Decision: This change should ship today.</strong></p><p>Next: approve the release.</p>'
+export REWRITE_OUTPUT
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+  AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
+  "$TMP/plain-board" comment add TEST-1 --text "$technical" >"$TMP/missing-prefix.out" 2>"$TMP/missing-prefix.err"
+if [ ! -s "$MECH_POSTS" ] \
+   && grep -qF 'rewrite removed the Question: prefix' "$TMP/state/agent-board-poll/plain-test.log"; then
+  ok rewrite-missing-prefix-held 'a fluent rewrite with a changed marker is refused'
+else
+  bad rewrite-missing-prefix-held "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/missing-prefix.err")"
 fi
 
 : > "$MECH_POSTS"
@@ -304,18 +368,24 @@ fi
 
 : > "$MECH_POSTS"
 : > "$REWRITE_CALLS"
-for unaffected in \
-  '<p>Handoff: QA checks src/app.ts with runThing() — today.</p>' \
-  '<p>Done: PR-12 at deadbeef</p>'
-do
-  HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
-    AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
-    "$TMP/plain-board" comment add TEST-1 --text "$unaffected" >/dev/null
-done
-if [ "$(wc -l < "$MECH_POSTS")" -eq 2 ] && [ ! -s "$REWRITE_CALLS" ]; then
-  ok handoff-done-unaffected 'Handoff and Done comments bypass plain-language enforcement'
+REWRITE_OUTPUT='<p><strong>Handoff: The quiet-mode fixes shipped.</strong></p><p>Next: QA Bot will verify the release.</p>'
+export REWRITE_OUTPUT
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+  AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
+  "$TMP/plain-board" comment add TEST-1 --text '<p><strong>Handoff: <a href="https://github.com/example/repo/pull/1">PR 1</a>.</strong></p><p>Next: send it to QA Bot.</p>' >/dev/null
+REWRITE_OUTPUT='<p><strong>Done: The quiet-mode fixes shipped.</strong></p><p>Next: Review <a href="https://github.com/example/repo/pull/1">PR 1</a>.</p>'
+export REWRITE_OUTPUT
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+  AGENT_COMMENT_REWRITE_CLI="$TMP/bin/rewrite-model" \
+  "$TMP/plain-board" comment add TEST-1 --text '<p><strong>Done: <a href="https://github.com/example/repo/pull/1">PR 1</a>.</strong></p><p>Next: review the release.</p>' >/dev/null
+if [ "$(wc -l < "$MECH_POSTS")" -eq 2 ] \
+   && [ "$(wc -l < "$REWRITE_CALLS")" -eq 2 ] \
+   && grep -qF 'Done and Handoff must explain what shipped, not only link to it' "$REWRITE_PROMPT" \
+   && grep -qF 'Handoff: The quiet-mode fixes shipped.' "$MECH_POSTS" \
+   && grep -qF 'Done: The quiet-mode fixes shipped.' "$MECH_POSTS"; then
+  ok handoff-done-plain-words 'link-only Handoff and Done drafts are rewritten with shipped explanations'
 else
-  bad handoff-done-unaffected "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS")"
+  bad handoff-done-plain-words "calls=$(cat "$REWRITE_CALLS") posts=$(cat "$MECH_POSTS")"
 fi
 
 MECH_POSTS="$TMP/dedupe-posts"

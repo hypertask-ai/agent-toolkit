@@ -56,6 +56,14 @@ def visible(node):
     return "".join(visible(child) for child in node.children)
 
 
+def unlinked_visible(node):
+    if isinstance(node, str):
+        return node
+    if node.tag == "a":
+        return ""
+    return "".join(unlinked_visible(child) for child in node.children)
+
+
 def meaningful(children):
     return [child for child in children if not isinstance(child, str) or child.strip()]
 
@@ -88,9 +96,16 @@ def check(raw):
         if not first_children or isinstance(first_children[0], str) or first_children[0].tag != "strong":
             reasons.append("first sentence must be bold")
         else:
-            lead = " ".join(visible(first_children[0]).split())
+            strong = first_children[0]
+            lead = " ".join(visible(strong).split())
             if not re.search(r"[.!?](?:[\"']?)$", lead):
                 reasons.append("the bold lead must contain the complete first sentence")
+            marker = re.match(r"(Done|Handoff):\s*(.*)", lead, re.IGNORECASE)
+            if marker:
+                unlinked = " ".join(unlinked_visible(strong).split())
+                explanation = re.sub(r"^(?:Done|Handoff):\s*", "", unlinked, flags=re.IGNORECASE)
+                if not re.search(r"[A-Za-z0-9]", explanation):
+                    reasons.append("Done and Handoff must explain what shipped, not only link to it")
 
     text = " ".join(visible(item) for item in roots)
     text = " ".join(text.split())

@@ -212,26 +212,28 @@ stall has no runner ticket and defaults to `AGTE-37`.
 ## Quiet ticket traffic
 
 Ticket comments have exactly four allowed kinds: `Question:` asks a human and
-ends with a question mark while naming what is needed; `Decision:` records a fact
-the owner must know; `Handoff:` names the receiving agent; and `Done:` is one
-line with the pull request link. The board wrapper redirects anything else to
-run activity. `QUIET="on"` is the default and strips board-owner mentions from
-comments, logging the change. The review column provides attention instead.
-The existing one-reminder and three-comments-per-day limits still apply.
+ends with a question mark while naming what is needed; `Decision:` records a
+fact the owner must know; `Handoff:` names the receiving agent and explains
+what shipped; and `Done:` explains what shipped and includes the pull request
+link. Neither `Handoff:` nor `Done:` can be only a link. The board wrapper
+redirects anything else to run activity. `QUIET="on"` is the default and
+strips board-owner mentions from comments, logging the change. The review
+column provides attention instead. The existing one-reminder and
+three-comments-per-day limits still apply.
 
-The runner appends the pospeak, unslop, and i-have-adhd texts verbatim for
-`Question:` and `Decision:` output and says the product owner reads it on a
-phone. Paths under the company pack's `skills/talk-to-valentin/` directory are
-canonical; bundled files under `adapters/hypertask/plain-language/` fill any
-missing reference. The generated board wrapper checks the first `<p>` and bold
-sentence, the 80-word cap, code-shaped tokens, commit hashes, em dashes, linked
-ticket and PR references, and the last block. A final gate fetches every ticket
-title from the board API and writes each reference as an HTML anchor whose
-visible text is the full id plus title. The same gate removes em dashes from all
-four comment kinds. It tries one 60-second rewrite for other plain-language
-failures with `CHAT_CLI` or `RESEARCH_CLI`, then checks again. A second failure
-logs the draft and reasons, emits the `Question held: did not pass the
-plain-language check` activity, and sends no raw comment.
+The runner appends the pospeak, unslop, and i-have-adhd texts verbatim for all
+four comment kinds and says the product owner reads them on a phone. Paths under
+the company pack's `skills/talk-to-valentin/` directory are canonical; bundled
+files under `adapters/hypertask/plain-language/` fill any missing reference. The
+generated board wrapper checks the first `<p>` and bold sentence, the 80-word
+cap, code-shaped tokens, commit hashes, em dashes, linked ticket and PR
+references, and the last block. A final gate fetches every ticket title from
+the board API and writes each reference as an HTML anchor whose visible text is
+the full id plus title. The same gate removes em dashes from all four comment
+kinds. It tries one 60-second rewrite for other plain-language
+failures with `CHAT_CLI` or `RESEARCH_CLI`, preserves the original marker, then
+checks the replacement and marker again. A second failure logs the draft and
+reasons, emits a held plain-language activity, and sends no raw comment.
 
 At ticket-run start the adapter posts `{taskId, source: "runtime"}` to
 `/api/mcp/agents/runs`. Claimed, started, PR opened, red check, fix pushed,

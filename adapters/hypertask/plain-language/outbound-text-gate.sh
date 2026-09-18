@@ -9,7 +9,7 @@ print(html.unescape(re.sub(r"<[^>]+>", " ", os.environ["COMMENT_TEXT"])).strip()
 }
 
 _rewrite_plain_comment() {
-  local draft="$1" reasons="$2" cli="${AGENT_COMMENT_REWRITE_CLI:-${COMMENT_REWRITE_CLI:-}}"
+  local draft="$1" reasons="$2" kind="$3" cli="${AGENT_COMMENT_REWRITE_CLI:-${COMMENT_REWRITE_CLI:-}}"
   local prompt output
   local -a argv
   [ -n "$cli" ] || return 1
@@ -17,7 +17,7 @@ _rewrite_plain_comment() {
     [ -r "$skill" ] || return 1
   done
   prompt="$(cat <<PROMPTEOF
-Rewrite the HTML ticket comment below. A product owner with ADHD reads it on a phone. Use low effort and return only the replacement HTML, with no code fence or explanation. Start with <p><strong> and bold the complete first sentence. Use at most 80 words. Remove paths, function calls, code spans, commit hashes, and em dashes. Put each ticket or PR reference inside an <a href="https://..."> link. End the last block with a question mark or start it with Next:.
+Rewrite the HTML ticket comment below. A product owner with ADHD reads it on a phone. Use low effort and return only the replacement HTML, with no code fence or explanation. Preserve the exact $kind: prefix at the start of the visible text. Start with <p><strong> and bold the complete first sentence. Use at most 80 words. Remove paths, function calls, code spans, commit hashes, and em dashes. Put each ticket or PR reference inside an <a href="https://..."> link. End the last block with a question mark or start it with Next:. For Done: and Handoff:, include one sentence explaining what shipped; never return only a link.
 
 The mechanical check rejected it for:
 $reasons
@@ -59,11 +59,11 @@ _format_ticket_references() {
 }
 
 _enforce_plain_comment() {
-  local original="$1" plain kind reasons rewritten final_draft final_reasons
+  local original="$1" plain kind reasons rewritten rewritten_plain check_reasons final_draft final_reasons
   plain="$(_plain_comment "$original")"
   kind="${plain%%:*}"
   case "$kind" in
-    Question|Decision) ;;
+    Question|Decision|Handoff|Done) ;;
     *) TEXT="$original"; return 0 ;;
   esac
   if reasons="$(printf '%s' "$original" | python3 "$PLAIN_LANGUAGE_CHECK" 2>&1)"; then
@@ -72,11 +72,22 @@ _enforce_plain_comment() {
   fi
   final_draft="$original"
   final_reasons="$reasons"
-  if rewritten="$(_rewrite_plain_comment "$original" "$reasons" 2>>"$RUN_LOG")"; then
+  if rewritten="$(_rewrite_plain_comment "$original" "$reasons" "$kind" 2>>"$RUN_LOG")"; then
     final_draft="$rewritten"
-    if final_reasons="$(printf '%s' "$rewritten" | python3 "$PLAIN_LANGUAGE_CHECK" 2>&1)"; then
-      TEXT="$rewritten"
-      return 0
+    rewritten_plain="$(_plain_comment "$rewritten")"
+    final_reasons=""
+    case "$rewritten_plain" in
+      "$kind:"*) ;;
+      *) final_reasons="rewrite removed the $kind: prefix" ;;
+    esac
+    if check_reasons="$(printf '%s' "$rewritten" | python3 "$PLAIN_LANGUAGE_CHECK" 2>&1)"; then
+      if [ -z "$final_reasons" ]; then
+        TEXT="$rewritten"
+        return 0
+      fi
+    else
+      final_reasons="${final_reasons}${final_reasons:+
+}${check_reasons}"
     fi
   else
     final_reasons="$reasons
@@ -87,8 +98,8 @@ rewrite model did not return a replacement within 60 seconds"
     printf '%s plain-language-held: draft follows\n%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$final_draft"
     printf 'plain-language-held: reasons follow\n%s\n' "$final_reasons"
   } >> "$RUN_LOG" 2>/dev/null || true
-  _outbound_gate_activity action "Question held: did not pass the plain-language check"
-  _outbound_gate_note "Question held: did not pass the plain-language check"
+  _outbound_gate_activity action "$kind held: did not pass the plain-language check"
+  _outbound_gate_note "$kind held: did not pass the plain-language check"
   return 1
 }
 

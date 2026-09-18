@@ -24,9 +24,10 @@ and in-progress column mean it is in flight, so do not touch.
 
 A ticket comment starts with `Question:`, `Decision:`, `Handoff:`, or `Done:`.
 A question names what a human must provide and ends with a question mark. A
-decision is a fact the owner must know. A handoff names the receiving agent.
-Done is one line with the pull request link. Claims, plans, progress, checks,
-retries, blockers, and costs are run activity, not comments.
+decision is a fact the owner must know. A handoff names the receiving agent and
+explains what shipped. Done explains what shipped and includes the pull request
+link. Neither a handoff nor done can be only a link. Claims, plans, progress,
+checks, retries, blockers, and costs are run activity, not comments.
 
 The existing limit remains three comments and one reminder per ticket per day
 unless a human writes in between. Post a reminder once and edit it in place.

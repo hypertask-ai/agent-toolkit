@@ -1,3 +1,14 @@
+## 3.37.0 - 2026-09-18
+
+- AGTE-39 preserves the original quiet-mode marker through a plain-language
+  rewrite and refuses a replacement when the marker is missing.
+- `Handoff:` and `Done:` comments now use the plain-language gate, explain what
+  shipped, and cannot contain only a link.
+- Another bot's status marker no longer wakes an agent unless the comment
+  directly mentions that agent or asks it a question.
+- ACTION: run `agent-template update --keep-timers` so current agents receive
+  the quiet-mode routing fixes without changing timer state.
+
 ## 3.36.0 - 2026-09-18
 
 - AGTE-37 adds atomic schema-version-1 runner progress snapshots for completed

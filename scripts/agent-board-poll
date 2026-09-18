@@ -186,7 +186,7 @@ for skill in "$POSPEAK_SKILL" "$UNSLOP_SKILL" "$ADHD_SKILL"; do
   [ -r "$skill" ] || die "plain-language rules are missing at $skill" \
     "restore the installed template or company skill pack, then retry"
 done
-PLAIN_LANGUAGE_PROMPT="For every Question: or Decision: ticket comment, follow the three rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:.
+PLAIN_LANGUAGE_PROMPT="For every Question:, Decision:, Handoff:, or Done: ticket comment, follow the three rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
 
 POSPEAK RULES, VERBATIM:
 $(cat "$POSPEAK_SKILL")
@@ -586,7 +586,7 @@ check_maintainer_builds() {
     rc="$(row_field "$row" rc)"
     pr="$(row_field "$row" pr)"
     if [ "$rc" = "0" ] && [ -n "$pr" ]; then
-      message="Done: Build $build_id finished. $pr"
+      message="<p><strong>Done: The requested toolkit change shipped.</strong></p><p>Next: Review <a href=\"$pr\">the pull request</a>.</p>"
       status="done"
     else
       message='<p><strong>Decision: build failed: The job stopped before it opened a pull request.</strong></p><p>Next: Review the build log.</p>'
@@ -1262,6 +1262,8 @@ print("yes" if json.loads(os.environ["ROW"]).get("assignee_count", 1) == 0 else 
   comment_text=""
   comment_is_own="no"
   comment_is_human="no"
+  comment_is_other_bot_marker="no"
+  comment_has_addressed_question="no"
   mentioned="no"
   comments_json=""
   comments_available="no"
@@ -1308,6 +1310,17 @@ sys.exit(0 if own else 1)'; then
     else
       if CJ="$comment_json" python3 -c 'import json,os,sys;sys.exit(0 if not json.loads(os.environ["CJ"]).get("agent_id") else 1)'; then
         comment_is_human="yes"
+      else
+        case "$comment_text" in
+          Done:*|Decision:*|Handoff:*) comment_is_other_bot_marker="yes" ;;
+        esac
+        if TEXT="$comment_text" NAME="$AGENT_NAME" python3 -c '
+import os, sys
+text = os.environ["TEXT"].casefold()
+name = os.environ["NAME"].strip().casefold()
+sys.exit(0 if "?" in text and name and name in text else 1)'; then
+          comment_has_addressed_question="yes"
+        fi
       fi
       if CJ="$comment_json" M="$MENTION" python3 -c '
 import json, os, sys
@@ -1430,6 +1443,15 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
   # when an old assignment or QA state would otherwise give the ticket a rank.
   if [ "$comment_is_own" = "yes" ]; then
     explain "skip  $ref: newest comment $comment_id is by this agent's own identity, so it cannot trigger another run"
+    continue
+  fi
+
+  # Completion and coordination markers from another bot are status, not new
+  # work for every assigned agent. A direct mention or question still wakes the
+  # addressed agent.
+  if [ "$comment_is_other_bot_marker" = "yes" ] \
+     && [ "$mentioned" = "no" ] && [ "$comment_has_addressed_question" = "no" ]; then
+    explain "skip  $ref: newest comment $comment_id is another bot's status marker and does not address this agent"
     continue
   fi
 
@@ -1820,7 +1842,7 @@ Ask Graft before grepping: use \`graft ask '<question>'\` or the Graft MCP tools
 
   PROMPT="$PROMPT
 
-COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent. \`Done:\` is one line and includes the pull request link. Write every ticket reference as an HTML anchor whose visible text is its full id plus authoritative title. Do not use em dashes. Everything else, including claims, plans, progress, retries, checks, and blockers, is run activity. The board wrapper redirects an unmarked comment to activity instead of posting it. The existing limit remains at one reminder and three total ticket comments per day unless a human wrote in between.
+COMMENT CONTRACT: A ticket comment must start with exactly one of these four markers. \`Question:\` asks a human, names what is needed, and ends with a question mark. \`Decision:\` states a fact the owner must know. \`Handoff:\` names the receiving agent and explains what shipped. \`Done:\` explains what shipped and includes the pull request link. Neither \`Handoff:\` nor \`Done:\` can be only a link. Write every ticket reference as an HTML anchor whose visible text is its full id plus authoritative title. Do not use em dashes. Everything else, including claims, plans, progress, retries, checks, and blockers, is run activity. The board wrapper redirects an unmarked comment to activity instead of posting it. The existing limit remains at one reminder and three total ticket comments per day unless a human wrote in between.
 
 $PLAIN_LANGUAGE_PROMPT
 

@@ -113,27 +113,29 @@ Claude: [runs the script with --yes] ... FP CRO Bot picked up the test ticket
 Every setup must tell the bot and the person creating it the comment contract.
 Ticket comments have exactly four allowed kinds: `Question:` asks a human,
 names what is needed, and ends with a question mark; `Decision:` states a fact
-the owner must know; `Handoff:` names the receiving agent; and `Done:` is one
-line with the pull request link. Everything else is run activity. A reminder
-that qualifies as a decision is posted once and then edited in place, never
-re-posted. The existing limit remains one reminder and three comments per
-ticket per day unless a human writes in between. With `QUIET="on"`, the wrapper
+the owner must know; `Handoff:` names the receiving agent and explains what
+shipped; and `Done:` explains what shipped and includes the pull request link.
+Neither `Handoff:` nor `Done:` can be only a link. Everything else is run
+activity. A reminder that qualifies as a decision is posted once and then
+edited in place, never re-posted. The existing limit remains one reminder and
+three comments per ticket per day unless a human writes in between. With `QUIET="on"`, the wrapper
 strips and logs board-owner mentions; moving the ticket to review requests
 attention.
 
-`Question:` and `Decision:` comments are for a product owner reading on a
-phone. Every runner prompt includes the pospeak, unslop, and i-have-adhd rules
-verbatim. It reads the canonical `skills/talk-to-valentin/` company-pack copy
-when present and uses the template's bundled copy when a reference is absent.
-Before either kind posts, the board wrapper requires a bold first sentence in
-a first `<p>`, at most 80 words, no code-shaped detail or em dash, linked ticket
-and PR references, and a final question or `Next:` block. A final gate applies
-to all four comment kinds. It fetches authoritative titles through the board
+All four comment kinds are for a product owner reading on a phone. Every runner
+prompt includes the pospeak, unslop, and i-have-adhd rules verbatim. It reads
+the canonical `skills/talk-to-valentin/` company-pack copy when present and
+uses the template's bundled copy when a reference is absent. Before any kind
+posts, the board wrapper requires a bold first sentence in a first `<p>`, at
+most 80 words, no code-shaped detail or em dash, linked ticket and PR
+references, and a final question or `Next:` block. A final gate applies to all
+four comment kinds. It fetches authoritative titles through the board
 API, writes ticket references as HTML anchors with the full id plus title, and
 removes em dashes. A failure gets one 60-second rewrite through `CHAT_CLI`,
-falling back to `RESEARCH_CLI`. If the rewrite still fails, the wrapper keeps
-the draft and reasons in the run log, posts `Question held: did not pass the
-plain-language check` as activity, and posts no comment.
+falling back to `RESEARCH_CLI`. The rewrite must preserve the original marker,
+and the wrapper checks both the replacement and marker again. If either check
+fails, the wrapper keeps the draft and reasons in the run log, posts a held
+plain-language activity, and posts no comment.
 
 ## The three wiring modes
 
