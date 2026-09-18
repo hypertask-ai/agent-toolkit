@@ -965,6 +965,8 @@ for task in json.load(sys.stdin).get("tasks") or []:
         "priority": str(priority),
         "dueDate": task.get("dueDate") or "",
         "updated_at": task.get("updatedAt") or "",
+        "section_entered_at": (task.get("sectionEnteredAt") or task.get("sectionChangedAt")
+                               or task.get("sectionUpdatedAt") or task.get("movedAt") or ""),
         "agent_ids": agent_ids,
         "human_assignee_ids": human_assignee_ids,
         # Anyone at all on the ticket, human or agent: a ticket with a name on
@@ -1512,6 +1514,9 @@ for task in json.load(sys.stdin).get("tasks") or []:
         "id": task.get("id"), "ref": ref, "section": str(task.get("section") or ""),
         "title": task.get("title") or "", "description": task.get("description") or "",
         "priority": str(priority), "dueDate": task.get("dueDate") or "",
+        "updated_at": task.get("updatedAt") or "",
+        "section_entered_at": (task.get("sectionEnteredAt") or task.get("sectionChangedAt")
+                               or task.get("sectionUpdatedAt") or task.get("movedAt") or ""),
         "agent_ids": agent_ids, "assignee_count": len(assignees), "labels": labels,
         "comment_count": task.get("commentCount") or 0, "board": board,
         "url": "https://app.hypertask.ai/detail/project-%s/%s" % (board, index),

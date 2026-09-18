@@ -49,11 +49,16 @@ case "$args" in
   *' comment list '*) cat "$MOCK_COMMENTS" ;;
   *' comment add '*)
     text=""
+    ref=""
     argv=("$@")
     for ((i = 0; i < ${#argv[@]}; i++)); do
+      [ "${argv[$i]}" = "add" ] && ref="${argv[$((i + 1))]:-}"
       [ "${argv[$i]}" = "--text" ] && text="${argv[$((i + 1))]:-}"
     done
-    TEXT="$text" python3 - "$MOCK_COMMENTS" <<'PYEOF'
+    if [ "$ref" = "BOARD-HEALTH" ]; then
+      printf 'health %s\n' "$text" >> "$MOCK_BOARD_LOG"
+    else
+      TEXT="$text" python3 - "$MOCK_COMMENTS" <<'PYEOF'
 import datetime, json, os, sys
 path = sys.argv[1]
 try:
@@ -66,6 +71,7 @@ rows.append({"id": 100 + len(rows), "createdAt": datetime.datetime.now(datetime.
 with open(path, "w", encoding="utf-8") as handle:
     json.dump({"comments": rows}, handle)
 PYEOF
+    fi
     printf 'comment added\n'
     ;;
   *' task move '*)
@@ -75,6 +81,7 @@ PYEOF
       [ "${argv[$i]}" = "--section" ] && section="${argv[$((i + 1))]:-}"
     done
     printf 'move TEST-1 %s\n' "$section" >> "$MOCK_BOARD_LOG"
+    [ "${MOCK_MOVE_FAIL:-no}" != "yes" ] || [ "$section" != "Done" ]
     ;;
   *' task unassign '*)
     assignee=""
@@ -100,6 +107,7 @@ BOARD_ID="15"
 TOKEN_FILE="$TMP/token"
 BOARD_CLI="$TMP/board"
 WATCH_SECTIONS="QA"
+SKILLS_INDEX=""
 MODEL_CLI="$TMP/bin/model"
 PR_REPO="example/repo"
 TRIAGE="no"
@@ -108,13 +116,16 @@ FLEET_PROGRESS_SUPERVISOR="off"
 EOF
 
 run_case() {
-  local verdict="$1" labels="$2" comments="$3" assignees
+  local verdict="$1" labels="$2" comments="$3" assignees move_fail="${5:-no}"
   if [ "$#" -ge 4 ]; then
     assignees="$4"
   else
     assignees='[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
   fi
-  rm -rf "$TMP/state"; mkdir -p "$TMP/state"
+  rm -rf "$TMP/state"; mkdir -p "$TMP/state/agent-board-poll"
+  if [ "$move_fail" = "yes" ]; then
+    printf '%s\n' '{"boards":{"15":{"ref":"BOARD-HEALTH"}}}' > "$TMP/state/agent-board-poll/board-health.json"
+  fi
   : > "$TMP/board.log"; : > "$TMP/model.log"
   cat > "$TMP/tasks.json" <<EOF
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"QA","title":"Verify checkout","description":"Test every acceptance step","assignees":$assignees,"labels":$labels,"commentCount":1}]}
@@ -122,7 +133,7 @@ EOF
   printf '%s\n' "$comments" > "$TMP/comments.json"
   HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT="$verdict" \
-    MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
+    MOCK_MOVE_FAIL="$move_fail" MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
     "$ROOT/scripts/agent-board-poll" --once qa-runner > "$TMP/out" 2>&1 || true
 }
@@ -159,6 +170,16 @@ if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
 else
   bad qa-valentin-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
+HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+  COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT=Done \
+  MOCK_MOVE_FAIL=no MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
+  MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
+  "$ROOT/scripts/agent-board-poll" --once qa-runner >/dev/null 2>&1 || true
+if [ "$(grep -cF 'QA move skipped for TEST-1: label valentin' "$TMP/state/agent-board-poll/qa-runner.log")" -eq 1 ]; then
+  ok qa-protection-log-daily 'a protected QA ticket logs its skip only once per UTC day'
+else
+  bad qa-protection-log-daily "log=$(cat "$TMP/state/agent-board-poll/qa-runner.log")"
+fi
 
 run_case Done '[]' '{"comments":[]}' '[{"id":6},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
 if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
@@ -175,6 +196,15 @@ if grep -qxF 'move TEST-1 Done' "$TMP/board.log" && [ ! -s "$TMP/model.log" ] \
   ok qa-verdict-backfill 'an own verdict older than ten minutes is moved without another run'
 else
   bad qa-verdict-backfill "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+
+run_case Done '[]' '{"comments":[]}' \
+  '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' yes
+if [ "$(grep -cFx 'move TEST-1 Done' "$TMP/board.log")" -eq 2 ] \
+   && grep -qF 'health <p><strong>Decision: QA lifecycle could not move TEST-1 to Done after two attempts.</strong></p><p>Next: Check the run log and restore the board move.</p>' "$TMP/board.log"; then
+  ok qa-move-retry-health 'a failed QA move retries once and reports Board health'
+else
+  bad qa-move-retry-health "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
