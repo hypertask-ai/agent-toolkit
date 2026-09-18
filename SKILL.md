@@ -467,12 +467,12 @@ interface:
 agent-template feedback --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"
 ```
 
-It lands in the Agent Template Inbox on project 5500
+It lands in the Agent Template Backlog on project 5500
 (https://app.hypertask.ai/detail/project-5500, prefix AGTE) as the bot's own
 identity, never the owner's. `agent-template-feedback` reads urgent tickets
-first and checks the Inbox every four hours on the maintainer host. It replies
+first and checks the Backlog every four hours on the maintainer host. It replies
 to every ticket with accepted, need info plus one question, or declined.
-Accepted work gets one auto-merge fix pull request and moves to Accepted. When
+Accepted work gets one auto-merge fix pull request and moves to In Progress. When
 a merged release changelog names the AGTE ticket, the same bot replies
 `Shipped in <version>: <one line>` and moves it to Done. Daily updates on the
 filing host print `feedback waiting: AGTE-n` until that ticket closes.

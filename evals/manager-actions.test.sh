@@ -114,6 +114,8 @@ case "$*" in
     printf '%s\n' '{"tasks":[{"ticketNumber":"OPEN-1","projectId":15,"assignees":[]}]}' ;;
   'project show 15')
     printf '%s\n' '{"project":{"id":15,"ownerId":6}}' ;;
+  '--json project show 5500')
+    printf '%s\n' '{"project":{"id":5500,"sections":[{"section_title":"Backlog"},{"section_title":"In Progress"},{"section_title":"Review"},{"section_title":"Done"}]}}' ;;
   task\ create*)
     if [ "${BOARD_LABEL_WARNING:-no}" = "yes" ] && [[ "$*" == *' --labels '* ]]; then
       printf '%s\n' 'LabelNotFound: adapter:hypertask'

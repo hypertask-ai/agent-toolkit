@@ -99,7 +99,7 @@ and relevant configuration that is present or missing. When comments conflict,
 use the newest verified fact and say which older comments it supersedes.
 <!-- agent-template:end -->
 
-This posts to the Agent Template Inbox as the bot's own identity, never in the
+This posts to the Agent Template Backlog as the bot's own identity, never in the
 owner's name. The board uses project 5500 and prefix AGTE. A correction that
 lives only in one run's log is gone when that process exits, so file it in the
 same run.

@@ -4,6 +4,42 @@
 INSTRUCTION_BOARD_ID="${INSTRUCTION_BOARD_ID:-5500}"
 TICKET_FORMAT_CHECK="${TICKET_FORMAT_CHECK:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/adapters/hypertask/plain-language/check-ticket.py}"
 TASK_WRITER_PROMPT='Rewrite this ticket in the house format: title under 80 characters naming the change, then a bold outcome sentence, What went wrong, What changes as a numbered list, Done when. Keep all links and meaning.'
+TASK_WRITER_REFUSAL_REASON=""
+
+# board_section_or_first <project-json> <configured-section>
+# Prints the live section name and whether it was an exact match or a fallback.
+board_section_or_first() {
+  PROJECT_JSON="$1" WANTED_SECTION="$2" python3 - <<'PYEOF'
+import json
+import os
+
+raw = os.environ["PROJECT_JSON"]
+start, end = raw.find("{"), raw.rfind("}")
+if start < 0 or end <= start:
+    raise SystemExit(1)
+doc = json.loads(raw[start:end + 1])
+project = doc.get("project") if isinstance(doc.get("project"), dict) else doc
+sections = project.get("sections") or []
+
+def value(item):
+    if isinstance(item, dict):
+        return str(item.get("section_title") or item.get("title") or item.get("name") or item.get("id") or "")
+    return str(item or "")
+
+names = [value(item) for item in sections if value(item)]
+wanted = os.environ["WANTED_SECTION"]
+for name in names:
+    if name.casefold() == wanted.casefold():
+        print(name)
+        print("exact")
+        raise SystemExit(0)
+if names:
+    print(names[0])
+    print("fallback")
+    raise SystemExit(0)
+raise SystemExit(1)
+PYEOF
+}
 
 # ticket_writer_rewrite <board-cli> <project> <raw> <title-file> <body-file> [done-when]
 # Returns 1 when the writer itself is unavailable, and 2 when two drafts fail
@@ -11,6 +47,7 @@ TASK_WRITER_PROMPT='Rewrite this ticket in the house format: title under 80 char
 ticket_writer_rewrite() {
   local board_cli="$1" project="$2" raw="$3" title_file="$4" body_file="$5"
   local done_when="${6:-}" attempt prompt output reason err_file
+  TASK_WRITER_REFUSAL_REASON=""
   err_file="$(mktemp "${TMPDIR:-/tmp}/task-writer.XXXXXX")"
   for attempt in 1 2; do
     prompt="$TASK_WRITER_PROMPT
@@ -20,7 +57,7 @@ $raw"
     if [ "$attempt" -eq 2 ]; then
       prompt="$prompt
 
-The previous draft was rejected because: $reason. Fix every named part."
+The previous draft failed the shape check. Shape rule: $reason. Fix every named part."
     fi
     if [ -n "${AGENT_AI_WRITER_FIXTURE:-}" ]; then
       if ! output="$(cat "$AGENT_AI_WRITER_FIXTURE" 2>"$err_file")"; then
@@ -73,7 +110,7 @@ PYEOF
     fi
   done
   rm -f "$err_file"
-  printf 'ERROR: Task Writer rewrite was refused: %s\n' "$(printf '%s' "$reason" | paste -sd ';' -)" >&2
+  TASK_WRITER_REFUSAL_REASON="$(printf '%s' "$reason" | paste -sd ';' -)"
   return 2
 }
 
@@ -112,7 +149,7 @@ PYEOF
 instruction_publish_file() { # instruction_publish_file <queue-json> <agent-conf>
   local queue_file="$1" conf="$2" adapter board_cli agent_id agent_name slug
   local work instruction_id marker_dir marker marker_fields ticket_ref ticket_url
-  local project_out section create_out create_rc assign_out assign_rc writer_rc due priority
+  local project_out section section_result section_match configured_section create_out create_rc assign_out assign_rc writer_rc due priority
   local -a create_args
 
   [ -f "$queue_file" ] || {
@@ -204,15 +241,18 @@ PYEOF
     return 1
   fi
   instruction_id="$(cat "$work/id")"
+  cp "$work/title" "$work/title.original"
+  cp "$work/body" "$work/body.original"
   if ticket_writer_rewrite "$board_cli" "$INSTRUCTION_BOARD_ID" "$(cat "$work/raw")" "$work/title" "$work/body"; then
     :
   else
     writer_rc=$?
+    cp "$work/title.original" "$work/title"
+    cp "$work/body.original" "$work/body"
     if [ "$writer_rc" -eq 1 ]; then
       printf 'Task Writer unavailable; using the original instruction ticket format.\n' >&2
     else
-      rm -rf "$work"
-      return "$writer_rc"
+      printf 'WARNING: Task Writer rewrite failed two shape checks; using the original instruction unchanged.\n' >&2
     fi
   fi
   marker_dir="${INSTRUCTION_TICKET_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-template/instruction-tickets}"
@@ -248,50 +288,16 @@ PYEOF
       rm -rf "$work"
       return "$create_rc"
     fi
-    if ! section="$(printf '%s' "$project_out" | python3 -c '
-import json
-import sys
-
-raw = sys.stdin.read()
-start, end = raw.find("{"), raw.rfind("}")
-if start < 0 or end <= start:
-    raise SystemExit(1)
-doc = json.loads(raw[start:end + 1])
-project = doc.get("project") if isinstance(doc.get("project"), dict) else doc
-sections = project.get("sections") or []
-
-def value(item):
-    if isinstance(item, dict):
-        return str(item.get("section_title") or item.get("title") or item.get("name") or item.get("id") or "")
-    return str(item or "")
-
-names = [value(item) for item in sections if value(item)]
-for name in names:
-    if name.casefold() == "triage":
-        print(name)
-        raise SystemExit(0)
-for key in ("intakeSection", "intake_section", "defaultSection", "default_section"):
-    name = value(project.get(key))
-    if name:
-        print(name)
-        raise SystemExit(0)
-defaults = project.get("defaultSections") or project.get("default_sections") or []
-if defaults:
-    print(value(defaults[0]))
-    raise SystemExit(0)
-for wanted in ("inbox", "intake"):
-    for name in names:
-        if name.casefold() == wanted:
-            print(name)
-            raise SystemExit(0)
-if names:
-    print(names[0])
-    raise SystemExit(0)
-raise SystemExit(1)
-')" || [ -z "$section" ]; then
-      printf 'ERROR: board %s has no Triage or intake section. Do this next: add an intake section and retry\n' "$INSTRUCTION_BOARD_ID" >&2
+    configured_section="${FEEDBACK_BOARD_SECTION:-Backlog}"
+    if ! section_result="$(board_section_or_first "$project_out" "$configured_section")"; then
+      printf 'ERROR: board %s has no sections. Do this next: add an intake section and retry\n' "$INSTRUCTION_BOARD_ID" >&2
       rm -rf "$work"
       return 1
+    fi
+    section="$(printf '%s\n' "$section_result" | sed -n '1p')"
+    section_match="$(printf '%s\n' "$section_result" | sed -n '2p')"
+    if [ "$section_match" = fallback ]; then
+      printf 'Instruction board section "%s" was not found; using first section "%s".\n' "$configured_section" "$section" >&2
     fi
 
     due="$(cat "$work/due")"

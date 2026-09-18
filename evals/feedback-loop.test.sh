@@ -63,5 +63,29 @@ else
   bad shipped-action-once "expected one AGTE-3 shipped action, got: $ship"
 fi
 
+TRIAGE_REPO="$TMP/triage-repo"
+mkdir -p "$TRIAGE_REPO/.git" "$TRIAGE_REPO/templates/agent-skills/create-agent"
+printf '# No releases yet\n' > "$TRIAGE_REPO/templates/agent-skills/create-agent/CHANGELOG.md"
+cat > "$TMP/triage-board" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TRIAGE_CALLS"
+if [ "${1:-} ${2:-}" = "section list" ]; then
+  printf '%s\n' '{"sections":[{"name":"Custom Queue"},{"name":"In Progress"},{"name":"Done"}]}'
+elif [ "${1:-} ${2:-}" = "task list" ]; then
+  printf '%s\n' '{"tasks":[]}'
+else
+  exit 2
+fi
+EOF
+chmod +x "$TMP/triage-board"
+triage="$(TRIAGE_CALLS="$TMP/triage-calls" FEEDBACK_BOARD_SECTION='Old Intake' XDG_STATE_HOME="$TMP/triage-state" \
+  bash "$ROOT/scripts/agent-template-feedback" --dry-run --repo "$TRIAGE_REPO" --board-cli "$TMP/triage-board")"
+if printf '%s\n' "$triage" | grep -qF 'feedback board section "Old Intake" was not found; using first section "Custom Queue".' \
+   && grep -qF 'task list --project 5500 --section Custom Queue' "$TMP/triage-calls"; then
+  ok triage-section-fallback 'triage falls back to the board first section'
+else
+  bad triage-section-fallback "output=$triage calls=$(cat "$TMP/triage-calls" 2>/dev/null)"
+fi
+
 printf '\n%d feedback-loop behavioural check(s) failed\n' "$fails"
 [ "$fails" -eq 0 ]

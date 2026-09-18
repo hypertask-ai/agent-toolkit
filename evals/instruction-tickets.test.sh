@@ -19,10 +19,10 @@ cat > "$TMP/bin/board" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$BOARD_FIXTURE/calls"
 if [ "${1:-} ${2:-} ${3:-}" = "--json project show" ]; then
-  if [ "${SECTION_MODE:-triage}" = triage ]; then
-    printf '%s\n' '{"project":{"id":5500,"defaultSections":["Inbox"],"sections":[{"id":1,"section_title":"Inbox"},{"id":2,"section_title":"Triage"}]}}'
+  if [ "${SECTION_MODE:-backlog}" = backlog ]; then
+    printf '%s\n' '{"project":{"id":5500,"defaultSections":["Inbox"],"sections":[{"id":1,"section_title":"Backlog"},{"id":2,"section_title":"In Progress"},{"id":3,"section_title":"Review"},{"id":4,"section_title":"Done"}]}}'
   else
-    printf '%s\n' '{"project":{"id":5500,"defaultSections":["Inbox"],"sections":[{"id":1,"section_title":"Inbox"}]}}'
+    printf '%s\n' '{"project":{"id":5500,"defaultSections":["Inbox"],"sections":[{"id":1,"section_title":"Custom Queue"}]}}'
   fi
   exit 0
 fi
@@ -91,7 +91,7 @@ queued="$(find "$STATE_DIR/agent-board-poll/product-bot-instructions" -name '*.j
 due_default_ok="$(python3 -c 'import datetime,sys; value=datetime.datetime.fromisoformat(open(sys.argv[1]).read().replace("Z", "+00:00")); now=datetime.datetime.now(value.tzinfo); print("yes" if datetime.timedelta(hours=3, minutes=55) < value-now < datetime.timedelta(hours=4, minutes=5) else "no")' "$BOARD_FIXTURE/due")"
 if [ "$created" = 'instruction filed: AGTE-1 https://app.hypertask.ai/detail/project-5500/1' ] \
    && [ -z "$queued" ] && [ -f "$marker" ] \
-   && [ "$(cat "$BOARD_FIXTURE/section")" = Triage ] \
+   && [ "$(cat "$BOARD_FIXTURE/section")" = Backlog ] \
    && [ "$(cat "$BOARD_FIXTURE/assigned")" = AGTE-1 ] \
    && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ticket_id"])' "$marker")" = task-1 ] \
    && [ "$(cat "$BOARD_FIXTURE/title")" = 'Review <the setup> now.' ] \
@@ -146,9 +146,10 @@ printf '%s\n' '{"id":"advisor-legacy-1","source":"advisor","instruction":"Migrat
 install_once > "$TMP/install-2.out" 2> "$TMP/install-2.err"
 if [ "$(cat "$BOARD_FIXTURE/create-count")" -eq 1 ] \
    && [ ! -f "$legacy_queue" ] && [ -f "$first_marker" ] \
-   && [ "$(cat "$BOARD_FIXTURE/section")" = Inbox ] \
+   && [ "$(cat "$BOARD_FIXTURE/section")" = 'Custom Queue' ] \
+   && grep -qF 'Instruction board section "Backlog" was not found; using first section "Custom Queue".' "$TMP/install-1.err" \
    && [ "$(grep -c '^AGTE-1$' "$BOARD_FIXTURE/assigned")" -eq 2 ]; then
-  ok install-migration-idempotent 'two installs keep one ticket and consume the recreated transport'
+  ok install-migration-idempotent 'migration falls back to the first section and keeps one ticket'
 else
   bad install-migration-idempotent "creates=$(cat "$BOARD_FIXTURE/create-count") assigned=$(cat "$BOARD_FIXTURE/assigned")"
 fi

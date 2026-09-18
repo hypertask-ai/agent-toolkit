@@ -14,8 +14,17 @@ mkdir -p "$TMP/bin" "$TMP/conf" "$TMP/state" "$TMP/board"
 printf 'token\n' > "$TMP/token"
 cat > "$TMP/bin/board" <<'EOF'
 #!/usr/bin/env bash
+if [ "${1:-} ${2:-} ${3:-}" = "--json ai write" ]; then
+  [ "${REFUSE_WRITES:-no}" = yes ] || { printf 'unexpected AI write\n' >&2; exit 3; }
+  count="$(cat "$BOARD_FIXTURE/rewrite-count" 2>/dev/null || printf 0)"
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$BOARD_FIXTURE/rewrite-count"
+  printf '%s' "$4" > "$BOARD_FIXTURE/rewrite-prompt-$count"
+  printf '%s\n' '{"success":true,"title":"Valid rewrite title","html":"<p><strong>The outcome is clear.</strong></p><h2>What went wrong</h2><p>One. Two. Three. Four.</p><h2>What changes</h2><ol><li>Keep it.</li></ol><h2>Done when</h2><p>The ticket is posted.</p>"}'
+  exit 0
+fi
 if [ "${1:-} ${2:-} ${3:-}" = "--json project show" ]; then
-  printf '%s\n' '{"project":{"id":5500,"sections":[{"section_title":"Triage"}]}}'
+  printf '%s\n' '{"project":{"id":5500,"sections":[{"section_title":"Backlog"},{"section_title":"In Progress"},{"section_title":"Review"},{"section_title":"Done"}]}}'
   exit 0
 fi
 if [ "${1:-} ${2:-}" = "task create" ]; then
@@ -83,14 +92,29 @@ else
   bad blob-instruction-task-writer "output=$created title=$(cat "$TMP/board/title" 2>/dev/null)"
 fi
 
-feedback="$(AGENT_AI_WRITER_FIXTURE="$ROOT/evals/fixtures/task-writer-without-done.json" \
+feedback="$(FEEDBACK_BOARD_SECTION=Inbox AGENT_AI_WRITER_FIXTURE="$ROOT/evals/fixtures/task-writer-without-done.json" \
   run_template feedback --board-cli "$TMP/bin/board" --kind change --what 'Explain the expected result' \
-    --got 'The result is buried in setup details.' --expected 'The ticket names one checkable result.')"
+    --got 'The result is buried in setup details.' --expected 'The ticket names one checkable result.' 2>&1)"
 if grep -q '<h2>Done when</h2><p>The ticket names one checkable result.</p>' "$TMP/board/description" \
-   && [ "$feedback" = 'Feedback filed: Make feedback tickets explain the expected result. Ticket: AGTE-77 https://app.hypertask.ai/detail/project-5500/77' ]; then
-  ok feedback-derives-done-when 'missing writer section is derived from --expected'
+   && [ "$(cat "$TMP/board/section")" = Backlog ] \
+   && printf '%s\n' "$feedback" | grep -qF 'WARNING: feedback board section "Inbox" was not found; using first section "Backlog".' \
+   && printf '%s\n' "$feedback" | grep -qF 'Feedback filed: Make feedback tickets explain the expected result. Ticket: AGTE-77 https://app.hypertask.ai/detail/project-5500/77'; then
+  ok feedback-backlog-first-column 'missing configured column falls back to the first column named Backlog'
 else
-  bad feedback-derives-done-when "output=$feedback body=$(cat "$TMP/board/description" 2>/dev/null)"
+  bad feedback-backlog-first-column "output=$feedback body=$(cat "$TMP/board/description" 2>/dev/null)"
+fi
+
+original_body='<p>Keep this original instruction body unchanged.</p>'
+refused="$(REFUSE_WRITES=yes run_template instruct product-bot "Original instruction title
+$original_body" 2>&1)"
+if [ "$(cat "$TMP/board/rewrite-count")" -eq 2 ] \
+   && grep -qF 'Shape rule: What went wrong must contain one to three sentences' "$TMP/board/rewrite-prompt-2" \
+   && [ "$(cat "$TMP/board/description")" = "$original_body" ] \
+   && printf '%s\n' "$refused" | grep -qF 'WARNING: Task Writer rewrite failed two shape checks; using the original instruction unchanged.' \
+   && printf '%s\n' "$refused" | grep -q '^instruction filed: AGTE-77 '; then
+  ok instruct-refusal-keeps-original 'two refused rewrites post the original body with one warning'
+else
+  bad instruct-refusal-keeps-original "output=$refused calls=$(cat "$TMP/board/rewrite-count" 2>/dev/null) body=$(cat "$TMP/board/description" 2>/dev/null)"
 fi
 
 set +e

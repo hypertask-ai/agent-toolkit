@@ -30,7 +30,7 @@ until you do it.
   gives a stuck agent two read-only research calls per run. Without it, there
   is no research step.
 - **Feedback timer** — `agent-template-feedback.timer`, runs every four hours
-  on the writable vstack maintainer host only. It judges Inbox tickets, opens
+  on the writable vstack maintainer host only. It judges Backlog tickets, opens
   one auto-merge fix pull request per accepted ticket, and closes shipped work.
   `agent-template-weekly` is a compatibility alias. `agent-template report`
   prints the local filing scorecard.
@@ -222,7 +222,7 @@ The four mechanical rules are: a pending-check, awaiting-merge, or blocked wait
 past two hours; non-zero eligible work without a completed run for three hours;
 three attempts on one ticket with one failure signature; and a build or
 instruction unit ending without a result. A pull request that is red or still
-unmerged after two hours also creates one deduplicated bug in the toolkit Inbox.
+unmerged after two hours also creates one deduplicated bug in the toolkit Backlog.
 After six hours from `stalled_since`,
 Product Bot runs `mode manual --runner <slug>` and sends one separate owner
 notification once. `FLEET_STALL_TICKET` selects the toolkit ticket used when a
@@ -496,12 +496,12 @@ A bot or an interactive session files template feedback with:
 agent-template feedback --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"
 ```
 
-It posts as that bot's own identity to the Agent Template Inbox, project 5500
+It posts as that bot's own identity to the Agent Template Backlog, project 5500
 (https://app.hypertask.ai/detail/project-5500, prefix AGTE), and prints the
 filed URL. The maintainer host reads urgent first every four hours. Every
 ticket gets an accepted, need-info, or declined reply; need-info contains one
 question. Accepted tickets get one auto-merge fix pull request and move to
-Accepted. A merged changelog line naming the ticket triggers one `Shipped in
+In Progress. A merged changelog line naming the ticket triggers one `Shipped in
 <version>: <one line>` reply and moves it to Done. The filing host's daily
 update prints `feedback waiting: AGTE-n` while the ticket remains open. The
 paste-it-yourself fallback appears only when no bot token is configured.

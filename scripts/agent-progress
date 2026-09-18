@@ -512,7 +512,7 @@ def file_pr_bug(board_cli: str, finding: dict[str, Any]) -> str | None:
         f"<p>Source ticket: {source}.</p>"
         f"<p>First observed: {html.escape(str(finding['since']))}.</p>"
     )
-    base = [board_cli, "task", "create", "--project", "5500", "--section", "Inbox",
+    base = [board_cli, "task", "create", "--project", "5500", "--section", "Backlog",
             "--title", title, "--description", description]
     commands = [[*base, "--labels", "bug", "--json"], [*base, "--json"]]
     for index, command in enumerate(commands):

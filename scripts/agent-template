@@ -132,7 +132,7 @@ unset AGENT_TEMPLATE_CORE_ROOT
 # Where corrections land. Overridable so a fork can point at its own board
 # without editing this file.
 FEEDBACK_BOARD_ID="${FEEDBACK_BOARD_ID:-5500}"
-FEEDBACK_BOARD_SECTION="${FEEDBACK_BOARD_SECTION:-Inbox}"
+FEEDBACK_BOARD_SECTION="${FEEDBACK_BOARD_SECTION:-Backlog}"
 FEEDBACK_BOARD_URL="${FEEDBACK_BOARD_URL:-https://app.hypertask.ai/detail/project-5500}"
 
 usage() { sed -n '2,76p' "$SELF" | sed 's/^# \{0,1\}//'; }
@@ -140,7 +140,7 @@ feedback_usage() {
   cat <<EOF
 agent-template feedback --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>" [options]
 
-Files feedback in the Agent Template Inbox as the agent's own bot identity.
+Files feedback in the Agent Template Backlog as the agent's own bot identity.
 Board: $FEEDBACK_BOARD_URL
 
 Example:
@@ -1934,7 +1934,10 @@ repeated: $REPEATED"
     TITLE="$(cat "$BODY_FILE.title")"
   else
     WRITER_RC=$?
-    [ "$WRITER_RC" -eq 1 ] || exit "$WRITER_RC"
+    if [ "$WRITER_RC" -ne 1 ]; then
+      printf 'ERROR: Task Writer rewrite was refused: %s\n' "$TASK_WRITER_REFUSAL_REASON" >&2
+      exit "$WRITER_RC"
+    fi
   fi
 fi
 
@@ -2034,6 +2037,19 @@ if [ "$ADAPTER" != "hypertask" ] || [ -z "$BOARD_CLI" ] || [ ! -x "$BOARD_CLI" ]
   append_proposed_case "$FEEDBACK_BOARD_URL (not filed: no board CLI)"
   exit 0
 fi
+
+if ! BOARD_PROJECT_OUT="$("$BOARD_CLI" --json project show "$FEEDBACK_BOARD_ID" 2>&1)"; then
+  die "could not read feedback board $FEEDBACK_BOARD_ID" "check the bot wrapper can read the project"
+fi
+if ! SECTION_RESULT="$(board_section_or_first "$BOARD_PROJECT_OUT" "$FEEDBACK_BOARD_SECTION")"; then
+  die "feedback board $FEEDBACK_BOARD_ID has no sections" "add an intake section and retry"
+fi
+RESOLVED_SECTION="$(printf '%s\n' "$SECTION_RESULT" | sed -n '1p')"
+SECTION_MATCH="$(printf '%s\n' "$SECTION_RESULT" | sed -n '2p')"
+if [ "$SECTION_MATCH" = fallback ]; then
+  warn "feedback board section \"$FEEDBACK_BOARD_SECTION\" was not found; using first section \"$RESOLVED_SECTION\"."
+fi
+FEEDBACK_BOARD_SECTION="$RESOLVED_SECTION"
 
 # The real board CLI (`hypertask task create`, checked against its own
 # `capabilities --json` catalog) has no --description-file option, only
