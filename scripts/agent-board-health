@@ -1,0 +1,459 @@
+#!/usr/bin/env python3
+"""Publish daily reply-contract totals and new board pile-up alarms."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import html
+import json
+import os
+import re
+import shlex
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any
+
+STALE_SECTIONS = {"ai review", "qa", "ht manager review", "inbox"}
+COLUMN_LIMIT = 8
+STALE_SECONDS = 24 * 60 * 60
+PR_SECONDS = 2 * 60 * 60
+
+
+def now_utc(value: str | None) -> dt.datetime:
+    if not value:
+        return dt.datetime.now(dt.timezone.utc)
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def iso(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parsed_time(value: Any) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        return now_utc(str(value))
+    except ValueError:
+        return None
+
+
+def read_json(path: Path, fallback: Any) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return fallback
+
+
+def atomic_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def json_document(raw: str) -> dict[str, Any]:
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        row = json.loads(raw[start:end + 1])
+    except ValueError:
+        return {}
+    return row if isinstance(row, dict) else {}
+
+
+class Health:
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.args = args
+        self.now = now_utc(args.now)
+        self.state_dir = Path(args.state_dir)
+        self.path = self.state_dir / "board-health.json"
+        self.state = read_json(self.path, {})
+        if not isinstance(self.state, dict):
+            self.state = {}
+        self.state.setdefault("boards", {})
+        self.state.setdefault("active_alarms", {})
+        self.state.setdefault("miss_bugs", {})
+        self.token = Path(args.token_file).read_text(encoding="utf-8").strip()
+        self.api_base = os.environ.get("BOARD_API_URL", "https://app.hypertask.ai/api").rstrip("/")
+
+    def command(self, argv: list[str], *, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        combined = os.environ.copy()
+        if env:
+            combined.update(env)
+        return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=30, env=combined)
+
+    def get(self, path: str) -> dict[str, Any]:
+        result = self.command([
+            "curl", "-sS", "-w", "\n%{http_code}",
+            "-H", f"Authorization: Bearer {self.token}", self.api_base + path,
+        ])
+        if result.returncode != 0 or "\n" not in result.stdout:
+            raise RuntimeError(f"board read failed for {path}")
+        body, status = result.stdout.rsplit("\n", 1)
+        if status != "200":
+            raise RuntimeError(f"board read returned HTTP {status} for {path}")
+        value = json.loads(body)
+        return value if isinstance(value, dict) else {}
+
+    def board_command(self, *argv: str, verbatim: bool = False) -> subprocess.CompletedProcess[str]:
+        env = {"AGENT_COMMENT_VERBATIM": "yes"} if verbatim else None
+        return self.command([self.args.board_cli, *argv], env=env)
+
+    def project(self, board: str) -> dict[str, Any]:
+        result = self.board_command("--json", "project", "show", board)
+        if result.returncode != 0:
+            raise RuntimeError(f"project {board} could not be read")
+        doc = json_document(result.stdout)
+        project = doc.get("project")
+        return project if isinstance(project, dict) else doc
+
+    @staticmethod
+    def task_ref(task: dict[str, Any]) -> str:
+        return str(task.get("ticketNumber") or task.get("ref") or "")
+
+    @staticmethod
+    def task_url(board: str, task: dict[str, Any]) -> str:
+        ref = Health.task_ref(task)
+        index = ref.rsplit("-", 1)[-1] if "-" in ref else str(task.get("uniqueIndex") or task.get("id") or "")
+        return f"https://app.hypertask.ai/detail/project-{board}/{index}"
+
+    def create_task(self, board: str, section: str, title: str, description: str,
+                    labels: str = "") -> dict[str, Any]:
+        argv = ["task", "create", "--project", board, "--section", section,
+                "--title", title, "--description", description]
+        if labels:
+            argv += ["--labels", labels]
+        argv.append("--json")
+        result = self.board_command(*argv)
+        if result.returncode != 0:
+            raise RuntimeError(f"ticket creation failed on board {board}: {result.stderr.strip()[:200]}")
+        doc = json_document(result.stdout)
+        task = doc.get("task")
+        return task if isinstance(task, dict) else doc
+
+    @staticmethod
+    def intake_section(project: dict[str, Any]) -> str:
+        def name(value: Any) -> str:
+            if isinstance(value, dict):
+                return str(value.get("section_title") or value.get("title") or value.get("name") or value.get("id") or "")
+            return str(value or "")
+        sections = [name(item) for item in project.get("sections") or []]
+        for wanted in ("triage", "inbox", "intake"):
+            for section in sections:
+                if section.casefold() == wanted:
+                    return section
+        for key in ("intakeSection", "intake_section", "defaultSection", "default_section"):
+            if name(project.get(key)):
+                return name(project.get(key))
+        defaults = project.get("defaultSections") or project.get("default_sections") or []
+        if defaults:
+            return name(defaults[0])
+        if sections:
+            return sections[0]
+        raise RuntimeError("board has no intake section")
+
+    def standing_ticket(self, board: str, tasks: list[dict[str, Any]], project: dict[str, Any]) -> tuple[str, str]:
+        saved = self.state["boards"].get(board, {})
+        if saved.get("ref") and saved.get("url"):
+            return str(saved["ref"]), str(saved["url"])
+        task = next((row for row in tasks if str(row.get("title") or "").strip().casefold() == "board health"), None)
+        if task is None:
+            task = self.create_task(
+                board, self.intake_section(project), "Board health",
+                "<p>Standing ticket for the daily reply contract and new board pile-up alarms.</p>",
+            )
+        ref = self.task_ref(task)
+        if not ref:
+            raise RuntimeError("Board health ticket creation returned no ticket reference")
+        url = self.task_url(board, task)
+        self.state["boards"][board] = {"ref": ref, "url": url}
+        atomic_json(self.path, self.state)
+        return ref, url
+
+    def reply_rows(self, board: str) -> list[dict[str, Any]]:
+        cutoff = self.now - dt.timedelta(hours=24)
+        rows = []
+        for path in self.state_dir.glob("*.reply-contract.json"):
+            doc = read_json(path, {})
+            agent = str(doc.get("agent") or path.name.removesuffix(".reply-contract.json"))
+            for item in doc.get("interactions") or []:
+                received = parsed_time(item.get("received"))
+                if str(item.get("board") or "") != board or not received or not cutoff <= received <= self.now:
+                    continue
+                row = dict(item)
+                row["agent"] = agent
+                rows.append(row)
+        return rows
+
+    def reply_report(self, board: str, section: str) -> tuple[str, list[dict[str, Any]]]:
+        rows = self.reply_rows(board)
+        acked = answered = estimated = 0
+        misses = []
+        for row in rows:
+            received = parsed_time(row.get("received"))
+            acknowledgement = parsed_time(row.get("acknowledged"))
+            answer = parsed_time(row.get("answered"))
+            due = parsed_time(row.get("estimate_due"))
+            ack_ok = bool(received and acknowledgement and (acknowledgement - received).total_seconds() <= self.args.tick_seconds)
+            answer_ok = answer is not None
+            estimate_ok = bool(answer and due and answer <= due)
+            acked += int(ack_ok)
+            answered += int(answer_ok)
+            estimated += int(estimate_ok)
+            age = (self.now - received).total_seconds() if received else 0
+            ack_miss = age > self.args.tick_seconds and not ack_ok
+            answer_miss = bool(due and self.now > due and not answer)
+            estimate_miss = bool(answer and due and answer > due)
+            if ack_miss or answer_miss or estimate_miss:
+                misses.append(row)
+        summary = (
+            f"Mentions or questions: {len(rows)}. Acked within one tick: {acked}. "
+            f"Answered: {answered}. Within estimate: {estimated}."
+        )
+        for miss in misses:
+            event_id = str(miss.get("id") or "")
+            bug_key = f"{board}:{event_id}"
+            if not event_id or bug_key in self.state["miss_bugs"]:
+                continue
+            url = str(miss.get("url") or "")
+            ticket = str(miss.get("ticket") or event_id)
+            agent = str(miss.get("agent") or "unknown agent")
+            escaped = html.escape(url, quote=True)
+            description = (
+                f'<p><strong>Reply contract miss for {html.escape(agent)} on '
+                f'<a href="{escaped}">{html.escape(ticket)}</a>.</strong></p>'
+                "<p>Check acknowledgement, answer, and estimate timestamps in the agent reply ledger.</p>"
+            )
+            bug = self.create_task(board, section, f"Reply contract miss: {agent} {ticket}", description, "Bug")
+            self.state["miss_bugs"][bug_key] = {
+                "ref": self.task_ref(bug), "created_at": iso(self.now),
+            }
+            atomic_json(self.path, self.state)
+        return summary, misses
+
+    @staticmethod
+    def task_age(task: dict[str, Any], now: dt.datetime) -> float:
+        for key in ("sectionEnteredAt", "section_entered_at", "sectionChangedAt",
+                    "sectionUpdatedAt", "movedAt", "updatedAt", "createdAt"):
+            when = parsed_time(task.get(key))
+            if when:
+                return (now - when).total_seconds()
+        return 0
+
+    def board_alarms(self, board: str, tasks: list[dict[str, Any]]) -> dict[str, str]:
+        active: dict[str, str] = {}
+        columns: dict[str, int] = {}
+        for task in tasks:
+            section = str(task.get("section") or "Unknown")
+            columns[section] = columns.get(section, 0) + 1
+            if section.casefold() in STALE_SECTIONS and self.task_age(task, self.now) > STALE_SECONDS:
+                ref = self.task_ref(task)
+                url = self.task_url(board, task)
+                active[f"board:{board}:stale:{ref}:{section.casefold()}"] = (
+                    f'<a href="{html.escape(url, quote=True)}">{html.escape(ref)}</a> in {html.escape(section)} over 24 hours.'
+                )
+        for section, count in columns.items():
+            if count > COLUMN_LIMIT:
+                active[f"board:{board}:column:{section.casefold()}"] = (
+                    f"{html.escape(section)} has {count} tickets, over {COLUMN_LIMIT}."
+                )
+        return active
+
+    def repositories(self) -> list[str]:
+        repos = []
+        path = Path(self.args.repos_allow)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return repos
+        for raw in lines:
+            if not raw.strip() or raw.lstrip().startswith("#"):
+                continue
+            fields = [field.strip() for field in raw.split(",")]
+            repo = fields[2] if len(fields) > 2 else ""
+            checkout = fields[1] if len(fields) > 1 else ""
+            if not repo and checkout:
+                result = self.command(["git", "-C", checkout, "remote", "get-url", "origin"])
+                if result.returncode == 0:
+                    match = re.search(r"(?:github\.com[:/])([^/]+/[^/]+?)(?:\.git)?$", result.stdout.strip())
+                    repo = match.group(1) if match else ""
+            if re.fullmatch(r"[^/\s]+/[^/\s]+", repo) and repo not in repos:
+                repos.append(repo)
+        return repos
+
+    def pr_alarms(self) -> dict[str, str]:
+        active: dict[str, str] = {}
+        for repo in self.repositories():
+            result = self.command([
+                "gh", "pr", "list", "--repo", repo, "--state", "open", "--limit", "100",
+                "--json", "number,url,statusCheckRollup",
+            ])
+            if result.returncode != 0:
+                continue
+            try:
+                pulls = json.loads(result.stdout)
+            except ValueError:
+                continue
+            for pull in pulls if isinstance(pulls, list) else []:
+                checks = pull.get("statusCheckRollup") or []
+                if not checks:
+                    continue
+                completed = [parsed_time(check.get("completedAt") or check.get("startedAt")) for check in checks]
+                completed = [value for value in completed if value]
+                pending = any(str(check.get("status") or "").upper() not in ("", "COMPLETED") for check in checks)
+                if pending or not completed or (self.now - max(completed)).total_seconds() <= PR_SECONDS:
+                    continue
+                conclusions = {str(check.get("conclusion") or check.get("state") or "").upper() for check in checks}
+                red = bool(conclusions - {"SUCCESS", "NEUTRAL", "SKIPPED", ""})
+                state = "red" if red else "green"
+                number = str(pull.get("number") or "")
+                url = str(pull.get("url") or f"https://github.com/{repo}/pull/{number}")
+                active[f"pr:{repo}:{number}:{state}"] = (
+                    f'<a href="{html.escape(url, quote=True)}">{html.escape(repo)}#{html.escape(number)}</a> {state} over two hours.'
+                )
+        return active
+
+    @staticmethod
+    def conf_value(path: Path, wanted: str) -> str:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return ""
+        for line in lines:
+            match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line)
+            if not match or match.group(1) != wanted:
+                continue
+            try:
+                values = shlex.split(match.group(2), posix=True)
+            except ValueError:
+                return ""
+            return values[0] if values else ""
+        return ""
+
+    def runner_alarms(self) -> dict[str, str]:
+        active: dict[str, str] = {}
+        for status_path in self.state_dir.glob("*.status"):
+            row = read_json(status_path, {})
+            if row.get("state") != "failed":
+                continue
+            slug = str(row.get("agent") or status_path.stem)
+            stamp = str(row.get("at") or "unknown")
+            fingerprint = hashlib.sha256((stamp + str(row.get("detail") or "")).encode()).hexdigest()[:12]
+            active[f"runner:{slug}:error:{fingerprint}"] = f"Runner {html.escape(slug)} error at {html.escape(stamp)}."
+        config_dir = Path(self.args.config_dir)
+        for conf in config_dir.glob("*.conf"):
+            if self.conf_value(conf, "BOARD_ADAPTER") == "":
+                continue
+            slug = self.conf_value(conf, "AGENT_SLUG") or conf.stem
+            result = self.command(["systemctl", "--user", "is-active", f"agent-board-poll@{slug}.timer"])
+            if result.returncode != 0 or result.stdout.strip() != "active":
+                active[f"timer:{slug}:down"] = f"Timer for {html.escape(slug)} is down."
+        return active
+
+    def health_line(self) -> str:
+        row = read_json(Path(self.args.health_file), {})
+        score = row.get("score") if isinstance(row, dict) else None
+        if score is None and isinstance(row, dict):
+            score = row.get("health_score")
+        shown = html.escape(str(score)) if score is not None else "unavailable"
+        return f"Decision: Supervisor health score: {shown}."
+
+    @staticmethod
+    def owner_mention(project: dict[str, Any]) -> str:
+        owner = project.get("owner") if isinstance(project.get("owner"), dict) else {}
+        owner_id = str(project.get("ownerId") or owner.get("id") or "")
+        owner_name = str(owner.get("displayName") or owner.get("name") or "board owner")
+        if not owner_id:
+            return "the board owner"
+        return (
+            f'<span data-type="mention" class="mention" data-id="{html.escape(owner_name, quote=True)}" '
+            f'data-label="name-{html.escape(owner_id, quote=True)}">{html.escape(owner_name)}</span>'
+        )
+
+    def run(self) -> int:
+        all_active = self.pr_alarms() | self.runner_alarms()
+        today = self.now.date().isoformat()
+        for board in [item.strip() for item in self.args.boards.split(",") if item.strip()]:
+            task_doc = self.get(f"/mcp/tasks?project_id={board}&limit=100")
+            tasks = [row for row in task_doc.get("tasks") or [] if isinstance(row, dict)]
+            project = self.project(board)
+            health_ref, _ = self.standing_ticket(board, tasks, project)
+            active = self.board_alarms(board, tasks) | all_active
+            prior = self.state["active_alarms"].get(board, {})
+            new_keys = [key for key in active if key not in prior]
+            self.state["active_alarms"][board] = active
+            board_state = self.state["boards"].setdefault(board, {})
+            daily_due = board_state.get("last_reply_report") != today
+            summary = ""
+            misses: list[dict[str, Any]] = []
+            if daily_due:
+                summary, misses = self.reply_report(board, self.intake_section(project))
+                board_state["last_reply_report"] = today
+            if not daily_due and not new_keys:
+                continue
+            blocks = [f"<p><strong>{self.health_line()}</strong></p>"]
+            if daily_due:
+                blocks.append(f"<p>Reply contract: {html.escape(summary)}</p>")
+                if misses:
+                    links = []
+                    for miss in misses:
+                        url = html.escape(str(miss.get("url") or ""), quote=True)
+                        label = html.escape(str(miss.get("ticket") or miss.get("id") or "miss"))
+                        links.append(f'<a href="{url}">{label}</a>')
+                    blocks.append("<p>Misses: " + ", ".join(links) + ". One Bug ticket was filed for each new miss.</p>")
+            if new_keys:
+                alarm_text = " ".join(active[key] for key in new_keys)
+                mention = ""
+                last_mention = parsed_time(board_state.get("owner_mentioned_at"))
+                if not last_mention or (self.now - last_mention).total_seconds() >= 24 * 60 * 60:
+                    mention = " " + self.owner_mention(project)
+                    board_state["owner_mentioned_at"] = iso(self.now)
+                blocks.append(f"<p>New pile-up: {alarm_text}{mention}</p>")
+            blocks.append("<p>Next: Clear the listed misses and pile-ups.</p>")
+            result = self.board_command("comment", "add", health_ref, "--text", "\n".join(blocks), verbatim=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"Board health comment failed on {health_ref}: {result.stderr.strip()[:200]}")
+        self.state["updated_at"] = iso(self.now)
+        atomic_json(self.path, self.state)
+        return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("tick", nargs="?")
+    parser.add_argument("--state-dir", required=True)
+    parser.add_argument("--boards", required=True)
+    parser.add_argument("--token-file", required=True)
+    parser.add_argument("--board-cli", required=True)
+    parser.add_argument("--repos-allow", required=True)
+    parser.add_argument("--config-dir", required=True)
+    parser.add_argument("--health-file", default=str(Path.home() / ".local/state/ht-supervisor/health.json"))
+    parser.add_argument("--tick-seconds", type=int, default=60)
+    parser.add_argument("--now")
+    args = parser.parse_args()
+    try:
+        return Health(args).run()
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f"ERROR: board health failed: {error}. Do this next: inspect the supervisor and board CLI logs", file=os.sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

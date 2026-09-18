@@ -1034,16 +1034,22 @@ if [ "${SUBCOMMAND:-feedback}" = "instruct" ]; then
   instruction_file="$instruction_dir/$instruction_id.json"
   INSTRUCTION_ID="$instruction_id" INSTRUCTION_TEXT="$instruction" TICKET="$ticket" \
   CREATED="$(date -Is)" python3 - "$instruction_file" <<'PYEOF'
+import datetime
 import json
 import os
+import re
 import sys
 
 path = sys.argv[1]
 temporary = path + ".new"
+created = datetime.datetime.fromisoformat(os.environ["CREATED"].replace("Z", "+00:00"))
+urgent = bool(re.search(r"\burgent\b", os.environ["INSTRUCTION_TEXT"], re.I))
+due = created + datetime.timedelta(hours=1 if urgent else 4)
 with open(temporary, "w", encoding="utf-8") as handle:
     json.dump({"id": os.environ["INSTRUCTION_ID"], "source": "advisor",
                "instruction": os.environ["INSTRUCTION_TEXT"],
                "ticket": os.environ["TICKET"], "created": os.environ["CREATED"],
+               "due": due.isoformat(), "priority": "urgent" if urgent else "",
                "status": "queued"}, handle)
     handle.write("\n")
 os.chmod(temporary, 0o600)

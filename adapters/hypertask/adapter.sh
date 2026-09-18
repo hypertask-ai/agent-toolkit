@@ -104,7 +104,15 @@ _ht_run_post() {
 # Prints the app run id, or "local" when registration is unavailable.
 adapter_run_open() {
   local token_file="$1" task_id="$2" log_file="$3" graft="$4" payload reply status body run_id
-  payload="$(TASK_ID="$task_id" GRAFT="$graft" python3 -c 'import json,os; value=os.environ["TASK_ID"]; print(json.dumps({"taskId": int(value) if value.isdigit() else value, "source": "runtime", "graft": os.environ["GRAFT"]}))')"
+  payload="$(TASK_ID="$task_id" GRAFT="$graft" python3 -c '
+import json, os
+value = os.environ["TASK_ID"]
+row = {"taskId": int(value) if value.isdigit() else value, "source": "runtime", "graft": os.environ["GRAFT"]}
+for env, key in (("AGENT_RUN_AGENT", "agent"), ("AGENT_RUN_MODEL", "model"),
+                 ("AGENT_RUN_STARTED_AT", "startedAt"), ("AGENT_RUN_LOG_LINK", "logUrl")):
+    if os.environ.get(env):
+        row[key] = os.environ[env]
+print(json.dumps(row))')"
   reply="$(_ht_run_post "$token_file" '/mcp/agents/runs' "$payload")"
   status="${reply%%$'\n'*}"
   body="${reply#*$'\n'}"
@@ -136,14 +144,30 @@ _outbound_gate_note() {
 # adapter_run_activity <token-file> <run-id> <run-log> <type> <message>
 adapter_run_activity() {
   local token_file="$1" run_id="$2" log_file="$3" type="$4" message="$5" payload reply status
-  local TEXT="$message" RUN_LOG="$log_file"
+  local TEXT="$message" RUN_LOG="$log_file" now started duration
   if [ "$type" = "response" ]; then
     _outbound_text_gate "$message" || return 0
     message="$TEXT"
   fi
-  _adapter_run_log "$log_file" "$type $message"
+  now="$(date +%s)"
+  started="${AGENT_RUN_STARTED_EPOCH:-$now}"
+  [[ "$started" =~ ^[0-9]+$ ]] || started="$now"
+  duration=$((now - started)); [ "$duration" -ge 0 ] || duration=0
+  _adapter_run_log "$log_file" "$type $message agent=${AGENT_RUN_AGENT:-unknown} model=${AGENT_RUN_MODEL:-unknown} started=${AGENT_RUN_STARTED_AT:-unknown} duration=${duration}s outcome=${AGENT_RUN_OUTCOME:-running} log=${AGENT_RUN_LOG_LINK:-unavailable}"
   [ -n "$run_id" ] && [ "$run_id" != "local" ] || return 0
-  payload="$(ACTIVITY_TYPE="$type" MESSAGE="$message" python3 -c 'import json,os; print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"]}))')"
+  payload="$(ACTIVITY_TYPE="$type" MESSAGE="$message" NOW="$(date +%s)" python3 -c '
+import json, os
+try:
+    duration = max(0, int(os.environ["NOW"]) - int(os.environ.get("AGENT_RUN_STARTED_EPOCH") or os.environ["NOW"]))
+except ValueError:
+    duration = 0
+print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"],
+                  "agent": os.environ.get("AGENT_RUN_AGENT", "unknown"),
+                  "model": os.environ.get("AGENT_RUN_MODEL", "unknown"),
+                  "startedAt": os.environ.get("AGENT_RUN_STARTED_AT", ""),
+                  "durationSeconds": duration,
+                  "outcome": os.environ.get("AGENT_RUN_OUTCOME", "running"),
+                  "logUrl": os.environ.get("AGENT_RUN_LOG_LINK", "")}))')"
   reply="$(_ht_run_post "$token_file" "/mcp/agents/runs/$run_id/activities" "$payload")"
   status="${reply%%$'\n'*}"
   [[ "$status" = 2* ]] || _adapter_run_log "$log_file" "activity delivery failed (HTTP $status); kept locally: $message"
@@ -155,7 +179,18 @@ adapter_run_stop() {
   local token_file="$1" run_id="$2" log_file="$3" run_status="$4" payload reply status
   _adapter_run_log "$log_file" "closed run ${run_id:-local} with status $run_status"
   [ -n "$run_id" ] && [ "$run_id" != "local" ] || return 0
-  payload="$(RUN_STATUS="$run_status" python3 -c 'import json,os; print(json.dumps({"status": os.environ["RUN_STATUS"]}))')"
+  payload="$(RUN_STATUS="$run_status" NOW="$(date +%s)" python3 -c '
+import json, os
+try:
+    duration = max(0, int(os.environ["NOW"]) - int(os.environ.get("AGENT_RUN_STARTED_EPOCH") or os.environ["NOW"]))
+except ValueError:
+    duration = 0
+print(json.dumps({"status": os.environ["RUN_STATUS"], "outcome": os.environ["RUN_STATUS"],
+                  "agent": os.environ.get("AGENT_RUN_AGENT", "unknown"),
+                  "model": os.environ.get("AGENT_RUN_MODEL", "unknown"),
+                  "startedAt": os.environ.get("AGENT_RUN_STARTED_AT", ""),
+                  "durationSeconds": duration,
+                  "logUrl": os.environ.get("AGENT_RUN_LOG_LINK", "")}))')"
   reply="$(_ht_run_post "$token_file" "/mcp/agents/runs/$run_id/stop" "$payload")"
   status="${reply%%$'\n'*}"
   [[ "$status" = 2* ]] || _adapter_run_log "$log_file" "run close failed (HTTP $status); local close remains authoritative"
@@ -318,15 +353,35 @@ print(project.get("ownerId") or (project.get("owner") or {}).get("id") or "")
 }
 
 _run_activity() {
-  local type="\$1" message="\$2" payload status TEXT="\$2"
+  local type="\$1" message="\$2" payload status TEXT="\$2" now started duration
   if [ "\$type" = "response" ]; then
     _outbound_text_gate "\$message" || return 0
     message="\$TEXT"
   fi
   mkdir -p "\$(dirname "\$RUN_LOG")" 2>/dev/null || true
-  printf '%s run-activity: %s %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$type" "\$message" >> "\$RUN_LOG" 2>/dev/null || true
+  now="\$(date +%s)"
+  started="\${AGENT_RUN_STARTED_EPOCH:-\$now}"
+  [[ "\$started" =~ ^[0-9]+$ ]] || started="\$now"
+  duration=\$((now - started)); [ "\$duration" -ge 0 ] || duration=0
+  printf '%s run-activity: %s %s agent=%s model=%s started=%s duration=%ss outcome=%s log=%s\n' \
+    "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$type" "\$message" \
+    "\${AGENT_RUN_AGENT:-unknown}" "\${AGENT_RUN_MODEL:-unknown}" \
+    "\${AGENT_RUN_STARTED_AT:-unknown}" "\$duration" "\${AGENT_RUN_OUTCOME:-running}" \
+    "\${AGENT_RUN_LOG_LINK:-unavailable}" >> "\$RUN_LOG" 2>/dev/null || true
   [ -n "\${AGENT_RUN_ID:-}" ] && [ "\$AGENT_RUN_ID" != "local" ] && [ -n "\${AGENT_RUN_API_BASE:-}" ] || return 0
-  payload="\$(ACTIVITY_TYPE="\$type" MESSAGE="\$message" python3 -c 'import json,os; print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"]}))')"
+  payload="\$(ACTIVITY_TYPE="\$type" MESSAGE="\$message" NOW="\$(date +%s)" python3 -c '
+import json, os
+try:
+    duration = max(0, int(os.environ["NOW"]) - int(os.environ.get("AGENT_RUN_STARTED_EPOCH") or os.environ["NOW"]))
+except ValueError:
+    duration = 0
+print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"],
+                  "agent": os.environ.get("AGENT_RUN_AGENT", "unknown"),
+                  "model": os.environ.get("AGENT_RUN_MODEL", "unknown"),
+                  "startedAt": os.environ.get("AGENT_RUN_STARTED_AT", ""),
+                  "durationSeconds": duration,
+                  "outcome": os.environ.get("AGENT_RUN_OUTCOME", "running"),
+                  "logUrl": os.environ.get("AGENT_RUN_LOG_LINK", "")}))')"
   status="\$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer \$TOKEN" -H 'Content-Type: application/json' \
     --data "\$payload" "\$AGENT_RUN_API_BASE/mcp/agents/runs/\$AGENT_RUN_ID/activities" 2>/dev/null || printf 000)"

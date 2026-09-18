@@ -22,7 +22,7 @@ if [ "${1:-} ${2:-}" = "task create" ]; then
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --title|--description|--section|--project|--labels)
+      --title|--description|--section|--project|--labels|--due|--priority)
         printf '%s' "$2" > "$BOARD_FIXTURE/${1#--}"
         shift 2 ;;
       --json) shift ;;

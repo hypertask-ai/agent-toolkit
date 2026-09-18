@@ -72,6 +72,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `FLEET_STALL_TICKET` | Toolkit ticket for stalls with no runner ticket, default `AGTE-37`. |
 | `FLEET_TELEGRAM_NOTIFIER` | Existing notifier command that accepts the one-line alert as its final argument. Empty uses the established Telegram environment transport. |
 | `FLEET_TELEGRAM_ENV` | Shell environment file for that transport, default `~/.config/hypertask-env.sh`. |
+| `SUPERVISOR_HEALTH_FILE` | Supervisor score JSON shown first in Board health comments, default `~/.local/state/ht-supervisor/health.json`. |
 
 On this maintainer host, set `ANSWERER_FALLBACK="product-bot"` in the agent confs so Product Bot handles owner questions only when the first three answerer ranks do not apply. This is host configuration, not a runner default.
 

@@ -309,7 +309,8 @@ done
 # policy directory from upgrades as well as omitting it from fresh installs.
 rm -rf "$DEST/core"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
-          "$DEST/scripts/agent-board-poll-tick" "$DEST/scripts/agent-progress" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-kick" \
+          "$DEST/scripts/agent-board-poll-tick" "$DEST/scripts/agent-progress" "$DEST/scripts/agent-reply-contract" \
+          "$DEST/scripts/agent-board-health" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-kick" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-feedback" \
           "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/agent-rules" "$DEST/scripts/triage.sh" \

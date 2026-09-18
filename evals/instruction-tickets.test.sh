@@ -37,7 +37,7 @@ if [ "${1:-} ${2:-}" = "task create" ]; then
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --project|--section|--title|--description)
+      --project|--section|--title|--description|--due|--priority)
         key="${1#--}"
         printf '%s' "$2" > "$BOARD_FIXTURE/$key"
         shift 2 ;;
@@ -88,16 +88,27 @@ created="$(run_template instruct product-bot "$instruction" \
   --ticket https://app.hypertask.ai/detail/project-15/9)"
 marker="$(find "$STATE_DIR/agent-template/instruction-tickets" -name '*.json' -print -quit)"
 queued="$(find "$STATE_DIR/agent-board-poll/product-bot-instructions" -name '*.json' -print -quit 2>/dev/null || true)"
+due_default_ok="$(python3 -c 'import datetime,sys; value=datetime.datetime.fromisoformat(open(sys.argv[1]).read().replace("Z", "+00:00")); now=datetime.datetime.now(value.tzinfo); print("yes" if datetime.timedelta(hours=3, minutes=55) < value-now < datetime.timedelta(hours=4, minutes=5) else "no")' "$BOARD_FIXTURE/due")"
 if [ "$created" = 'instruction filed: AGTE-1 https://app.hypertask.ai/detail/project-5500/1' ] \
    && [ -z "$queued" ] && [ -f "$marker" ] \
    && [ "$(cat "$BOARD_FIXTURE/section")" = Triage ] \
    && [ "$(cat "$BOARD_FIXTURE/assigned")" = AGTE-1 ] \
    && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ticket_id"])' "$marker")" = task-1 ] \
    && [ "$(cat "$BOARD_FIXTURE/title")" = 'Review <the setup> now.' ] \
+   && [ "$due_default_ok" = yes ] \
    && grep -q '^<p><strong>Instruction</strong></p><p>Then report the pull request\.</p><p><strong>Source ticket</strong>:' "$BOARD_FIXTURE/description"; then
-  ok instruct-creates-ticket 'ticket is HTML, assigned to Product Bot, and queue transport is removed'
+  ok instruct-creates-ticket 'ticket is HTML, assigned to Product Bot, due in four hours, and queue transport is removed'
 else
   bad instruct-creates-ticket "output=$created queued=${queued:-none} calls=$(cat "$BOARD_FIXTURE/calls")"
+fi
+
+urgent_created="$(run_template instruct product-bot 'Urgent: investigate the runner now')"
+urgent_due_ok="$(python3 -c 'import datetime,sys; value=datetime.datetime.fromisoformat(open(sys.argv[1]).read().replace("Z", "+00:00")); now=datetime.datetime.now(value.tzinfo); print("yes" if datetime.timedelta(minutes=55) < value-now < datetime.timedelta(hours=1, minutes=5) else "no")' "$BOARD_FIXTURE/due")"
+if [ "$urgent_created" = 'instruction filed: AGTE-2 https://app.hypertask.ai/detail/project-5500/2' ] \
+   && [ "$(cat "$BOARD_FIXTURE/priority")" = urgent ] && [ "$urgent_due_ok" = yes ]; then
+  ok urgent-instruction-deadline 'urgent text sets Urgent priority and a one-hour due date'
+else
+  bad urgent-instruction-deadline "output=$urgent_created priority=$(cat "$BOARD_FIXTURE/priority" 2>/dev/null) due=$(cat "$BOARD_FIXTURE/due")"
 fi
 
 rm -rf "$STATE_DIR/agent-board-poll/product-bot-instructions"

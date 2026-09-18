@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Record owner questions and mentions through their reply lifecycle."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+SCHEMA_VERSION = 1
+
+
+def parse_time(value: str) -> dt.datetime:
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def iso(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def state_path(state_dir: str, slug: str) -> Path:
+    return Path(state_dir) / f"{slug}.reply-contract.json"
+
+
+def load(path: Path, slug: str) -> dict[str, Any]:
+    try:
+        row = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        row = {}
+    if not isinstance(row, dict):
+        row = {}
+    interactions = row.get("interactions")
+    if not isinstance(interactions, list):
+        interactions = []
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "agent": slug,
+        "updated_at": row.get("updated_at"),
+        "interactions": [item for item in interactions if isinstance(item, dict)],
+    }
+
+
+def save(path: Path, row: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(row, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("event", choices=("received", "acknowledged", "answered"))
+    parser.add_argument("--state-dir", required=True)
+    parser.add_argument("--slug", required=True)
+    parser.add_argument("--event-id", required=True)
+    parser.add_argument("--at", required=True)
+    parser.add_argument("--board", default="")
+    parser.add_argument("--ticket", default="")
+    parser.add_argument("--url", default="")
+    parser.add_argument("--kind", choices=("mention", "question"), default="question")
+    parser.add_argument("--estimate-minutes", type=int, default=30)
+    args = parser.parse_args()
+
+    at = iso(parse_time(args.at))
+    path = state_path(args.state_dir, args.slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(path) + ".lock", "a+", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = load(path, args.slug)
+        interaction = next(
+            (item for item in state["interactions"] if item.get("id") == args.event_id), None
+        )
+        if interaction is None:
+            interaction = {
+                "id": args.event_id,
+                "board": args.board,
+                "ticket": args.ticket,
+                "url": args.url,
+                "kind": args.kind,
+                "received": None,
+                "acknowledged": None,
+                "answered": None,
+                "estimate_given": None,
+                "estimate_due": None,
+            }
+            state["interactions"].append(interaction)
+        if args.event == "received":
+            interaction["received"] = interaction.get("received") or at
+            for key, value in (
+                ("board", args.board), ("ticket", args.ticket),
+                ("url", args.url), ("kind", args.kind),
+            ):
+                if value:
+                    interaction[key] = value
+        elif args.event == "acknowledged":
+            interaction["acknowledged"] = interaction.get("acknowledged") or at
+            interaction["estimate_given"] = interaction.get("estimate_given") or at
+            if not interaction.get("estimate_due"):
+                interaction["estimate_due"] = iso(
+                    parse_time(at) + dt.timedelta(minutes=max(1, args.estimate_minutes))
+                )
+        else:
+            interaction["answered"] = interaction.get("answered") or at
+        state["interactions"] = sorted(
+            state["interactions"][-1000:], key=lambda item: str(item.get("received") or "")
+        )
+        state["updated_at"] = at
+        save(path, state)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

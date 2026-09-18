@@ -250,8 +250,10 @@ last publish result, or read `~/.local/state/agent-chat/<slug>.log` for errors.
 
 The page's separate top word uses the durable `Agent.heartbeatAt`, which the
 runtime-heartbeat app route does not currently update. Recent comments and evidence still appear. Poll runs register against their
-ticket and stream progress to activity cards. Hosts remain compatible while
-the route rolls out because HTTP 404 uses local-only run logging.
+ticket and stream progress to activity cards. Every activity carries the agent,
+model, start time, elapsed duration, current outcome, and run-log link. Hosts
+remain compatible while the route rolls out because HTTP 404 uses local-only
+run logging.
 
 ## Where the agent runs
 
@@ -395,6 +397,20 @@ Product Bot reads every version-1 snapshot on its own tick. The oldest active
 `stall` object exposes `stalled_since` and one line of `reason` directly to
 analytics. The complete field contract and the four thresholds are in
 `MAINTAINER.md` under “Fleet progress contract”.
+
+Every owner question or direct mention assigned to an agent also lives in
+`<slug>.reply-contract.json`. Its lifecycle records when it was received,
+acknowledged, answered, and when an answer estimate was given and due. Product
+Bot publishes one daily `Reply contract` result on each board's standing
+`Board health` ticket and files one Bug ticket per new miss.
+
+The same health pass posts only new pile-ups on that standing ticket. It flags
+columns over eight tickets, tickets over 24 hours in Inbox or a review lane,
+green or red allowlisted pull requests over two hours, runner errors, and down
+poll timers. A `Question:` or `Decision:` first line keeps these comments valid
+in quiet mode. The supervisor score from
+`~/.local/state/ht-supervisor/health.json` is always first, and a new pile-up
+may mention the board owner at most once in 24 hours.
 
 No work process survives the tick. The board remains the work state, while the
 progress file is read-only telemetry, so there is no queue, lock database, or
@@ -639,7 +655,9 @@ non-draft pull request whose checks are all green and always uses squash merge.
 `instruct` is the advisor session's only setup entry point. It first writes JSON
 under `<slug>-instructions/`, then uses that agent's board CLI to create an HTML
 instruction ticket on toolkit board 5500 and assign it to the agent. The ticket
-uses Triage when present and the board's intake section otherwise. Once the
+is due in four hours by default. Text containing `urgent` sets a one-hour due
+date and Urgent priority. The ticket uses Triage when present and the board's
+intake section otherwise. Once the
 ticket id is recorded under `agent-template/instruction-tickets/`, the transport
 file is removed. A board error leaves the JSON in place and returns non-zero, and
 install retries queued files without duplicating a ticket. A ticket created by

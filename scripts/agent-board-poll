@@ -102,6 +102,7 @@ esac
 FLEET_STALL_TICKET="${FLEET_STALL_TICKET:-AGTE-37}"
 FLEET_TELEGRAM_NOTIFIER="${FLEET_TELEGRAM_NOTIFIER:-}"
 FLEET_TELEGRAM_ENV="${FLEET_TELEGRAM_ENV:-$HOME/.config/hypertask-env.sh}"
+SUPERVISOR_HEALTH_FILE="${SUPERVISOR_HEALTH_FILE:-$HOME/.local/state/ht-supervisor/health.json}"
 export FLEET_TELEGRAM_NOTIFIER FLEET_TELEGRAM_ENV
 # An agent may also take tickets nobody has claimed, which is how a board column
 # becomes a queue without anyone assigning by hand. Off unless the conf says so,
@@ -378,8 +379,12 @@ TRIAGE_STATE_DIR="${TRIAGE_STATE_DIR:-$STATE_DIR/triage}"
 ADVISOR_DIR="${ADVISOR_DIR:-$STATE_DIR/advisor}"
 TRIAGE_SH="$CORE_ROOT/scripts/triage.sh"
 AGENT_PROGRESS="$CORE_ROOT/scripts/agent-progress"
-[ -x "$AGENT_PROGRESS" ] || die "runner progress writer is missing at $AGENT_PROGRESS" \
-  "reinstall the agent template before the next tick"
+REPLY_CONTRACT="$CORE_ROOT/scripts/agent-reply-contract"
+AGENT_BOARD_HEALTH="$CORE_ROOT/scripts/agent-board-health"
+for helper in "$AGENT_PROGRESS" "$REPLY_CONTRACT" "$AGENT_BOARD_HEALTH"; do
+  [ -x "$helper" ] || die "runner helper is missing at $helper" \
+    "reinstall the agent template before the next tick"
+done
 PROGRESS_WAIT_STATE=""
 PROGRESS_WAIT_SINCE=""
 PROGRESS_WAIT_TICKET=""
@@ -500,6 +505,12 @@ progress_event() {
     >> "$LOG" 2>&1 || log "progress event failed: $*"
 }
 
+reply_contract_event() {
+  [ "$DRY_RUN" = "no" ] || return 0
+  "$REPLY_CONTRACT" "$@" --state-dir "$STATE_DIR" --slug "$SLUG" \
+    >> "$LOG" 2>&1 || log "reply contract event failed: $*"
+}
+
 finish_tick() {
   local rc=$? status_fields status_ticket status_at status_reason
   local -a progress_args
@@ -544,6 +555,11 @@ PYEOF
         --manager-cli "$CORE_ROOT/scripts/agent-template" --manager-slug "$SLUG" \
         --toolkit-ticket "$FLEET_STALL_TICKET" >> "$LOG" 2>&1 \
         || log "fleet progress supervision failed"
+      "$AGENT_BOARD_HEALTH" tick --state-dir "$STATE_DIR" --boards "$BOARD_ID" \
+        --token-file "$TOKEN_FILE" --board-cli "$BOARD_CLI" \
+        --repos-allow "$CORE_ROOT/repos.allow" --config-dir "$(dirname "$CONF")" \
+        --health-file "$SUPERVISOR_HEALTH_FILE" >> "$LOG" 2>&1 \
+        || log "board health supervision failed"
     fi
   fi
   : > "$LOCK"
@@ -1667,6 +1683,14 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     fi
   fi
 
+  if [ "$is_reply_only" = "yes" ] && [ "$comment_id" != "0" ]; then
+    reply_received_at="$(CJ="$comment_json" python3 -c 'import json,os; print(json.loads(os.environ["CJ"]).get("createdAt") or "")')"
+    [ -n "$reply_received_at" ] || reply_received_at="$(date -Is)"
+    [ "$mentioned" = "yes" ] && reply_kind="mention" || reply_kind="question"
+    reply_contract_event received --event-id "$board:$comment_id" --at "$reply_received_at" \
+      --board "$board" --ticket "$ref" --url "$url" --kind "$reply_kind"
+  fi
+
   # An agent-authored comment is never a wake-up from that same agent, even
   # when an old assignment or QA state would otherwise give the ticket a rank.
   if [ "$comment_is_own" = "yes" ]; then
@@ -2172,10 +2196,45 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any 
   : > "$POSTED"
   : > "$MOVED"
   run_started_epoch="$(date +%s)"
+  run_started_at="$(date -Is)"
   record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
+  if [ "$is_reply_only" = "yes" ] && [ "$comment_id" != "0" ]; then
+    reply_contract_event acknowledged --event-id "$board:$comment_id" --at "$run_started_at" \
+      --estimate-minutes 30
+  fi
+  if [ "$is_reply_only" = "yes" ]; then
+    RUN_MODEL_RUNG="reply-codex-sol-high"
+    RUN_MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session --bare -p"
+  elif [ "$is_pr_fix" = "yes" ]; then
+    RUN_MODEL_RUNG="pr-fix"
+    RUN_MODEL_CLI="$MODEL_CLI"
+  else
+    resolve_ticket_command "$ref" "$TRIAGE_THIS" "$tries"
+  fi
+  AGENT_RUN_AGENT="$SLUG"
+  AGENT_RUN_MODEL="$(MODEL_COMMAND="$RUN_MODEL_CLI" MODEL_RUNG="$RUN_MODEL_RUNG" python3 -c '
+import os, shlex
+parts = shlex.split(os.environ["MODEL_COMMAND"])
+model = ""
+for index, part in enumerate(parts):
+    if part == "--model" and index + 1 < len(parts):
+        model = parts[index + 1]
+    elif part.startswith("--model="):
+        model = part.split("=", 1)[1]
+print(model or os.environ["MODEL_RUNG"])')"
+  AGENT_RUN_STARTED_AT="$run_started_at"
+  AGENT_RUN_STARTED_EPOCH="$run_started_epoch"
+  AGENT_RUN_OUTCOME="running"
+  AGENT_RUN_LOG_LINK="file://$LOG"
+  export AGENT_RUN_AGENT AGENT_RUN_MODEL AGENT_RUN_STARTED_AT AGENT_RUN_STARTED_EPOCH \
+    AGENT_RUN_OUTCOME AGENT_RUN_LOG_LINK
   runtime_run_id="local"
   if declare -F adapter_run_open >/dev/null 2>&1; then
     runtime_run_id="$(adapter_run_open "$TOKEN_FILE" "$task_id" "$LOG" "$GRAFT")"
+    if [ "$runtime_run_id" != "local" ]; then
+      AGENT_RUN_LOG_LINK="${RUN_LOG_BASE_URL:-https://app.hypertask.ai/agents/runs}/$runtime_run_id"
+      export AGENT_RUN_LOG_LINK
+    fi
     if [ "$is_reply_only" = "yes" ]; then
       adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "started reply-only $ref"
     else
@@ -2194,7 +2253,6 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner in any 
   fi
   run_api_base=""
   if declare -F _ht_api_base >/dev/null 2>&1; then run_api_base="$(_ht_api_base)"; fi
-  run_started_at="$(date -Is)"
   REF="$ref" TITLE="$title" BOARD="$board" STARTED_AT="$run_started_at" GRAFT="$GRAFT" python3 -c '
 import json, os
 print(json.dumps({"ticket": os.environ["REF"], "title": os.environ["TITLE"],
@@ -2355,6 +2413,8 @@ if rows:
       progress_event --event failure --ticket "$ref" --ticket-url "$url" --detail "$detail"
     fi
     write_failure_status "$ref" "$rc" "$detail"
+    AGENT_RUN_OUTCOME="failed"
+    export AGENT_RUN_OUTCOME
     if declare -F adapter_run_activity >/dev/null 2>&1; then
       adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" error "blocked $ref: model exited $rc"
       adapter_run_stop "$TOKEN_FILE" "$runtime_run_id" "$LOG" failed
@@ -2370,6 +2430,9 @@ if rows:
         "$ref" "$rc" "$LOG" "$((RETRY_LIMIT - tries - 1))" "$RETRY_LIMIT" >&2
     fi
   else
+    if [ "$is_reply_only" = "yes" ] && [ "$comment_id" != "0" ]; then
+      reply_contract_event answered --event-id "$board:$comment_id" --at "$(date -Is)"
+    fi
     printf '%s\n' "$key" >> "$SEEN"
     # Every comment this run posted on this ticket is also this agent's own
     # last word on it: record each one so the next tick's state key (built
@@ -2386,6 +2449,8 @@ if rows:
     rm -f "$STATUS"
     progress_event --event completed-run --ticket "$ref" --ticket-url "$url"
     log "run done $ref exit=0"
+    AGENT_RUN_OUTCOME="completed"
+    export AGENT_RUN_OUTCOME
     if declare -F adapter_run_activity >/dev/null 2>&1; then
       if [ "$is_pr_fix" = "yes" ]; then
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "fix pushed $ref"

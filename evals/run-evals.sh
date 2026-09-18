@@ -357,6 +357,16 @@ if [ -z "$ONLY" ] && [ -x "$HERE/task-writer.test.sh" ]; then
   echo "-- Task Writer behavioural checks --"
   bash "$HERE/task-writer.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/reply-contract.test.sh" ]; then
+  echo ""
+  echo "-- reply contract behavioural checks --"
+  bash "$HERE/reply-contract.test.sh"
+fi
+if [ -z "$ONLY" ] && [ -x "$HERE/board-health.test.sh" ]; then
+  echo ""
+  echo "-- board health behavioural checks --"
+  bash "$HERE/board-health.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/feedback-loop.test.sh" ]; then
   echo ""
   echo "-- feedback loop behavioural checks --"
