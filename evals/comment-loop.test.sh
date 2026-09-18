@@ -238,12 +238,13 @@ then
 else
   bad plain-language-prompt-contract 'the runner prompt omitted the phone reader or verbatim rules'
 fi
-if grep -qF 'exactly four allowed' "$ROOT/SKILL.md" \
-   && grep -qF 'exactly four allowed' "$ROOT/MAINTAINER.md" \
-   && grep -qF 'Ticket comments have exactly four kinds' "$ROOT/scripts/create-agent.sh"; then
-  ok comment-kind-setup-contract 'docs and setup output state the four kinds'
+if grep -qF 'exactly five allowed' "$ROOT/SKILL.md" \
+   && grep -qF 'exactly five allowed' "$ROOT/MAINTAINER.md" \
+   && grep -qF 'Ticket comments have exactly five kinds' "$ROOT/scripts/create-agent.sh" \
+   && grep -qF 'Reply-only runs default to `Answer:`' "$ROOT/project-template/AGENTS.md"; then
+  ok comment-kind-setup-contract 'docs and setup output state all five kinds and the reply default'
 else
-  bad comment-kind-setup-contract 'a required setup surface omitted the four kinds'
+  bad comment-kind-setup-contract 'a required setup surface omitted Answer or its reply-only default'
 fi
 
 # shellcheck disable=SC1090
@@ -387,13 +388,14 @@ cat > "$TMP/mechanical-comments.json" <<EOF
   {"id":53,"createdAt":"$now_iso","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p><strong>Decision: The third distinct update is ready.</strong></p><p>Next: review the third update.</p>"}
 ]}
 EOF
-HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/noise-board" comment add TEST-1 --text '<p><strong>Decision: The fourth distinct update is ready.</strong></p><p>Next: review the fourth update.</p>' >"$TMP/cap.out" 2>"$TMP/cap.err"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" AGENT_REPLY_ONLY=yes \
+  "$TMP/noise-board" comment add TEST-1 --text '<p><strong>Answer: The fourth distinct update is ready.</strong></p><p>Next: review the fourth update.</p>' >"$TMP/cap.out" 2>"$TMP/cap.err"
 if [ ! -s "$MECH_POSTS" ] \
    && grep -qF 'daily cap reached (3 agent comments on this ticket today UTC)' "$TMP/cap.err" \
    && grep -qF 'daily cap reached' "$TMP/state/agent-board-poll/noise-test.log"; then
-  ok daily-comment-cap 'a fourth agent comment in one UTC day is refused and logged'
+  ok daily-answer-comment-cap 'a reply-only Answer counts against the existing three-comment cap'
 else
-  bad daily-comment-cap "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/cap.err")"
+  bad daily-answer-comment-cap "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/cap.err")"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

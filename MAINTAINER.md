@@ -211,18 +211,19 @@ stall has no runner ticket and defaults to `AGTE-37`.
 
 ## Quiet ticket traffic
 
-Ticket comments have exactly four allowed kinds: `Question:` asks a human and
-ends with a question mark while naming what is needed; `Decision:` records a
-fact the owner must know; `Handoff:` names the receiving agent and explains
-what shipped; and `Done:` explains what shipped and includes the pull request
-link. Neither `Handoff:` nor `Done:` can be only a link. The board wrapper
-redirects anything else to run activity. `QUIET="on"` is the default and
-strips board-owner mentions from comments, logging the change. The review
+Ticket comments have exactly five allowed kinds: `Question:` asks a human and
+ends with a question mark while naming what is needed; `Answer:` replies to a
+direct owner question or mention; `Decision:` records a fact the owner must
+know; `Handoff:` names the receiving agent and explains what shipped; and
+`Done:` explains what shipped and includes the pull request link. Neither
+`Handoff:` nor `Done:` can be only a link. Outside a reply-only run, the board
+wrapper redirects anything else to run activity. `QUIET="on"` is the default
+and strips board-owner mentions from comments, logging the change. The review
 column provides attention instead. The existing one-reminder and
 three-comments-per-day limits still apply.
 
 The runner appends the pospeak, unslop, and i-have-adhd texts verbatim for all
-four comment kinds and says the product owner reads them on a phone. Paths under
+five comment kinds and says the product owner reads them on a phone. Paths under
 the company pack's `skills/talk-to-valentin/` directory are canonical; bundled
 files under `adapters/hypertask/plain-language/` fill any missing reference. The
 generated board wrapper checks the first `<p>` and bold sentence, the 80-word
@@ -234,8 +235,10 @@ sends no comment.
 Direct human questions use the fixed high-effort Codex Sol reply route instead
 of the conf provider. Its five-minute bubblewrap sandbox gets the full thread,
 shared Valentin statement record, exact terminal rules, read-only checkout and
-logs, read-only web research, image access, and writable `/tmp`, but no board token.
-The runner validates and posts the returned HTML after the sandbox exits.
+logs, read-only web research, image access, and writable `/tmp`, but no board
+token. The runner validates and posts the returned HTML after the sandbox
+exits. These reply-only runs default to `Answer:`, with a final
+`Decision needed:` question only when the owner genuinely needs to choose.
 
 At ticket-run start the adapter posts `{taskId, source: "runtime"}` to
 `/api/mcp/agents/runs`. Claimed, started, PR opened, red check, fix pushed,

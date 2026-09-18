@@ -19,6 +19,8 @@ Agent template version: $version
 Feedback command: \`$FEEDBACK_COMMAND\`
 Feedback board: $FEEDBACK_BOARD_URL
 Updates: run \`agent-template update\` to get the latest.
+Owner-question replies start with \`Answer:\`, not \`Decision:\`. Add a final
+\`Decision needed:\` question only when the owner must choose something.
 <!-- agent-template:end -->
 EOF
 }

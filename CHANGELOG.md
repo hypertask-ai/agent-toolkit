@@ -1,3 +1,13 @@
+## 3.40.0 - 2026-09-18
+
+- AGTE-20 makes reply-only owner responses start with `Answer:` instead of `Decision:`.
+- Answers use the existing comment cap and plain-language check, and may end
+  with a `Decision needed:` question only when the owner must choose.
+- Focused offline coverage checks the managed reply rule, posted marker, and
+  optional decision-question shape.
+- ACTION: run `agent-template update --keep-timers` so current agents receive
+  the fifth comment kind without changing timer state.
+
 ## 3.39.0 - 2026-09-18
 
 - AGTE-46, corrected by AGTE-47, routes direct ticket replies through fixed

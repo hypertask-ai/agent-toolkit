@@ -497,7 +497,7 @@ esac
 
 # ---------- 5. acceptance ----------
 echo
-echo "Ticket comments have exactly four kinds: Question: asks a human and ends with a question mark; Decision: states a fact the owner must know; Handoff: names the receiving agent and explains what shipped; Done: explains what shipped and includes the PR link. Handoff and Done cannot be only a link. Everything else is run activity."
+echo "Ticket comments have exactly five kinds: Question: asks a human and ends with a question mark; Answer: replies to a direct owner question or mention; Decision: states a fact the owner must know; Handoff: names the receiving agent and explains what shipped; Done: explains what shipped and includes the PR link. Reply-only runs default to Answer and may end with Decision needed: only when the owner must choose. Handoff and Done cannot be only a link. Everything else is run activity."
 echo
 echo "=== check before you say done ==="
 cat <<EOF

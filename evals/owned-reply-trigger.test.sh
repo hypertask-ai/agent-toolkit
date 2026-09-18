@@ -17,6 +17,9 @@ printf 'test\n' > "$TMP/company/VERSION"
 printf 'token\n' > "$TMP/token"
 printf '{}\n' > "$TMP/home/.codex/auth.json"
 printf 'GLOBAL TERMINAL RULE\n' > "$TMP/home/.claude/CLAUDE.md"
+# shellcheck disable=SC1091
+. "$ROOT/scripts/lib/feedback.sh"
+feedback_update_note "$TMP/home/.claude/CLAUDE.md" "$(cat "$ROOT/VERSION")" no
 printf 'POSPEAK TERMINAL RULE\n' > "$TMP/home/.claude/skills/pospeak/SKILL.md"
 printf 'UNSLOP TERMINAL RULE\n' > "$TMP/home/.claude/skills/unslop/SKILL.md"
 printf 'ADHD TERMINAL RULE\n' > "$TMP/home/.claude/skills/i-have-adhd/SKILL.md"
@@ -45,7 +48,7 @@ EOF
 cat > "$TMP/bin/hax-stub" <<'EOF'
 #!/usr/bin/env bash
 printf '%s' "${!#}" > "$PROMPT_CAPTURE"
-printf '<p><strong>The answer is available from the ticket evidence.</strong></p><p>Next: use that answer.</p>\n'
+printf '<p><strong>Answer: The feature uses a flag.</strong></p><p>Next: use that answer.</p>\n'
 EOF
 cat > "$TMP/bin/timeout-stub" <<'EOF'
 #!/usr/bin/env bash
@@ -132,7 +135,7 @@ else
 fi
 
 PROMPT_CAPTURE="$TMP/prompt" TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPTURE="$TMP/bwrap" \
-  REPLY_HAX_BIN="$TMP/bin/hax-stub" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
+  BOARD_POST_CAPTURE="$TMP/answer.post" REPLY_HAX_BIN="$TMP/bin/hax-stub" REPLY_BWRAP_BIN="$TMP/bin/bwrap-stub" \
   REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
   HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
   XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
@@ -142,13 +145,17 @@ if grep -qF 'You are Test Bot in a read-only reply run for TEST-1.' "$TMP/prompt
    && grep -qF 'Full ticket thread, verbatim normalized JSON.' "$TMP/prompt" \
    && grep -qF '"id": 3' "$TMP/prompt" \
    && grep -qF 'GLOBAL TERMINAL RULE' "$TMP/prompt" \
+   && grep -qF 'Owner-question replies start with `Answer:`, not `Decision:`.' "$TMP/prompt" \
+   && grep -qF '`Decision needed:` question only when the owner must choose something.' "$TMP/prompt" \
    && grep -qF 'POSPEAK TERMINAL RULE' "$TMP/prompt" \
    && grep -qF 'UNSLOP TERMINAL RULE' "$TMP/prompt" \
    && grep -qF 'ADHD TERMINAL RULE' "$TMP/prompt" \
    && grep -qF 'This reply-only run must leave the ticket in its current column.' "$TMP/prompt" \
+   && grep -qF '<strong>Answer:' "$TMP/answer.post" \
+   && ! grep -qF '<strong>Decision:' "$TMP/answer.post" \
    && ! grep -qF 'COMMENT CONTRACT:' "$TMP/prompt" \
    && ! grep -qF 'Decision: concise answer' "$TMP/prompt"; then
-  ok reply-only-prompt-contract 'the answer sees full context and exact terminal rules without forced Decision framing'
+  ok reply-only-prompt-contract 'reply-only defaults to Answer under the exact terminal rules'
 else
   bad reply-only-prompt-contract "prompt=$(cat "$TMP/prompt" 2>/dev/null || true)"
 fi
@@ -170,6 +177,13 @@ else
   bad reply-only-sandbox-contract "timeout=$(cat "$TMP/timeout" 2>/dev/null) bwrap=$(tr '\n' ' ' < "$TMP/bwrap" 2>/dev/null)"
 fi
 
+if printf '%s\n' '<p><strong>Answer: Both options are available.</strong></p><p>Decision needed: Which option should ship?</p>' \
+  | python3 "$ROOT/adapters/hypertask/plain-language/check-comment.py"; then
+  ok answer-decision-needed-shape 'Answer with an optional Decision needed question passes the plain-language check'
+else
+  bad answer-decision-needed-shape 'the plain-language check rejected the fifth marker or decision question'
+fi
+
 cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-3533","ticketNumber":"HTPR-3533","section":"Done","title":"Google sign-in fails","description":"The customer attached the error screen.","assignees":[],"labels":[],"commentCount":2,"updatedAt":"2026-01-02T00:01:00Z"}]}
 EOF
@@ -184,7 +198,7 @@ prompt="${!#}"
 printf '%s' "$prompt" > "$PROMPT_CAPTURE"
 [ -s "$SCREENSHOT_FIXTURE" ]
 printf '%s' "$prompt" | grep -qF 'https://screencast2.com/MFrrv.png?raw'
-printf '<p><strong>Google rejected sign-in because the redirect address does not match.</strong></p><p>Next: add the app callback URL exactly to Google\x27s authorized redirect addresses.</p>\n'
+printf '<p><strong>Answer: Google rejected sign-in because the redirect address does not match.</strong></p><p>Next: add the app callback URL exactly to Google\x27s authorized redirect addresses.</p>\n'
 EOF
 chmod +x "$TMP/bin/hax-stub"
 PROMPT_CAPTURE="$TMP/htpr-3533.prompt" TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPTURE="$TMP/bwrap" \
@@ -199,9 +213,10 @@ PROMPT_CAPTURE="$TMP/htpr-3533.prompt" TIMEOUT_CAPTURE="$TMP/timeout" BWRAP_CAPT
 if file "$ROOT/evals/fixtures/htpr-3533-redirect-uri-mismatch.png" | grep -qF 'PNG image data' \
    && grep -qF 'Download every relevant image URL to /tmp and inspect the image' "$TMP/htpr-3533.prompt" \
    && grep -qF 'https://screencast2.com/MFrrv.png?raw' "$TMP/htpr-3533.prompt" \
+   && grep -qF '<strong>Answer:' "$TMP/htpr-3533.post" \
    && grep -qF 'redirect address does not match' "$TMP/htpr-3533.post" \
    && grep -qF 'authorized redirect addresses' "$TMP/htpr-3533.post" \
-   && ! grep -qF 'Decision:' "$TMP/htpr-3533.post"; then
+   && ! grep -qF '<strong>Decision:' "$TMP/htpr-3533.post"; then
   ok screenshot-redirect-fix 'HTPR-3533 image evidence produces the Google authorized redirect-address fix'
 else
   bad screenshot-redirect-fix "prompt=$(cat "$TMP/htpr-3533.prompt" 2>/dev/null) post=$(cat "$TMP/htpr-3533.post" 2>/dev/null)"

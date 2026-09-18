@@ -20,14 +20,17 @@ An agent owns one ticket from start to hand-off. Do not pick up a second while
 the first is open. A ticket somebody else has claimed is theirs: its assignment
 and in-progress column mean it is in flight, so do not touch.
 
-## Four comment kinds
+## Five comment kinds
 
-A ticket comment starts with `Question:`, `Decision:`, `Handoff:`, or `Done:`.
-A question names what a human must provide and ends with a question mark. A
-decision is a fact the owner must know. A handoff names the receiving agent and
-explains what shipped. Done explains what shipped and includes the pull request
-link. Neither a handoff nor done can be only a link. Claims, plans, progress,
-checks, retries, blockers, and costs are run activity, not comments.
+A ticket comment starts with `Question:`, `Answer:`, `Decision:`, `Handoff:`,
+or `Done:`. A question names what a human must provide and ends with a question
+mark. An answer replies to a direct owner question or mention and does not imply
+that the owner must decide anything. A decision is a fact the owner must know.
+A handoff names the receiving agent and explains what shipped. Done explains
+what shipped and includes the pull request link. Neither a handoff nor done can
+be only a link. Claims, plans, progress, checks, retries, blockers, and costs
+are run activity, not comments. Reply-only runs default to `Answer:`. If the
+answer also requires a choice, it may end with a `Decision needed:` question.
 
 The existing limit remains three comments and one reminder per ticket per day
 unless a human writes in between. Post a reminder once and edit it in place.
@@ -83,6 +86,8 @@ Agent template version: __TEMPLATE_VERSION__
 Feedback command: `agent-template feedback --kind bug|change|idea --what "<summary>" --got "<current behavior or context>" --expected "<desired behavior>"`
 Feedback board: https://app.hypertask.ai/detail/project-5500
 Updates: run `agent-template update` to get the latest.
+Owner-question replies start with `Answer:`, not `Decision:`. Add a final
+`Decision needed:` question only when the owner must choose something.
 <!-- agent-template:end -->
 
 This posts to the Agent Template Inbox as the bot's own identity, never in the

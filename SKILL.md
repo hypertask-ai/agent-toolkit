@@ -111,18 +111,19 @@ Claude: [runs the script with --yes] ... FP CRO Bot picked up the test ticket
    finished, and saying so plainly beats a green checklist.
 
 Every setup must tell the bot and the person creating it the comment contract.
-Ticket comments have exactly four allowed kinds: `Question:` asks a human,
-names what is needed, and ends with a question mark; `Decision:` states a fact
-the owner must know; `Handoff:` names the receiving agent and explains what
-shipped; and `Done:` explains what shipped and includes the pull request link.
-Neither `Handoff:` nor `Done:` can be only a link. Everything else is run
-activity. A reminder that qualifies as a decision is posted once and then
-edited in place, never re-posted. The existing limit remains one reminder and
-three comments per ticket per day unless a human writes in between. With `QUIET="on"`, the wrapper
+Ticket comments have exactly five allowed kinds: `Question:` asks a human,
+names what is needed, and ends with a question mark; `Answer:` replies to a
+direct owner question or mention; `Decision:` states a fact the owner must
+know; `Handoff:` names the receiving agent and explains what shipped; and
+`Done:` explains what shipped and includes the pull request link. Neither
+`Handoff:` nor `Done:` can be only a link. Everything else is run activity. A
+reminder that qualifies as a decision is posted once and then edited in place,
+never re-posted. The existing limit remains one reminder and three comments per
+ticket per day unless a human writes in between. With `QUIET="on"`, the wrapper
 strips and logs board-owner mentions; moving the ticket to review requests
 attention.
 
-All four comment kinds are for a product owner reading on a phone. Every runner
+All five comment kinds are for a product owner reading on a phone. Every runner
 prompt includes the pospeak, unslop, and i-have-adhd rules verbatim. It reads
 the canonical `skills/talk-to-valentin/` company-pack copy when present and
 uses the template's bundled copy when a reference is absent. Before any kind
@@ -143,7 +144,9 @@ before answering. Replies always use Codex GPT-5.6 Sol at high effort through
 five-minute limit. Bubblewrap exposes the repository and logs
 read-only, permits writes only under `/tmp`, and does not mount the board token.
 The model returns HTML; the runner checks its shape and posts it afterward.
-Reply text does not need a four-kind marker and is never forced into `Decision:`.
+Reply-only runs default to `Answer:` and never use `Decision:` merely to frame
+an answer. When a choice is genuinely required, the reply may end with a
+`Decision needed:` line that asks the owner what to choose.
 
 ## The three wiring modes
 
