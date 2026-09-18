@@ -1,4 +1,0 @@
-- Record each owner question or mention through receipt, acknowledgement, estimate, and answer in a per-agent reply ledger.
-- Publish daily reply-contract totals and deduplicated pile-up alarms on each board's standing Board health ticket.
-- Include agent, model, timing, outcome, and log links in run telemetry.
-- Give instruction tickets a four-hour due date, or one hour with Urgent priority when requested as urgent.

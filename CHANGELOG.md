@@ -1,3 +1,10 @@
+## 3.54.0 - 2026-09-18
+
+- Record each owner question or mention through receipt, acknowledgement, estimate, and answer in a per-agent reply ledger.
+- Publish daily reply-contract totals and deduplicated pile-up alarms on each board's standing Board health ticket.
+- Include agent, model, timing, outcome, and log links in run telemetry.
+- Give instruction tickets a four-hour due date, or one hour with Urgent priority when requested as urgent.
+
 ## 3.53.0 - 2026-09-18
 
 - AGTE-67, AGTE-68, and AGTE-72 make toolkit pull requests request squash auto-merge when opened, move version and changelog updates to a main-branch release workflow, preserve local host patches across updates, require maintainers to execute release actions themselves, and file toolkit bugs for pull requests that stay red or unmerged for two hours.
