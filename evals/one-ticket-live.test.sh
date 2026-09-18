@@ -35,7 +35,7 @@ if [ "$1 $2" = "pr list" ]; then
   fi
   if [ "$scenario" = "oldest" ]; then
     cat <<JSON
-[{"number":9,"state":"OPEN","url":"https://github.test/pull/9","title":"HTPR-9 old","body":"","headRefName":"agent/dev-1-htpr-9","createdAt":"2026-01-01T00:00:00Z"},{"number":10,"state":"OPEN","url":"https://github.test/pull/10","title":"HTPR-10 new","body":"","headRefName":"agent/dev-1-htpr-10","createdAt":"2026-01-02T00:00:00Z"}]
+[{"number":9,"state":"OPEN","url":"https://github.test/pull/9","title":"HTPR-9 old","body":"","headRefName":"agent/dev-1-htpr-9","createdAt":"2026-09-18T21:00:00Z"},{"number":10,"state":"OPEN","url":"https://github.test/pull/10","title":"HTPR-10 new","body":"","headRefName":"agent/dev-1-htpr-10","createdAt":"2026-09-18T21:01:00Z"}]
 JSON
   elif [ "$scenario" = "qa-claim" ]; then
     cat <<JSON
@@ -66,7 +66,9 @@ JSON
   else
     state="OPEN"; [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ] || [ "$scenario" = "base-missing" ] || state="OPEN"
     if [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ] || [ "$scenario" = "base-missing" ]; then state="MERGED"; fi
-    printf '[{"number":1,"state":"%s","url":"https://github.test/pull/1","title":"HTPR-1 fix","body":"https://app.hypertask.ai/detail/project-15/1","headRefName":"agent/dev-1-htpr-1","author":{"login":"dev-one"},"createdAt":"2026-01-01T00:00:00Z"}]\n' "$state"
+    created_at="2026-09-18T21:00:00Z"
+    [ "$scenario" != "stale-red" ] || created_at="2026-09-18T19:00:00Z"
+    printf '[{"number":1,"state":"%s","url":"https://github.test/pull/1","title":"HTPR-1 fix","body":"https://app.hypertask.ai/detail/project-15/1","headRefName":"agent/dev-1-htpr-1","author":{"login":"dev-one"},"createdAt":"%s"}]\n' "$state" "$created_at"
   fi
   exit 0
 fi
@@ -87,7 +89,9 @@ if [ "$1 $2" = "pr view" ]; then
   checks='[{"name":"ci-tests","status":"IN_PROGRESS","conclusion":"","detailsUrl":"https://github.test/actions/runs/77/job/1"}]'
   reviews='[]'
   comments='[]'
-  if [ "$scenario" = "red" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "qa-claim" ] || [ "$scenario" = "orphan" ] || [ "$scenario" = "author-owned" ] || [ "$scenario" = "custom-prefix" ]; then
+  if [ "$scenario" = "green" ]; then
+    checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.test/actions/runs/77/job/1"}]'
+  elif [ "$scenario" = "red" ] || [ "$scenario" = "stale-red" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "qa-claim" ] || [ "$scenario" = "orphan" ] || [ "$scenario" = "author-owned" ] || [ "$scenario" = "custom-prefix" ]; then
     checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/1"},{"name":"revert-guard","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/2"},{"name":"pr-title","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/3"}]'
     comments='[{"author":{"login":"claude-review"},"body":"CONCERNS: preserve the existing authorization check."}]'
   fi
@@ -148,6 +152,7 @@ chmod +x "$TMP/bin/"*
 PATH="$TMP/bin:$PATH"
 HOME="$TMP/home"
 PR_REPO="example/repo"
+export PR_GATE_NOW="2026-09-18T22:00:00Z"
 # shellcheck source=/dev/null
 . "$ROOT/adapters/hypertask/adapter.sh"
 die() { printf 'die: %s %s\n' "$*" >&2; return 1; }
@@ -187,7 +192,7 @@ run_gate() {
   mkdir -p "$(dirname "$opened")"
   touch "$opened"
   PR_TEST_SCENARIO="$scenario" PR_FIXTURE="$ROOT/evals/fixtures/status-context-pr.json" \
-    PR_BRANCH_PREFIX="${4:-}" adapter_pr_gate \
+    PR_GATE_NOW="2026-09-18T22:00:00Z" PR_BRANCH_PREFIX="${4:-}" adapter_pr_gate \
       "$TMP/token" 15 agent-1 "$name" "$slug" "$cache" \
       "$TMP/home/.config/hypertask-agents" "$opened"
 }
@@ -224,6 +229,20 @@ echo 'PASS StatusContext success, failure, error, and pending states are classif
 pending="$(run_gate pending)"
 [[ "$pending" == *'"action": "wait"'* && "$pending" == *'"state": "checks-pending"'* ]]
 echo 'PASS pending PR waits without inventing work'
+
+green="$(run_gate green)"
+[[ "$green" == *'"action": "observe"'* && "$green" == *'"state": "awaiting-merge"'* ]]
+echo 'PASS one open green PR is monitored without blocking pickup'
+
+stale_red="$(run_gate stale-red)"
+STALE_RED="$stale_red" python3 - <<'PYEOF'
+import json, os
+result = json.loads(os.environ["STALE_RED"])
+assert result["action"] == "observe" and result["state"] == "red"
+assert result["failed_checks"] == ["ci-tests", "revert-guard", "pr-title"]
+assert result["wait_reason"] == "red: ci-tests, revert-guard, pr-title"
+PYEOF
+echo 'PASS a red PR older than two hours reports exact checks without blocking pickup'
 
 undeployed="$(run_gate undeployed)"
 [[ "$undeployed" == *'"state": "merged-undeployed"'* ]]
@@ -323,6 +342,20 @@ pending_run="$(PR_TEST_SCENARIO=pending HOME="$TMP/home" PATH="$TMP/bin:$PATH" C
 echo 'PASS emergency ticket is the only pickup that bypasses an owed PR'
 
 rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
+green_run="$(PR_TEST_SCENARIO=green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$green_run" == *'skip  HTPR-1: its open PR is monitored without blocking new work'* ]]
+[[ "$green_run" == *'would pick up HTPR-2'* ]]
+[[ ! -e "$TMP/home/.local/state/agent-board-poll/dev-1.blocked" ]]
+echo 'PASS one open green PR releases normal ticket pickup'
+
+rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
+stale_red_run="$(PR_TEST_SCENARIO=stale-red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$stale_red_run" == *'skip  HTPR-1: its open PR is monitored without blocking new work'* ]]
+[[ "$stale_red_run" == *'would pick up HTPR-2'* ]]
+[[ "$stale_red_run" != *'pull-request fix'* ]]
+echo 'PASS an unfixable red PR older than two hours releases normal ticket pickup'
+
+rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
 undeployed_run="$(PR_TEST_SCENARIO=undeployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$undeployed_run" == *'waiting on PR #1: merged-undeployed; nothing was claimed.'* ]]
 [[ "$undeployed_run" != *'would pick up'* ]]
@@ -359,4 +392,4 @@ PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency MODEL_OPEN_MARKER=
 [[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "8" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.opened-prs")" = yes ]]
 echo 'PASS runner persists a PR first seen after its ticket run'
 
-echo '24 one-ticket-until-live checks passed'
+echo '28 one-ticket-until-live checks passed'

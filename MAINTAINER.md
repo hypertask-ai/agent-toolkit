@@ -234,7 +234,8 @@ past two hours; non-zero eligible work without a completed run for three hours;
 three attempts on one ticket with one failure signature; and a build or
 instruction unit ending without a result. A pull request that is red or still
 unmerged after two hours also creates one deduplicated bug in the toolkit Backlog.
-After six hours from `stalled_since`,
+A red-PR bug names every failing check reported by GitHub. After six hours from
+`stalled_since`,
 Product Bot runs `mode manual --runner <slug>` and sends one separate owner
 notification once. `FLEET_STALL_TICKET` selects the toolkit ticket used when a
 stall has no runner ticket and defaults to `AGTE-37`.
@@ -357,10 +358,12 @@ branch, or by `<slug>.opened-prs` recording that the runner first saw the PR
 during this agent's run. Shared GitHub authorship and comments do not transfer
 ownership.
 
-Every non-live owned PR is ranked oldest first. The oldest is the only PR work,
-and more than one debt blocks every new claim, including an `emergency`. An
-open PR with no active owner is ignored by every gate. Once per UTC day, a tick
-logs `orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can
+Every blocking owned PR is ranked oldest first. The oldest is the only PR work,
+and more than one blocking debt stops every new claim, including an `emergency`.
+An open green PR is monitored without blocking pickup. A red or pending PR stops
+pickup for its first two hours, then remains monitored while new work can start.
+An open PR with no active owner is ignored by every gate. Once per UTC day, a
+tick logs `orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can
 decide who should take it.
 
 LIVE means all of the following:
@@ -377,20 +380,19 @@ A repository that has deployment records but no qualifying Production success
 is not LIVE.
 
 A red PR starts another fix run with exact failed check names, failed-run logs,
-and verbatim reviewer `CONCERNS`. Pending checks log `waiting on PR #<n>:
-checks pending` and start nothing. A merged but undeployed PR also starts
-nothing. The attempts file, retry limit, six-hour cooldown, model escalation,
-and manager hand-off do not apply anywhere on this PR path. They apply only to
-a ticket run which has not produced a PR; QA escalation starts only after live
-work is rejected. The agent continues even if a supervisor flags a PR older
-than 24 hours for a human look.
+and verbatim reviewer `CONCERNS` during its first two hours. Pending checks log
+`waiting on PR #<n>: checks pending` and start nothing during that window. At
+two hours, either state files one deduplicated toolkit bug, including exact
+failed check names for a red PR, and stops blocking pickup. A green open PR
+never blocks pickup. A merged but undeployed PR still starts nothing. The
+attempts file, retry limit, six-hour cooldown, model escalation, and manager
+hand-off do not apply to PR fix runs.
 
-The owner-facing state is one JSON line at
+The owner-facing blocking state is one JSON line at
 `~/.local/state/agent-board-poll/<slug>.blocked`. Its top-level fields describe
-the oldest debt, and `prs` lists every owned non-live PR in rank order. The
-agents page can render the oldest as “waiting on PR n”. The file is removed
-only after all owned PRs are LIVE. This is the first place to look when an
-agent appears idle while its board still has work.
+the oldest blocking debt, and `prs` lists every blocking owned PR in rank order.
+The runner removes this file when no PR blocks pickup. Monitored PRs remain in
+the progress snapshot so Product Bot can report them after two hours.
 
 ## What wakes it
 

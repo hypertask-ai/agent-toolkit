@@ -180,6 +180,43 @@ else
   bad edit-in-place "adds=$adds updates=$updates notifications=$(wc -l < "$TMP/notifier.log")"
 fi
 
+RED_STATE="$TMP/red-state"
+mkdir -p "$RED_STATE"
+cat > "$RED_STATE/dev-red.progress.json" <<'EOF'
+{
+  "schema_version": 1,
+  "runner": "dev-red",
+  "wait": {
+    "state": "blocked",
+    "since": "2026-09-18T09:00:00Z",
+    "ticket": "HTPR-86",
+    "reason": "red: ci-tests",
+    "pr": {"number": 86, "url": "https://github.test/pull/86"}
+  },
+  "eligible_work": {"count": 0, "since": null},
+  "units": []
+}
+EOF
+: > "$TMP/red-board.log"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF" \
+  BOARD_LOG="$TMP/red-board.log" BOARD_COUNTER="$TMP/red-board-counter" \
+  NOTIFIER_LOG="$TMP/notifier.log" FLEET_TELEGRAM_NOTIFIER="$TMP/bin/notifier" \
+  "$PROGRESS" supervise --state-dir "$RED_STATE" --board-cli "$TMP/bin/board" \
+    --manager-cli "$ROOT/scripts/agent-template" --manager-slug product-bot \
+    --toolkit-ticket AGTE-37 --now 2026-09-18T12:00:00Z >/dev/null
+if python3 - "$TMP/red-board.log" <<'PYEOF'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+create = next(row for row in rows if row[:2] == ["task", "create"])
+assert create[create.index("--title") + 1] == "Bug: PR #86 stayed red for two hours"
+assert "Failing checks: ci-tests." in create[create.index("--description") + 1]
+PYEOF
+then
+  ok red-pr-names-failing-check 'the filed red-PR bug includes the exact failing check name'
+else
+  bad red-pr-names-failing-check 'the filed red-PR bug omitted its failing check name'
+fi
+
 CONTRACT="$TMP/contract"
 mkdir -p "$CONTRACT"
 "$PROGRESS" event --state-dir "$CONTRACT" --slug runner --event completed-run \

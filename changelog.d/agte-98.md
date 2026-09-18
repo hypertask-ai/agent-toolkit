@@ -1,0 +1,1 @@
+- Toolkit pull requests now report their exact failing checks after two hours, while old red or pending pull requests and open green pull requests no longer stop agents from starting new work.

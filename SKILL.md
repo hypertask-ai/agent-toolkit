@@ -364,19 +364,20 @@ our own message rather than "command not found" three layers down.
 
 ## One ticket until live
 
-An agent that owns a PR which is not LIVE does not claim another normal ticket.
-A PR is owned when its branch starts with the agent's `PR_BRANCH_PREFIX`
-(default `agent/<slug>-`), when the ticket in its title is currently assigned
-to that agent and the branch has no other agent prefix, or when
-`<slug>.opened-prs` records that the runner first saw it during that agent's
-run. Shared GitHub authorship and comments do not transfer ownership.
+An agent that owns a blocking PR does not claim another normal ticket. A PR is
+owned when its branch starts with the agent's `PR_BRANCH_PREFIX` (default
+`agent/<slug>-`), when the ticket in its title is currently assigned to that
+agent and the branch has no other agent prefix, or when `<slug>.opened-prs`
+records that the runner first saw it during that agent's run. Shared GitHub
+authorship and comments do not transfer ownership.
 
-Multiple debts are ranked oldest first and written together to the blocked
-state. With more than one debt, even an `emergency` does not start new work.
-An open PR whose ticket is unassigned or assigned to no active agent blocks
-nobody unless branch or run state identifies an owner. The first tick each UTC
-day logs `orphaned PR #<n> (<branch>) has no owning agent` for supervisor
-follow-up.
+Multiple blocking debts are ranked oldest first and written together to the
+blocked state. With more than one blocking debt, even an `emergency` does not
+start new work. Green open PRs never block pickup. Red and pending PRs stop
+pickup for two hours, then remain monitored while new work starts. An open PR
+whose ticket is unassigned or assigned to no active agent blocks nobody unless
+branch or run state identifies an owner. The first tick each UTC day logs
+`orphaned PR #<n> (<branch>) has no owning agent` for supervisor follow-up.
 
 **LIVE has one exact definition:** the PR is merged, its merge commit is
 contained in its base branch, and the newest GitHub deployment for that base in
@@ -385,26 +386,23 @@ and deploys a commit containing the merge. The answer is cached per PR for 60
 seconds. If the repository has no GitHub deployment records at all, LIVE falls
 back to merged plus base-contains-merge, and the runner logs that fallback.
 
-An open red PR gets another fix run with the exact failed check names, failed
-run logs, and verbatim `CONCERNS` or changes-requested review text. `ci-tests`,
-`revert-guard`, `pr-title`, and AI review feedback are work, not reasons to move
-on. Pending checks consume the tick and log `waiting on PR #<n>: checks
-pending`. A merged but undeployed PR also consumes the tick. Neither path
-claims a ticket.
+An open red PR gets another fix run with exact failed check names, failed-run
+logs, and verbatim `CONCERNS` or changes-requested review text during its first
+two hours. Pending checks consume the tick and log `waiting on PR #<n>: checks
+pending` during the same window. At two hours, either state creates one
+deduplicated toolkit bug, a red bug includes every failed check name, and the PR
+stops blocking pickup. A green open PR is monitored and never blocks pickup. A
+merged but undeployed PR still consumes the tick.
 
-The PR path never reads the attempts file, applies a retry limit or cooldown,
-uses the model escalation ladder, or hands work to a manager. Every tick keeps
-fixing or waiting for the same PR until it is LIVE. Attempt windows apply only
-to ticket runs that have not produced a PR. QA escalation applies only when a
-ticket is rejected after its PR was live.
+PR fix runs never read the attempts file, apply a retry limit or cooldown, use
+the model escalation ladder, or hand work to a manager.
 
 The runner writes one JSON line to
 `~/.local/state/agent-board-poll/<slug>.blocked`. Its top-level `pr`, `state`,
-`since`, and `ticket` identify the oldest debt for existing consumers, and its
-`prs` array lists every owned non-live PR in rank order. This is what the
-owner-facing agents feed can show as “waiting on PR n”. A supervisor may flag
-a PR older than 24 hours for a human look, but that does not release the agent
-to take new work.
+`since`, and `ticket` identify the oldest blocking debt, and its `prs` array
+lists every blocking owned PR in rank order. The runner removes this file when
+no PR blocks pickup. Monitored PRs remain in the progress snapshot for the
+two-hour report.
 
 Every tick also atomically writes `<slug>.progress.json` in that state folder.
 It records the last completed run, opened PR, merge, current wait and its start,
