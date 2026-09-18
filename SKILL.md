@@ -123,16 +123,27 @@ ticket per day unless a human writes in between. With `QUIET="on"`, the wrapper
 strips and logs board-owner mentions; moving the ticket to review requests
 attention.
 
-All five comment kinds are for a product owner reading on a phone. Every runner
+All five comment kinds are for a product owner reading on a phone. The agent
+drafting any kind must run the draft through the real pospeak, unslop, and
+i-have-adhd skills before posting, not only satisfy a mechanical shape check.
+A comment can be a bold first sentence, under 80 words, and still be noise to
+him: passing the shape check is not the same as being readable. Every runner
 prompt includes the pospeak, unslop, and i-have-adhd rules verbatim. It reads
 the canonical `skills/talk-to-valentin/` company-pack copy when present and
-uses the template's bundled copy when a reference is absent. Before any kind
-posts, the board wrapper requires a bold first sentence in a first `<p>`, at
-most 80 words, no code-shaped detail or em dash, linked ticket and PR
-references, and a final question or `Next:` block. The final gate validates
-that shape only. It never rewrites words, links, markers, or punctuation. If a
-check fails, the wrapper keeps the unchanged draft and reasons in the run log,
-posts a held activity, and posts no comment.
+uses the template's bundled copy when a reference is absent. Owner-facing text
+bans skill names, `ROUTE:` lists, file paths, PR numbers without a full URL,
+and branch names, on top of the mechanical checks. Before any kind posts, the
+board wrapper requires a bold first sentence in a first `<p>`, at most 80
+words, no code-shaped detail or em dash, linked ticket and PR references, and
+a final question or `Next:` block. A failure gets one 60-second rewrite through
+`CHAT_CLI`, falling back to `RESEARCH_CLI`. If the rewrite still fails, the
+wrapper keeps the draft and reasons in the run log, posts `Question held: did
+not pass the plain-language check` as activity, and posts no comment.
+
+When the owner writes "I don't understand" or asks for a guide, the answering
+agent posts exactly one `Decision:` comment shaped as a numbered guide and
+nothing else: (1) what is live, (2) what he must do, naming the page URL and
+the button, (3) what needs rights he may lack, and (4) what the bots do next.
 
 A human question or direct mention uses a separate reply-only route. The prompt
 contains the complete ticket description and thread, a deduplicated shared

@@ -225,15 +225,21 @@ and strips board-owner mentions from comments, logging the change. The review
 column provides attention instead. The existing one-reminder and
 three-comments-per-day limits still apply.
 
-The runner appends the pospeak, unslop, and i-have-adhd texts verbatim for all
-five comment kinds and says the product owner reads them on a phone. Paths under
-the company pack's `skills/talk-to-valentin/` directory are canonical; bundled
-files under `adapters/hypertask/plain-language/` fill any missing reference. The
-generated board wrapper checks the first `<p>` and bold sentence, the 80-word
-cap, code-shaped tokens, commit hashes, em dashes, linked ticket and PR
-references, and the last block. This is a shape-only gate: it never changes the
-draft. Failure logs the unchanged draft and reasons, emits a held activity, and
-sends no comment.
+The drafting agent must run all five comment kinds through the real pospeak,
+unslop, and i-have-adhd skills before posting, not only satisfy the mechanical
+shape check below: a comment can pass that check and still be noise the owner
+cannot act on. Owner-facing text bans skill names, `ROUTE:` lists, file paths,
+PR numbers without a full URL, and branch names. The runner appends the
+pospeak, unslop, and i-have-adhd texts verbatim for all five comment kinds and
+says the product owner reads them on a phone. Paths under the company pack's
+`skills/talk-to-valentin/` directory are canonical; bundled files under
+`adapters/hypertask/plain-language/` fill any missing reference. The generated
+board wrapper checks the first `<p>` and bold sentence, the 80-word cap,
+code-shaped tokens, commit hashes, em dashes, linked ticket and PR references,
+and the last block. It tries one 60-second rewrite with `CHAT_CLI` or
+`RESEARCH_CLI`, then checks again. A second failure logs the draft and
+reasons, emits the `Question held: did not pass the plain-language check`
+activity, and sends no raw comment.
 
 Direct human questions use the fixed high-effort Codex Sol reply route instead
 of the conf provider. Its five-minute bubblewrap sandbox gets the full thread,
@@ -248,6 +254,11 @@ and the answer names superseded older comments. The runner validates and posts
 the returned HTML after the sandbox exits. These reply-only runs default to
 `Answer:`, with a final `Decision needed:` question only when the owner
 genuinely needs to choose.
+
+When the owner writes "I don't understand" or asks for a guide, the answering
+agent posts exactly one `Decision:` comment shaped as a numbered guide and
+nothing else: what is live, what he must do (page URL and button name), what
+needs rights he may lack, and what the bots do next.
 
 At ticket-run start the adapter posts `{taskId, source: "runtime"}` to
 `/api/mcp/agents/runs`. Claimed, started, PR opened, red check, fix pushed,

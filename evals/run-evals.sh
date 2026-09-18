@@ -27,6 +27,8 @@
 #   starts_with_block_tag   the text opens with an HTML block tag
 #   has_section "<title>"   the text has a heading with that title
 #   is_full_https_url       every ticket reference is a full https:// URL
+#   bans_owner_jargon       no ROUTE: list, skill name, unlinked PR number,
+#                           file path, or branch name
 #   triage_scores "<easy|hard>"  the input is a ticket JSON object, and
 #                           scripts/triage.sh --rules-only scores it that way.
 #                           Rules only: a check that needs a model and a
@@ -109,6 +111,26 @@ def is_full_https_url(text, _arg):
     return True, ""
 
 
+def bans_owner_jargon(text, _arg):
+    # A comment can pass the mechanical shape check and still be noise: it
+    # names a skill, a ROUTE: list, or a file/branch path the owner never
+    # asked for. AGTE-16: a Decision comment shaped correctly still read as
+    # noise to the owner because it mixed in exactly this kind of detail.
+    reasons = []
+    if re.search(r"\bROUTE\s*:", text, re.IGNORECASE):
+        reasons.append("a ROUTE: list")
+    if re.search(r"\bskill\b", text, re.IGNORECASE):
+        reasons.append("a skill name")
+    visible = re.sub(r"<a\b[^>]*>.*?</a>", "", text, flags=re.IGNORECASE | re.DOTALL)
+    if re.search(r"\bPR\s*#?\d+\b", visible, re.IGNORECASE):
+        reasons.append("a PR number with no linked URL")
+    if re.search(r"\b[\w.-]+/[\w.-]+\b", visible):
+        reasons.append("a file path or branch name")
+    if reasons:
+        return False, "contains " + " and ".join(reasons)
+    return True, ""
+
+
 def triage_scores(text, arg):
     # The input is a whole ticket, not a sentence, so this predicate hands it
     # to the real scorer rather than reimplementing the rules here. A rule that
@@ -140,6 +162,7 @@ PREDICATES = {
     "starts_with_block_tag": starts_with_block_tag,
     "has_section": has_section,
     "is_full_https_url": is_full_https_url,
+    "bans_owner_jargon": bans_owner_jargon,
     "triage_scores": triage_scores,
 }
 

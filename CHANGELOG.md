@@ -1,3 +1,19 @@
+## 3.49.0 - 2026-09-18
+
+- AGTE-16 states in SKILL.md and MAINTAINER.md that owner-facing `Question:`
+  and `Decision:` comments must actually be rewritten through the real
+  pospeak, unslop, and i-have-adhd skills, not only pass the mechanical shape
+  check: a comment can be a bold first sentence under 80 words and still be
+  noise, mixing in skill names, `ROUTE:` lists, file paths, unlinked PR
+  numbers, and branch names.
+- Adds the ticket-level rule for "I don't understand": one `Decision:` guide,
+  numbered, covering what is live, what he must do (page URL and button),
+  what needs rights he may lack, and what the bots do next, and nothing else.
+- New `bans_owner_jargon` eval predicate catches the exact failure mode: a
+  `plain-language-check`-passing comment still readable as internal jargon.
+- ACTION: none. This release documents the contract; `check-comment.py` and
+  `agent-board-poll` still need a follow-up change to enforce it mechanically.
+
 ## 3.48.0 - 2026-09-18
 
 - AGTE-13 fixes quiet mode getting bypassed by a second wrapper outside the
