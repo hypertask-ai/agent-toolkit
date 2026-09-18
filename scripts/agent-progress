@@ -1,0 +1,708 @@
+#!/usr/bin/env python3
+"""Write runner progress snapshots and let Product Bot detect fleet stalls."""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import fcntl
+import hashlib
+import html
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Iterator
+
+SCHEMA_VERSION = 1
+WAIT_STATES = {"checks-pending", "awaiting-merge", "blocked"}
+WAIT_SECONDS = 2 * 60 * 60
+ELIGIBLE_SECONDS = 3 * 60 * 60
+MANUAL_SECONDS = 6 * 60 * 60
+TICKET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-[0-9]+$")
+
+
+def now_utc(value: str | None = None) -> dt.datetime:
+    if not value:
+        return dt.datetime.now(dt.timezone.utc)
+    parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def iso(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_time(value: Any) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        return now_utc(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def atomic_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def load_json(path: Path, fallback: Any) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return fallback
+
+
+@contextlib.contextmanager
+def locked(path: Path) -> Iterator[None]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(str(path) + ".lock", "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def progress_path(state_dir: Path, slug: str) -> Path:
+    return state_dir / f"{slug}.progress.json"
+
+
+def fresh_progress(slug: str, at: str) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "runner": slug,
+        "updated_at": at,
+        "last_tick_at": at,
+        "last_completed_run": None,
+        "last_pr_opened": None,
+        "last_merge": None,
+        "wait": {"state": None, "since": None, "ticket": None, "reason": None, "pr": None},
+        "eligible_work": {"count": 0, "since": None, "ticket": None, "ticket_url": None},
+        "repeated_attempt": None,
+        "units": [],
+        "stall": None,
+        "stalls": [],
+    }
+
+
+def read_progress(path: Path, slug: str, at: str) -> dict[str, Any]:
+    row = load_json(path, {})
+    if not isinstance(row, dict):
+        row = {}
+    base = fresh_progress(slug, at)
+    base.update(row)
+    base["schema_version"] = SCHEMA_VERSION
+    base["runner"] = slug
+    return base
+
+
+def unit_runtime_state(unit: str) -> str:
+    if not unit:
+        return "unknown"
+    try:
+        result = subprocess.run(
+            ["systemctl", "--user", "show", unit, "--property=LoadState",
+             "--property=ActiveState", "--property=SubState"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+    fields = {}
+    for line in result.stdout.splitlines():
+        key, _, value = line.partition("=")
+        fields[key] = value
+    if fields.get("LoadState") == "not-found":
+        return "ended"
+    if fields.get("ActiveState") in {"active", "activating", "reloading"}:
+        return "active"
+    if fields.get("ActiveState") in {"inactive", "failed", "deactivating"}:
+        return "ended"
+    return "unknown"
+
+
+def build_units(state_dir: Path, slug: str, at: str) -> list[dict[str, Any]]:
+    rows = load_json(state_dir / f"{slug}-builds.json", [])
+    if not isinstance(rows, list):
+        return []
+    units = []
+    for row in rows[-50:]:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        output = ""
+        try:
+            output = Path(str(row.get("out") or "")).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+        produced = bool(re.search(r"(?m)^hax rc=[0-9]+$", output))
+        status = str(row.get("status") or "unknown")
+        ended_at = row.get("completed")
+        if status != "running":
+            ended_at = ended_at or at
+        elif produced:
+            status = "ended"
+            ended_at = at
+        elif unit_runtime_state(str(row.get("unit") or "")) == "ended":
+            status = "ended-without-result"
+            ended_at = at
+        else:
+            produced = None
+        units.append({
+            "kind": "build",
+            "id": str(row["id"]),
+            "unit": str(row.get("unit") or ""),
+            "ticket": str(row.get("ticket") or "") or None,
+            "status": status,
+            "ended_at": ended_at,
+            "produced_result": produced,
+        })
+    return units
+
+
+def instruction_units(state_dir: Path, slug: str, at: str) -> list[dict[str, Any]]:
+    directory = state_dir / f"{slug}-instructions"
+    units = []
+    if not directory.is_dir():
+        return units
+    for path in sorted(directory.glob("*.json"))[-50:]:
+        row = load_json(path, {})
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        status = str(row.get("status") or "queued")
+        result_path = Path(str(row.get("result") or "")) if row.get("result") else None
+        produced: bool | None = None
+        if result_path and result_path.is_file() and result_path.stat().st_size:
+            produced = True
+            status = "ended"
+            ended_at = at
+        elif status == "running" and unit_runtime_state(str(row.get("unit") or "")) == "ended":
+            produced = False
+            status = "ended-without-result"
+            ended_at = at
+        else:
+            ended_at = None
+        units.append({
+            "kind": "instruction",
+            "id": str(row["id"]),
+            "unit": str(row.get("unit") or ""),
+            "ticket": str(row.get("ticket") or "") or None,
+            "status": status,
+            "ended_at": ended_at,
+            "produced_result": produced,
+        })
+    return units
+
+
+def merge_units(old: list[Any], current: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in old + current:
+        if not isinstance(row, dict) or not row.get("kind") or not row.get("id"):
+            continue
+        key = (str(row["kind"]), str(row["id"]))
+        previous = by_key.get(key, {})
+        merged = dict(previous)
+        merged.update(row)
+        if previous.get("produced_result") is not None and row.get("produced_result") is None:
+            merged["produced_result"] = previous["produced_result"]
+        by_key[key] = merged
+    rows = list(by_key.values())
+    rows.sort(key=lambda row: str(row.get("ended_at") or row.get("id") or ""))
+    return rows[-100:]
+
+
+def command_tick(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir)
+    path = progress_path(state_dir, args.slug)
+    current = now_utc(args.now)
+    at = iso(current)
+    with locked(path):
+        row = read_progress(path, args.slug, at)
+        if not args.preserve_work_state:
+            previous_wait = row.get("wait") if isinstance(row.get("wait"), dict) else {}
+            previous_pr = previous_wait.get("pr") if isinstance(previous_wait.get("pr"), dict) else {}
+            wait_since = None
+            if args.wait_state:
+                same_wait = (
+                    previous_wait.get("state") == args.wait_state
+                    and str(previous_wait.get("ticket") or "") == args.wait_ticket
+                    and str(previous_pr.get("number") or "") == args.wait_pr
+                )
+                if same_wait:
+                    wait_since = previous_wait.get("since")
+                elif previous_wait.get("state"):
+                    wait_since = at
+                else:
+                    wait_since = args.wait_since or at
+            pr = None
+            if args.wait_pr:
+                pr = {"number": int(args.wait_pr), "url": args.wait_pr_url or None}
+            row["wait"] = {
+                "state": args.wait_state or None,
+                "since": wait_since,
+                "ticket": args.wait_ticket or None,
+                "reason": args.wait_reason or None,
+                "pr": pr,
+            }
+
+            previous_eligible = row.get("eligible_work") if isinstance(row.get("eligible_work"), dict) else {}
+            eligible_since = None
+            if args.eligible_count > 0:
+                eligible_since = previous_eligible.get("since") if int(previous_eligible.get("count") or 0) > 0 else at
+            row["eligible_work"] = {
+                "count": args.eligible_count,
+                "since": eligible_since,
+                "ticket": args.eligible_ticket or None,
+                "ticket_url": args.eligible_url or None,
+            }
+        scanned = build_units(state_dir, args.slug, at) + instruction_units(state_dir, args.slug, at)
+        row["units"] = merge_units(row.get("units") if isinstance(row.get("units"), list) else [], scanned)
+        row["last_tick_at"] = at
+        row["updated_at"] = at
+        atomic_json(path, row)
+    return 0
+
+
+def failure_signature(detail: str) -> tuple[str, str]:
+    normalized = " ".join(detail.split()).casefold()
+    normalized = re.sub(r"\d{4}-\d\d-\d\d[t ][0-9:.+-]+z?", "<time>", normalized)
+    normalized = re.sub(r"(?:/[a-z0-9_.-]+){2,}", "<path>", normalized)
+    normalized = re.sub(r"\b[0-9a-f]{8,}\b", "<id>", normalized)
+    normalized = re.sub(r"\b\d{4,}\b", "<number>", normalized)
+    signature = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    summary = " ".join(" ".join(detail.split()).split()[-24:])[-160:] or "the run ended without an error message"
+    summary = re.sub(r"(?:/[A-Za-z0-9_.-]+){2,}", "a local path", summary)
+    summary = summary.replace("—", "-")
+    return signature, summary
+
+
+def command_event(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir)
+    path = progress_path(state_dir, args.slug)
+    at = iso(now_utc(args.now))
+    with locked(path):
+        row = read_progress(path, args.slug, at)
+        if args.event == "completed-run":
+            row["last_completed_run"] = {
+                "ticket": args.ticket or None,
+                "ticket_url": args.ticket_url or None,
+                "at": at,
+            }
+            attempt = row.get("repeated_attempt") if isinstance(row.get("repeated_attempt"), dict) else {}
+            if attempt.get("ticket") == args.ticket:
+                row["repeated_attempt"] = None
+        elif args.event == "pr-opened":
+            row["last_pr_opened"] = {
+                "number": int(args.pr),
+                "url": args.pr_url or None,
+                "ticket": args.ticket or None,
+                "at": at,
+            }
+        elif args.event == "merge":
+            previous = row.get("last_merge") if isinstance(row.get("last_merge"), dict) else {}
+            if str(previous.get("number") or "") != args.pr:
+                row["last_merge"] = {
+                    "number": int(args.pr),
+                    "url": args.pr_url or None,
+                    "ticket": args.ticket or None,
+                    "at": args.occurred_at or at,
+                }
+        elif args.event == "failure":
+            signature, summary = failure_signature(args.detail or "")
+            previous = row.get("repeated_attempt") if isinstance(row.get("repeated_attempt"), dict) else {}
+            same = previous.get("ticket") == args.ticket and previous.get("failure_signature") == signature
+            row["repeated_attempt"] = {
+                "ticket": args.ticket or None,
+                "ticket_url": args.ticket_url or None,
+                "count": int(previous.get("count") or 0) + 1 if same else 1,
+                "failure_signature": signature,
+                "failure_summary": summary,
+                "first_at": previous.get("first_at") if same else at,
+                "last_at": at,
+            }
+        elif args.event == "unit":
+            event_unit = {
+                "kind": args.kind,
+                "id": args.unit_id,
+                "unit": args.unit or "",
+                "ticket": args.ticket or None,
+                "status": args.status,
+                "ended_at": at,
+                "produced_result": args.produced_result == "yes",
+            }
+            row["units"] = merge_units(
+                row.get("units") if isinstance(row.get("units"), list) else [], [event_unit])
+        row["updated_at"] = at
+        atomic_json(path, row)
+    return 0
+
+
+def hours_text(seconds: float) -> str:
+    hours = max(1, int(seconds // 3600))
+    return f"{hours} hour" if hours == 1 else f"{hours} hours"
+
+
+def ticket_target(value: Any, fallback: str) -> str:
+    text = str(value or "")
+    return text if TICKET_RE.fullmatch(text) else fallback
+
+
+def finding_link(label: str, url: Any) -> str:
+    if isinstance(url, str) and url.startswith("https://"):
+        return f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+    return html.escape(label)
+
+
+def make_findings(row: dict[str, Any], current: dt.datetime) -> list[dict[str, Any]]:
+    slug = str(row.get("runner") or "unknown")
+    findings: list[dict[str, Any]] = []
+    wait = row.get("wait") if isinstance(row.get("wait"), dict) else {}
+    wait_state = str(wait.get("state") or "")
+    wait_since = parse_time(wait.get("since"))
+    if wait_state in WAIT_STATES and wait_since and (current - wait_since).total_seconds() >= WAIT_SECONDS:
+        pr = wait.get("pr") if isinstance(wait.get("pr"), dict) else {}
+        pr_number = pr.get("number")
+        if wait_state == "checks-pending":
+            reason = f"{slug}: PR {pr_number or 'work'} has had checks pending for {hours_text((current - wait_since).total_seconds())}."
+            html_reason = f"{finding_link('PR ' + str(pr_number), pr.get('url')) if pr_number else 'The current work'} has had checks pending since {html.escape(str(wait.get('since')))}."
+        elif wait_state == "awaiting-merge":
+            reason = f"{slug}: PR {pr_number or 'work'} has awaited merge for {hours_text((current - wait_since).total_seconds())}."
+            html_reason = f"{finding_link('PR ' + str(pr_number), pr.get('url')) if pr_number else 'The current work'} has awaited merge since {html.escape(str(wait.get('since')))}."
+        else:
+            detail = str(wait.get("reason") or "the current work is blocked")
+            reason = f"{slug}: {detail} for {hours_text((current - wait_since).total_seconds())}."
+            html_reason = f"The runner has been blocked since {html.escape(str(wait.get('since')))} because {html.escape(detail)}."
+        findings.append({
+            "key": f"wait:{slug}:{wait_state}:{wait.get('ticket') or pr_number or 'none'}",
+            "rule": "wait-over-two-hours", "runner": slug, "since": iso(wait_since),
+            "ticket": wait.get("ticket"), "reason": reason, "html_reason": html_reason,
+        })
+
+    eligible = row.get("eligible_work") if isinstance(row.get("eligible_work"), dict) else {}
+    count = int(eligible.get("count") or 0)
+    eligible_since = parse_time(eligible.get("since"))
+    completed = row.get("last_completed_run") if isinstance(row.get("last_completed_run"), dict) else {}
+    completed_at = parse_time(completed.get("at"))
+    anchors = [value for value in (eligible_since, completed_at) if value]
+    no_progress_since = max(anchors) if anchors else None
+    if count > 0 and no_progress_since and (current - no_progress_since).total_seconds() >= ELIGIBLE_SECONDS:
+        reason = f"{slug}: {count} eligible work item{'s' if count != 1 else ''} and no completed run for {hours_text((current - no_progress_since).total_seconds())}."
+        html_reason = f"The runner has {count} eligible work item{'s' if count != 1 else ''} and no completed run since {html.escape(iso(no_progress_since))}."
+        findings.append({
+            "key": f"eligible:{slug}", "rule": "eligible-without-completion",
+            "runner": slug, "since": iso(no_progress_since), "ticket": eligible.get("ticket"),
+            "reason": reason, "html_reason": html_reason,
+        })
+
+    attempt = row.get("repeated_attempt") if isinstance(row.get("repeated_attempt"), dict) else {}
+    if int(attempt.get("count") or 0) >= 3 and attempt.get("failure_signature"):
+        since = parse_time(attempt.get("first_at")) or current
+        summary = str(attempt.get("failure_summary") or "the same failure")
+        reason = f"{slug}: {attempt.get('ticket') or 'the same ticket'} failed {attempt.get('count')} times with the same failure: {summary}."
+        ticket_label = str(attempt.get("ticket") or "The same ticket")
+        html_reason = f"{finding_link(ticket_label, attempt.get('ticket_url'))} failed {attempt.get('count')} times with the same failure: {html.escape(summary)}."
+        findings.append({
+            "key": f"attempt:{slug}:{attempt.get('ticket') or 'none'}:{attempt.get('failure_signature')}",
+            "rule": "repeated-failure", "runner": slug, "since": iso(since),
+            "ticket": attempt.get("ticket"), "reason": reason, "html_reason": html_reason,
+        })
+
+    for unit in row.get("units") if isinstance(row.get("units"), list) else []:
+        if not isinstance(unit, dict) or unit.get("produced_result") is not False or not unit.get("ended_at"):
+            continue
+        since = parse_time(unit.get("ended_at")) or current
+        kind = str(unit.get("kind") or "work")
+        unit_id = str(unit.get("id") or "unknown")
+        reason = f"{slug}: {kind} {unit_id} ended without a result."
+        html_reason = f"The {html.escape(kind)} unit ended without a result."
+        findings.append({
+            "key": f"unit:{slug}:{kind}:{unit_id}", "rule": "unit-without-result",
+            "runner": slug, "since": iso(since), "ticket": unit.get("ticket"),
+            "reason": reason, "html_reason": html_reason,
+        })
+    return findings
+
+
+def comment_body(finding: dict[str, Any], manual: bool) -> str:
+    next_step = "Product Bot switched this runner to manual and will keep the existing alert updated." if manual else "Product Bot is monitoring this runner and will update this alert when the reason changes."
+    return (
+        f"<p><strong>Decision: {html.escape(finding['runner'])} is stalled.</strong></p>"
+        f"<p>Reason: {finding['html_reason']}</p>"
+        f"<p>Next: {next_step}</p>"
+    )
+
+
+def extract_comment_id(output: str) -> str | None:
+    try:
+        value = json.loads(output)
+    except ValueError:
+        value = None
+
+    def walk(item: Any) -> str | None:
+        if isinstance(item, dict):
+            if item.get("id") is not None and any(key in item for key in ("text", "comment", "commentText", "createdAt")):
+                return str(item["id"])
+            for key in ("comment", "data", "result"):
+                if key in item:
+                    found = walk(item[key])
+                    if found:
+                        return found
+        return None
+
+    found = walk(value)
+    if found:
+        return found
+    match = re.search(r'"id"\s*:\s*"?([A-Za-z0-9_-]+)', output)
+    return match.group(1) if match else None
+
+
+def posted_comment_id(state_dir: Path, target: str) -> str | None:
+    path = state_dir / "product-bot.posted-comments"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        ref, _, comment_id = line.partition(" ")
+        if ref == target and comment_id:
+            return comment_id.strip()
+    return None
+
+
+def board_write(board_cli: str, action: str, target: str, body: str, state_dir: Path) -> tuple[bool, str | None]:
+    command = [board_cli, "comment", action, target, "--text", body]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"fleet progress: board {action} failed: {error}", file=sys.stderr)
+        return False, None
+    if result.returncode != 0:
+        print(f"fleet progress: board {action} failed: {result.stderr.strip()[:300]}", file=sys.stderr)
+        return False, None
+    comment_id = extract_comment_id(result.stdout)
+    if action == "add" and not comment_id:
+        comment_id = posted_comment_id(state_dir, target)
+    return True, comment_id
+
+
+def notify(line: str) -> bool:
+    line = " ".join(line.split())
+    custom = os.environ.get("FLEET_TELEGRAM_NOTIFIER", "").strip()
+    try:
+        if custom:
+            result = subprocess.run([*shlex.split(custom), line], capture_output=True,
+                                    text=True, timeout=30, check=False)
+        else:
+            env_file = os.environ.get(
+                "FLEET_TELEGRAM_ENV",
+                str(Path.home() / ".config/hypertask-env.sh"),
+            )
+            script = r'''
+set -a
+[ ! -r "$1" ] || . "$1"
+[ -n "${TELEGRAM_HYPERTASK_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_HYPERTASK_CHAT_ID:-}" ] || exit 2
+curl -sf --max-time 15 "https://api.telegram.org/bot${TELEGRAM_HYPERTASK_BOT_TOKEN}/sendMessage" \
+  -d "chat_id=${TELEGRAM_HYPERTASK_CHAT_ID}" --data-urlencode "text=$2" >/dev/null
+'''
+            result = subprocess.run(["bash", "-c", script, "fleet-notify", env_file, line],
+                                    capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"fleet progress: Telegram notify failed: {error}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print("fleet progress: Telegram notify failed through the configured notifier", file=sys.stderr)
+        return False
+    return True
+
+
+def switch_manual(manager_cli: str, manager_slug: str, slug: str) -> bool:
+    environment = dict(os.environ)
+    environment["AGENT_SLUG"] = manager_slug
+    try:
+        result = subprocess.run(
+            [manager_cli, "mode", "manual", "--runner", slug],
+            capture_output=True, text=True, timeout=30, check=False, env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"fleet progress: manual switch failed for {slug}: {error}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(f"fleet progress: manual switch failed for {slug}: {result.stderr.strip()[:300]}", file=sys.stderr)
+        return False
+    return True
+
+
+def update_analytics(path: Path, active: list[dict[str, Any]]) -> None:
+    with locked(path):
+        row = load_json(path, {})
+        if not isinstance(row, dict):
+            return
+        summaries = [
+            {"rule": item["rule"], "stalled_since": item["since"], "reason": item["reason"]}
+            for item in sorted(active, key=lambda item: item["since"])
+        ]
+        row["stalls"] = summaries
+        row["stall"] = summaries[0] if summaries else None
+        atomic_json(path, row)
+
+
+def command_supervise(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir)
+    current = now_utc(args.now)
+    at = iso(current)
+    progress_rows: list[tuple[Path, dict[str, Any]]] = []
+    findings: list[dict[str, Any]] = []
+    for path in sorted(state_dir.glob("*.progress.json")):
+        row = load_json(path, {})
+        if not isinstance(row, dict) or row.get("schema_version") != SCHEMA_VERSION or not row.get("runner"):
+            continue
+        progress_rows.append((path, row))
+        findings.extend(make_findings(row, current))
+
+    state_path = state_dir / "fleet-stalls.json"
+    with locked(state_path):
+        state = load_json(state_path, {"schema_version": 1, "stalls": {}})
+        if not isinstance(state, dict):
+            state = {"schema_version": 1, "stalls": {}}
+        entries = state.setdefault("stalls", {})
+        if not isinstance(entries, dict):
+            entries = {}
+            state["stalls"] = entries
+        manual_runners = state.setdefault("manual_runners", {})
+        if not isinstance(manual_runners, dict):
+            manual_runners = {}
+            state["manual_runners"] = manual_runners
+        active_keys = {finding["key"] for finding in findings}
+        for key, entry in list(entries.items()):
+            if key not in active_keys and isinstance(entry, dict) and entry.get("active"):
+                entry["active"] = False
+                entry["resolved_at"] = at
+
+        for finding in findings:
+            key = finding["key"]
+            entry = entries.setdefault(key, {})
+            if entry and not entry.get("active"):
+                entry.pop("notified_at", None)
+                entry.pop("comment_body", None)
+                entry["reopened_at"] = at
+            entry.update({
+                "active": True, "runner": finding["runner"], "rule": finding["rule"],
+                "stalled_since": finding["since"], "reason": finding["reason"],
+                "target": ticket_target(finding.get("ticket"), args.toolkit_ticket),
+                "last_seen_at": at,
+            })
+            age = (current - (parse_time(finding["since"]) or current)).total_seconds()
+            runner_manual = manual_runners.setdefault(finding["runner"], {})
+            if age >= MANUAL_SECONDS and not runner_manual.get("manual_at"):
+                if switch_manual(args.manager_cli, args.manager_slug, finding["runner"]):
+                    runner_manual["manual_at"] = at
+            if runner_manual.get("manual_at"):
+                entry["manual_at"] = runner_manual["manual_at"]
+            body = comment_body(finding, bool(runner_manual.get("manual_at")))
+            if body != entry.get("comment_body"):
+                comment_id = str(entry.get("comment_id") or "")
+                if comment_id:
+                    ok, _ = board_write(args.board_cli, "update", comment_id, body, state_dir)
+                else:
+                    ok, found_id = board_write(args.board_cli, "add", entry["target"], body, state_dir)
+                    if found_id:
+                        entry["comment_id"] = found_id
+                if ok:
+                    entry["comment_body"] = body
+                    entry["commented_at"] = at
+            if not entry.get("notified_at") and notify(f"[fleet stall] {finding['reason']}"):
+                entry["notified_at"] = at
+            if runner_manual.get("manual_at") and not runner_manual.get("owner_notified_at"):
+                line = f"[fleet manual] {finding['runner']} switched to manual after six hours without progress."
+                if notify(line):
+                    runner_manual["owner_notified_at"] = at
+            if runner_manual.get("owner_notified_at"):
+                entry["owner_notified_at"] = runner_manual["owner_notified_at"]
+        state["updated_at"] = at
+        atomic_json(state_path, state)
+
+    by_runner: dict[str, list[dict[str, Any]]] = {}
+    for finding in findings:
+        by_runner.setdefault(finding["runner"], []).append(finding)
+    for path, row in progress_rows:
+        update_analytics(path, by_runner.get(str(row.get("runner")), []))
+    print(f"fleet progress: {len(progress_rows)} runner file(s), {len(findings)} active stall(s)")
+    return 0
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(description=__doc__)
+    commands = root.add_subparsers(dest="command", required=True)
+
+    tick = commands.add_parser("tick")
+    tick.add_argument("--state-dir", required=True)
+    tick.add_argument("--slug", required=True)
+    tick.add_argument("--eligible-count", type=int, default=0)
+    tick.add_argument("--eligible-ticket", default="")
+    tick.add_argument("--eligible-url", default="")
+    tick.add_argument("--wait-state", choices=sorted(WAIT_STATES), default="")
+    tick.add_argument("--wait-since", default="")
+    tick.add_argument("--wait-ticket", default="")
+    tick.add_argument("--wait-pr", default="")
+    tick.add_argument("--wait-pr-url", default="")
+    tick.add_argument("--wait-reason", default="")
+    tick.add_argument("--preserve-work-state", action="store_true")
+    tick.add_argument("--now")
+    tick.set_defaults(func=command_tick)
+
+    event = commands.add_parser("event")
+    event.add_argument("--state-dir", required=True)
+    event.add_argument("--slug", required=True)
+    event.add_argument("--event", required=True,
+                       choices=("completed-run", "pr-opened", "merge", "failure", "unit"))
+    event.add_argument("--ticket", default="")
+    event.add_argument("--ticket-url", default="")
+    event.add_argument("--pr", default="")
+    event.add_argument("--pr-url", default="")
+    event.add_argument("--occurred-at", default="")
+    event.add_argument("--detail", default="")
+    event.add_argument("--kind", choices=("build", "instruction"))
+    event.add_argument("--unit-id", default="")
+    event.add_argument("--unit", default="")
+    event.add_argument("--status", default="ended")
+    event.add_argument("--produced-result", choices=("yes", "no"), default="yes")
+    event.add_argument("--now")
+    event.set_defaults(func=command_event)
+
+    supervise = commands.add_parser("supervise")
+    supervise.add_argument("--state-dir", required=True)
+    supervise.add_argument("--board-cli", required=True)
+    supervise.add_argument("--manager-cli", required=True)
+    supervise.add_argument("--manager-slug", required=True)
+    supervise.add_argument("--toolkit-ticket", required=True)
+    supervise.add_argument("--now")
+    supervise.set_defaults(func=command_supervise)
+    return root
+
+
+def main() -> int:
+    args = parser().parse_args()
+    if args.command == "event":
+        if args.event in {"pr-opened", "merge"} and not args.pr:
+            parser().error(f"{args.event} needs --pr")
+        if args.event == "unit" and (not args.kind or not args.unit_id):
+            parser().error("unit needs --kind and --unit-id")
+    return int(args.func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

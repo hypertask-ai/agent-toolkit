@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "runner": "dev-1",
+  "updated_at": "2026-09-18T11:59:00Z",
+  "last_tick_at": "2026-09-18T11:59:00Z",
+  "last_completed_run": {"ticket": "HTPR-632", "ticket_url": "https://app.hypertask.ai/detail/project-15/632", "at": "2026-09-17T05:00:00Z"},
+  "last_pr_opened": {"number": 633, "url": "https://github.com/hypertask-ai/hypertask/pull/633", "ticket": "HTPR-633", "at": "2026-09-17T06:00:00Z"},
+  "last_merge": null,
+  "wait": {
+    "state": "checks-pending",
+    "since": "2026-09-17T06:00:00Z",
+    "ticket": "HTPR-633",
+    "reason": "checks pending",
+    "pr": {"number": 633, "url": "https://github.com/hypertask-ai/hypertask/pull/633"}
+  },
+  "eligible_work": {"count": 0, "since": null, "ticket": null, "ticket_url": null},
+  "repeated_attempt": null,
+  "units": [],
+  "stall": null,
+  "stalls": []
+}

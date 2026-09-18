@@ -90,6 +90,19 @@ case "$GRAFT" in
   on|off) : ;;
   *) die "GRAFT must be on or off, got '$GRAFT'" "set GRAFT=off unless this agent is in the Graft trial" ;;
 esac
+FLEET_PROGRESS_SUPERVISOR="${FLEET_PROGRESS_SUPERVISOR:-}"
+if [ -z "$FLEET_PROGRESS_SUPERVISOR" ]; then
+  [ "$SLUG" = "product-bot" ] && FLEET_PROGRESS_SUPERVISOR="on" || FLEET_PROGRESS_SUPERVISOR="off"
+fi
+case "$FLEET_PROGRESS_SUPERVISOR" in
+  on|off) : ;;
+  *) die "FLEET_PROGRESS_SUPERVISOR must be on or off, got '$FLEET_PROGRESS_SUPERVISOR'" \
+       "set it only on the one Product Bot runner" ;;
+esac
+FLEET_STALL_TICKET="${FLEET_STALL_TICKET:-AGTE-37}"
+FLEET_TELEGRAM_NOTIFIER="${FLEET_TELEGRAM_NOTIFIER:-}"
+FLEET_TELEGRAM_ENV="${FLEET_TELEGRAM_ENV:-$HOME/.config/hypertask-env.sh}"
+export FLEET_TELEGRAM_NOTIFIER FLEET_TELEGRAM_ENV
 # An agent may also take tickets nobody has claimed, which is how a board column
 # becomes a queue without anyone assigning by hand. Off unless the conf says so,
 # because on a shared board it is the difference between helping and barging in.
@@ -343,6 +356,19 @@ TRIAGE_STATE_DIR="${TRIAGE_STATE_DIR:-$STATE_DIR/triage}"
 # about this ticket, and the count of how many it has already answered.
 ADVISOR_DIR="${ADVISOR_DIR:-$STATE_DIR/advisor}"
 TRIAGE_SH="$CORE_ROOT/scripts/triage.sh"
+AGENT_PROGRESS="$CORE_ROOT/scripts/agent-progress"
+[ -x "$AGENT_PROGRESS" ] || die "runner progress writer is missing at $AGENT_PROGRESS" \
+  "reinstall the agent template before the next tick"
+PROGRESS_WAIT_STATE=""
+PROGRESS_WAIT_SINCE=""
+PROGRESS_WAIT_TICKET=""
+PROGRESS_WAIT_PR=""
+PROGRESS_WAIT_PR_URL=""
+PROGRESS_WAIT_REASON=""
+PROGRESS_ELIGIBLE_COUNT=0
+PROGRESS_ELIGIBLE_TICKET=""
+PROGRESS_ELIGIBLE_URL=""
+PROGRESS_COLLECTION_COMPLETE="no"
 touch "$SEEN" "$ATTEMPTS" "$POSTED" "$OPENED_PRS" "$RUNS"
 
 # ticket_run_state <ticket-ref>: newest "<epoch> <comment-id>" row, if any.
@@ -445,6 +471,62 @@ PYEOF
 log() {
   printf '%s %s\n' "$(date -Is)" "$*" >> "$LOG"
   if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
+}
+
+progress_event() {
+  [ "$DRY_RUN" = "no" ] || return 0
+  "$AGENT_PROGRESS" event --state-dir "$STATE_DIR" --slug "$SLUG" "$@" \
+    >> "$LOG" 2>&1 || log "progress event failed: $*"
+}
+
+finish_tick() {
+  local rc=$? status_fields status_ticket status_at status_reason
+  local -a progress_args
+  trap - EXIT
+  set +e
+  if [ "$DRY_RUN" = "no" ]; then
+    if [ -z "$PROGRESS_WAIT_STATE" ] && [ -s "$STATUS" ]; then
+      status_fields="$(python3 - "$STATUS" <<'PYEOF'
+import json, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+print(str(row.get("ticket") or ""))
+print(str(row.get("at") or ""))
+print(" ".join(str(row.get("detail") or "the last run failed").split())[-240:])
+PYEOF
+)"
+      { IFS= read -r status_ticket; IFS= read -r status_at; IFS= read -r status_reason; } <<< "$status_fields"
+      if [ -n "$status_ticket" ]; then
+        PROGRESS_WAIT_STATE="blocked"
+        PROGRESS_WAIT_SINCE="$status_at"
+        PROGRESS_WAIT_TICKET="$status_ticket"
+        PROGRESS_WAIT_REASON="$status_reason"
+      fi
+    fi
+    progress_args=(tick --state-dir "$STATE_DIR" --slug "$SLUG"
+      --eligible-count "$PROGRESS_ELIGIBLE_COUNT"
+      --eligible-ticket "$PROGRESS_ELIGIBLE_TICKET" --eligible-url "$PROGRESS_ELIGIBLE_URL")
+    if [ "$PROGRESS_COLLECTION_COMPLETE" != "yes" ]; then
+      progress_args+=(--preserve-work-state)
+    fi
+    if [ -n "$PROGRESS_WAIT_STATE" ]; then
+      progress_args+=(--wait-state "$PROGRESS_WAIT_STATE" --wait-since "$PROGRESS_WAIT_SINCE"
+        --wait-ticket "$PROGRESS_WAIT_TICKET" --wait-pr "$PROGRESS_WAIT_PR"
+        --wait-pr-url "$PROGRESS_WAIT_PR_URL" --wait-reason "$PROGRESS_WAIT_REASON")
+    fi
+    "$AGENT_PROGRESS" "${progress_args[@]}" >> "$LOG" 2>&1 \
+      || log "progress snapshot failed for $SLUG"
+    if [ "$FLEET_PROGRESS_SUPERVISOR" = "on" ]; then
+      "$AGENT_PROGRESS" supervise --state-dir "$STATE_DIR" --board-cli "$BOARD_CLI" \
+        --manager-cli "$CORE_ROOT/scripts/agent-template" --manager-slug "$SLUG" \
+        --toolkit-ticket "$FLEET_STALL_TICKET" >> "$LOG" 2>&1 \
+        || log "fleet progress supervision failed"
+    fi
+  fi
+  : > "$LOCK"
+  exit "$rc"
 }
 
 # post_ticket_comment <ticket-ref-or-url> <text|file> <payload>
@@ -571,7 +653,7 @@ PYEOF
 run_advisor_instruction() {
   local instruction_dir="$STATE_DIR/$SLUG-instructions" files instruction_file row status
   local instruction_id instruction ticket prompt prompt_file reply_file err_file result_file
-  local unit unit_state unit_state_rc launch_err launch_rc rc reply first_line comment comment_status
+  local unit unit_state unit_state_rc launch_err launch_rc rc reply first_line comment comment_status produced_result
   [ "$MAINTAINER" = "on" ] && [ -d "$instruction_dir" ] || return 1
   shopt -s nullglob
   files=("$instruction_dir"/*.json)
@@ -608,7 +690,9 @@ run_advisor_instruction() {
     unit_state_rc=$?
     set -e
     log "instruction $instruction_id unit=$unit systemd_rc=$unit_state_rc state=$(printf '%s' "$unit_state" | tr '\n' ' ')"
+    produced_result="no"
     if [ -s "$result_file" ]; then
+      produced_result="yes"
       read -r rc < "$result_file" || rc=125
     elif [ "$unit_state_rc" -eq 0 ]; then
       case "$unit_state" in
@@ -628,6 +712,8 @@ run_advisor_instruction() {
       cat "$err_file" 2>/dev/null || true
     } >> "$LOG"
     if [ "$rc" -ne 0 ] || [ -z "${reply//[[:space:]]/}" ]; then
+      progress_event --event unit --kind instruction --unit-id "$instruction_id" --unit "$unit" \
+        --ticket "$ticket" --status failed --produced-result "$produced_result"
       log "run FAILED instruction=$instruction_id source=advisor exit=$rc; unit completion recorded and state cleaned"
       rm -f "$instruction_file" "$(row_field "$row" prompt)" "$reply_file" "$err_file" "$result_file"
       return 1
@@ -664,6 +750,8 @@ PYEOF
     if [ "$comment_status" = "failed" ]; then
       log "advisor reply $instruction_id could not comment on $ticket after 2 attempts; no further comment will be tried"
     fi
+    progress_event --event unit --kind instruction --unit-id "$instruction_id" --unit "$unit" \
+      --ticket "$ticket" --status completed --produced-result "$produced_result"
     rm -f "$instruction_file" "$(row_field "$row" prompt)" "$reply_file" "$err_file" "$result_file"
     log "run done instruction=$instruction_id source=advisor exit=0 comment=$comment_status"
     return 1
@@ -961,7 +1049,7 @@ fi
 # Keep the lock inode stable: another hand-run opens this file before flocking,
 # so replacing it would detach the metadata from the lock that protects it.
 : > "$LOCK"
-trap ': > "$LOCK"' EXIT
+trap finish_tick EXIT
 
 MENTION="$(adapter_mention_token "$AGENT_ID")"
 answerer_agent_rows() {
@@ -1010,6 +1098,9 @@ PR_GATE_ACTION=""
 PR_GATE_NUMBER=""
 PR_GATE_STATE=""
 PR_GATE_TICKET=""
+PR_GATE_URL=""
+PR_GATE_SINCE=""
+PR_GATE_MERGED_AT=""
 if declare -F adapter_pr_gate >/dev/null 2>&1; then
   PR_GATES="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
               "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" "$OPENED_PRS" 2>>"$LOG")" || die \
@@ -1023,6 +1114,15 @@ if [ -n "$PR_GATES" ]; then
   PR_GATE_NUMBER="$(row_field "$PR_GATE" number)"
   PR_GATE_STATE="$(row_field "$PR_GATE" state)"
   PR_GATE_TICKET="$(row_field "$PR_GATE" ticket)"
+  PR_GATE_URL="$(row_field "$PR_GATE" url)"
+  PR_GATE_SINCE="$(row_field "$PR_GATE" since)"
+  PR_GATE_MERGED_AT="$(row_field "$PR_GATE" merged_at)"
+  case "$PR_GATE_STATE" in
+    merged-*)
+      progress_event --event merge --pr "$PR_GATE_NUMBER" --pr-url "$PR_GATE_URL" \
+        --ticket "$PR_GATE_TICKET" --occurred-at "$PR_GATE_MERGED_AT"
+      ;;
+  esac
   gate_rows="$BLOCKED.gates.$$"
   printf '%s\n' "$PR_GATES" > "$gate_rows"
   python3 - "$gate_rows" "$BLOCKED" <<'PYEOF'
@@ -1052,6 +1152,19 @@ print("owned non-live PRs oldest first: " + ", ".join(parts))
   explain "$PR_GATE_SUMMARY"
 else
   rm -f "$BLOCKED"
+fi
+if [ "$PR_GATE_ACTION" = "wait" ]; then
+  PROGRESS_WAIT_TICKET="$PR_GATE_TICKET"
+  PROGRESS_WAIT_PR="$PR_GATE_NUMBER"
+  PROGRESS_WAIT_PR_URL="$PR_GATE_URL"
+  PROGRESS_WAIT_SINCE="$PR_GATE_SINCE"
+  case "$PR_GATE_STATE" in
+    checks-pending|awaiting-merge) PROGRESS_WAIT_STATE="$PR_GATE_STATE" ;;
+    *)
+      PROGRESS_WAIT_STATE="blocked"
+      PROGRESS_WAIT_REASON="$PR_GATE_STATE"
+      ;;
+  esac
 fi
 
 # A third source of candidates, alongside the board's own list: tickets this
@@ -1448,6 +1561,15 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
   E_REPLY_ONLY+=("$is_reply_only")
 done <<< "$CANDIDATES"
 
+PROGRESS_COLLECTION_COMPLETE="yes"
+PROGRESS_ELIGIBLE_COUNT="$picked"
+first_eligible=""
+for eligible_index in $(rank_order); do first_eligible="$eligible_index"; break; done
+if [ -n "$first_eligible" ]; then
+  PROGRESS_ELIGIBLE_TICKET="$(row_field "${E_ROW[$first_eligible]}" ref)"
+  PROGRESS_ELIGIBLE_URL="$(row_field "${E_ROW[$first_eligible]}" url)"
+fi
+
 # Pending checks and merged-but-not-deployed PRs deliberately consume the tick.
 # An emergency above is the one exception and remains eligible.
 if [ -n "$PR_GATE" ] && [ "$PR_GATE_ACTION" = "wait" ] && [ "$picked" -eq 0 ]; then
@@ -1670,7 +1792,7 @@ $PROMPT"
 MANAGER COMMANDS:
 - \`agent-template ctl start|stop|status <slug>\`. Example: "stop dev 1" runs \`agent-template ctl stop dev-1\`.
 - \`agent-template delegate <ticket> <slug> --why \"<one line reason>\"\`. Example: "give HTPR-6550 to dev 2" runs \`agent-template delegate HTPR-6550 dev-2 --why \"Take the implementation\"\`.
-- \`agent-template mode manual|auto [--board <id>]\`. Example: "switch the product board to manual" runs \`agent-template mode manual\`.
+- \`agent-template mode manual|auto [--board <id>|--runner <slug>]\`. Example: "switch the product board to manual" runs \`agent-template mode manual\`.
 - \`agent-template model <slug> <preset>\`. Presets are \`grok-fast\`, \`glm-flash\`, and \`codex-sol\`. Example: "put dev 2 on grok fast" runs \`agent-template model dev-2 grok-fast\`.
 - \`agent-template quiet on|off [<slug>|all]\`. Example: "quiet off for qa-1" runs \`agent-template quiet off qa-1\`.
 - \`agent-template feedback --as <slug> --kind bug|change|idea --what \"<summary>\" --got \"<current behavior or context>\" --expected \"<desired behavior>\"\`. Example: "file a toolkit ticket: add a setup report" runs \`agent-template feedback --as $SLUG --kind idea --what \"Add a setup report\" --got \"No setup report exists\" --expected \"Provide a setup report\"\`.
@@ -1717,6 +1839,8 @@ This reply-only run must leave the ticket in its current column."
       log "run FAILED $ref: could not make a working directory under $WORKDIR_ROOT"
       if [ "$is_pr_fix" = "no" ]; then
         printf '%s %s model failed\n' "$task_id" "$(date +%s)" >> "$ATTEMPTS"
+        progress_event --event failure --ticket "$ref" --ticket-url "$url" \
+          --detail "could not create a working directory"
       fi
       write_failure_status "$ref" workdir "could not create a working directory under $WORKDIR_ROOT"
       continue
@@ -1842,6 +1966,8 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       fi
       printf '%s\t%s\t%s\n' "$PR_REPO" "$opened_number" "$ref" >> "$OPENED_PRS"
       opened_url="https://github.com/$PR_REPO/pull/$opened_number"
+      progress_event --event pr-opened --pr "$opened_number" --pr-url "$opened_url" \
+        --ticket "$ref" --ticket-url "$url"
       log "recorded PR #$opened_number as opened by $SLUG during the $ref run"
       if declare -F adapter_run_activity >/dev/null 2>&1; then
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "PR opened $opened_url"
@@ -1865,6 +1991,9 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     # carry the failure details.
     log "run FAILED $ref exit=$rc: see the lines above in $LOG"
     detail="$(tail -c 2000 "$ERRFILE" 2>/dev/null)"
+    if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
+      progress_event --event failure --ticket "$ref" --ticket-url "$url" --detail "$detail"
+    fi
     write_failure_status "$ref" "$rc" "$detail"
     if declare -F adapter_run_activity >/dev/null 2>&1; then
       adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" error "blocked $ref: model exited $rc"
@@ -1895,6 +2024,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       done < "$POSTED"
     fi
     rm -f "$STATUS"
+    progress_event --event completed-run --ticket "$ref" --ticket-url "$url"
     log "run done $ref exit=0"
     if declare -F adapter_run_activity >/dev/null 2>&1; then
       if [ "$is_pr_fix" = "yes" ]; then

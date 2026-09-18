@@ -53,9 +53,9 @@ and adds the setup commands below. Missing or any other value means off.
   `agent-board-poll@<slug>.timer` and `.service` for a current-schema conf.
 - `agent-template delegate <ticket> <slug> --why "<one line reason>"` uses the
   manager's `BOARD_CLI`, assigns the target agent UUID, and posts the handoff.
-- `agent-template mode manual|auto [--board <id>]` changes
-  `CLAIM_UNASSIGNED` for every dev and QA conf on that board. The manager's
-  board is the default.
+- `agent-template mode manual|auto [--board <id>|--runner <slug>]` changes
+  `CLAIM_UNASSIGNED` for every dev and QA conf on that board, or only the named
+  runner. The manager's board is the default.
 - `agent-template model <slug> <preset>` accepts `grok-fast`, `glm-flash`, or
   `codex-sol` and writes only that preset's exact `MODEL_CLI` command.
 - `agent-template quiet on|off [<slug>|all]` writes `QUIET` to one or every
@@ -167,6 +167,47 @@ A failed ticket run writes its host log and
 the app run as failed. It posts no ticket comment and does not add the mention key
 to `<slug>.seen`, so the next tick may retry the same mention. A later successful
 run removes the status file.
+
+## Fleet progress contract
+
+Every real runner tick atomically rewrites
+`~/.local/state/agent-board-poll/<slug>.progress.json`. Product Bot reads every
+schema-version-1 file at the end of its own tick. This keeps fleet supervision
+inside the existing Product Bot runner and does not add another timer or
+supervisor.
+
+All timestamps are UTC ISO 8601 strings. Missing events are JSON `null`.
+Analytics may read `stall.stalled_since` for the badge and `stall.reason` for
+its one-line explanation without deriving a stall again.
+
+| Field | Contract |
+|---|---|
+| `schema_version` | Integer `1`. Readers skip unknown versions. |
+| `runner`, `updated_at`, `last_tick_at` | Runner slug and snapshot times. |
+| `last_completed_run` | Last successful ticket run with `ticket`, `ticket_url`, and `at`. |
+| `last_pr_opened` | Last PR first seen during a run with `number`, `url`, `ticket`, and `at`. |
+| `last_merge` | Last owned merge with `number`, `url`, `ticket`, and `at`. |
+| `wait` | Current `state`, `since`, `ticket`, one-line `reason`, and optional PR `number` plus `url`. States are `checks-pending`, `awaiting-merge`, `blocked`, or `null`. |
+| `eligible_work` | Current `count`, when a non-zero count began in `since`, and the first ranked ticket plus URL. |
+| `repeated_attempt` | Current ticket, consecutive `count`, stable `failure_signature`, safe one-line `failure_summary`, `first_at`, and `last_at`. Success on that ticket clears it. |
+| `units` | Recent build and instruction units with `kind`, `id`, `unit`, `ticket`, `status`, `ended_at`, and nullable `produced_result`. `false` means the unit ended without its result marker. |
+| `stall` | Oldest active stall with `rule`, `stalled_since`, and one-line `reason`, or `null`. |
+| `stalls` | Every active stall in the same three-field analytics shape. |
+
+Product Bot creates one phone-friendly `Decision:` comment per stall, stores its
+comment id in `fleet-stalls.json`, and edits that comment when the reason or
+manual state changes. It sends one line through `FLEET_TELEGRAM_NOTIFIER` when
+that existing notifier command is configured. Otherwise it uses the established
+`TELEGRAM_HYPERTASK_BOT_TOKEN` and `TELEGRAM_HYPERTASK_CHAT_ID` transport from
+`~/.config/hypertask-env.sh`. No token is copied into progress state.
+
+The four mechanical rules are: a pending-check, awaiting-merge, or blocked wait
+past two hours; non-zero eligible work without a completed run for three hours;
+three attempts on one ticket with one failure signature; and a build or
+instruction unit ending without a result. After six hours from `stalled_since`,
+Product Bot runs `mode manual --runner <slug>` and sends one separate owner
+notification once. `FLEET_STALL_TICKET` selects the toolkit ticket used when a
+stall has no runner ticket and defaults to `AGTE-37`.
 
 ## Quiet ticket traffic
 

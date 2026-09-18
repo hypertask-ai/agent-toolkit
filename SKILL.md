@@ -332,9 +332,17 @@ owner-facing agents feed can show as “waiting on PR n”. A supervisor may fla
 a PR older than 24 hours for a human look, but that does not release the agent
 to take new work.
 
-Nothing survives the process except the board, the repo and that log. This is
-the one-process-per-ticket design: the board is the state, so there is no
-queue, no lock database and no daemon to drift.
+Every tick also atomically writes `<slug>.progress.json` in that state folder.
+It records the last completed run, opened PR, merge, current wait and its start,
+eligible count, repeated failure signature, and build or instruction result.
+Product Bot reads every version-1 snapshot on its own tick. The oldest active
+`stall` object exposes `stalled_since` and one line of `reason` directly to
+analytics. The complete field contract and the four thresholds are in
+`MAINTAINER.md` under “Fleet progress contract”.
+
+No work process survives the tick. The board remains the work state, while the
+progress file is read-only telemetry, so there is no queue, lock database, or
+daemon to drift.
 
 **Why a timer plus `Type=oneshot`, not a service with a loop.** systemd refuses
 to start a second run of a oneshot unit while one is still active, so the
@@ -493,7 +501,7 @@ prompts.
 ```sh
 agent-template ctl start|stop|status <slug>
 agent-template delegate <ticket> <slug> --why "<one line reason>"
-agent-template mode manual|auto [--board <id>]
+agent-template mode manual|auto [--board <id>|--runner <slug>]
 agent-template model <slug> <preset>
 agent-template quiet on|off [<slug>|all]
 agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --got "<context>" --expected "<result>"

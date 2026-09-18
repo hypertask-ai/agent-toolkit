@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "runner": "product-bot",
+  "updated_at": "2026-09-18T11:59:00Z",
+  "last_tick_at": "2026-09-18T11:59:00Z",
+  "last_completed_run": {"ticket": "AGTE-36", "ticket_url": "https://app.hypertask.ai/detail/project-5500/36", "at": "2026-09-18T11:00:00Z"},
+  "last_pr_opened": null,
+  "last_merge": null,
+  "wait": {"state": null, "since": null, "ticket": null, "reason": null, "pr": null},
+  "eligible_work": {"count": 0, "since": null, "ticket": null, "ticket_url": null},
+  "repeated_attempt": null,
+  "units": [
+    {"kind": "build", "id": "vstack-37", "unit": "codex-vstack-37", "ticket": "https://app.hypertask.ai/detail/project-5500/37", "status": "ended-without-result", "ended_at": "2026-09-18T11:00:00Z", "produced_result": false},
+    {"kind": "instruction", "id": "advisor-ok", "unit": "advisor-product-ok", "ticket": null, "status": "completed", "ended_at": "2026-09-18T11:30:00Z", "produced_result": true}
+  ],
+  "stall": null,
+  "stalls": []
+}

@@ -1,3 +1,16 @@
+## 3.36.0 - 2026-09-18
+
+- AGTE-37 adds atomic schema-version-1 runner progress snapshots for completed
+  runs, pull requests, waits, eligible work, repeated failures, and build or
+  instruction results.
+- Product Bot detects four mechanical stall conditions, keeps one `Decision:`
+  comment per stall updated, sends one-line Telegram alerts through the existing
+  transport, and publishes stall fields for analytics.
+- A stall lasting six hours switches only the affected runner to manual mode and
+  notifies the owner once, with fixture coverage including a 30-hour PR wait.
+- ACTION: run `agent-template update --keep-timers` so every runner publishes
+  progress without changing timer state.
+
 ## 3.35.0 - 2026-09-18
 
 - AGTE-34 adds an opt-in, keyless structural Graft trial with the CLI, run-scoped

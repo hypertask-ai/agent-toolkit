@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "runner": "dev-2",
+  "updated_at": "2026-09-18T11:59:00Z",
+  "last_tick_at": "2026-09-18T11:59:00Z",
+  "last_completed_run": {"ticket": "HTPR-699", "ticket_url": "https://app.hypertask.ai/detail/project-15/699", "at": "2026-09-18T08:00:00Z"},
+  "last_pr_opened": null,
+  "last_merge": null,
+  "wait": {"state": null, "since": null, "ticket": null, "reason": null, "pr": null},
+  "eligible_work": {"count": 2, "since": "2026-09-18T08:30:00Z", "ticket": "HTPR-700", "ticket_url": "https://app.hypertask.ai/detail/project-15/700"},
+  "repeated_attempt": null,
+  "units": [],
+  "stall": null,
+  "stalls": []
+}

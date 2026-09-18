@@ -216,6 +216,15 @@ else
   bad mode-defaults-manager-board "output=$mode_default"
 fi
 
+mode_runner="$(AGENT_SLUG=manager run_template mode manual --runner worker)"
+if [ "$mode_runner" = 'mode manual runner worker: changed worker.conf' ] \
+   && grep -q '^CLAIM_UNASSIGNED="no"$' "$CONF_DIR/worker.conf" \
+   && grep -q '^CLAIM_UNASSIGNED="yes"$' "$CONF_DIR/qa.conf"; then
+  ok mode-one-runner "manual escalation changes only the named runner"
+else
+  bad mode-one-runner "output=$mode_runner"
+fi
+
 worker_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' | wc -l)"
 model="$(AGENT_SLUG=manager run_template model worker grok-fast)"
 worker_backups_after="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' | wc -l)"
@@ -344,7 +353,7 @@ else
 fi
 
 if grep -qF 'if { [ "${MANAGER:-off}" = "on" ] || [ "$MAINTAINER" = "on" ]; }' "$ROOT/scripts/agent-board-poll" \
-   && grep -qF 'agent-template mode manual|auto [--board <id>]' "$ROOT/scripts/agent-board-poll" \
+   && grep -qF 'agent-template mode manual|auto [--board <id>|--runner <slug>]' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template model <slug> <preset>' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'codex-sol' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template quiet on|off [<slug>|all]' "$ROOT/scripts/agent-board-poll" \

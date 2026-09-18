@@ -7,7 +7,7 @@
 #
 #   agent-template delegate <ticket> <slug> --why "<one line reason>"
 #
-#   agent-template mode manual|auto [--board <id>]
+#   agent-template mode manual|auto [--board <id>|--runner <slug>]
 #
 #   agent-template model <slug> <preset>
 #
@@ -491,18 +491,28 @@ fi
 
 if [ "${SUBCOMMAND:-feedback}" = "mode" ]; then
   manager_authorize "$@"
-  [ "$#" -eq 1 ] || { [ "$#" -eq 3 ] && [ "$2" = "--board" ]; } \
-    || manager_refuse "mode refused: use agent-template mode manual|auto [--board <id>]"
+  [ "$#" -eq 1 ] || { [ "$#" -eq 3 ] && { [ "$2" = "--board" ] || [ "$2" = "--runner" ]; }; } \
+    || manager_refuse "mode refused: use agent-template mode manual|auto [--board <id>|--runner <slug>]"
   mode="$1"
   case "$mode" in
     manual) claim="no" ;;
     auto) claim="yes" ;;
     *) manager_refuse "mode refused: mode must be manual or auto" ;;
   esac
-  board="${3:-$(manager_conf_value "$MANAGER_CONF" BOARD_ID)}"
-  case "$board" in ''|*[!0-9]*) manager_refuse "mode refused: board id must be one number" ;; esac
   MANAGER_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%N)"
   changed=()
+  if [ "${2:-}" = "--runner" ]; then
+    target="$3"
+    conf="$(manager_current_conf "$target")" \
+      || manager_refuse "mode refused: $target is not a current agent slug in the conf dir"
+    if manager_set_conf_value "$conf" CLAIM_UNASSIGNED "$claim"; then
+      changed+=("$(basename "$conf")")
+    fi
+    manager_changed_reply "mode $mode runner $target" "${changed[@]}"
+    exit 0
+  fi
+  board="${3:-$(manager_conf_value "$MANAGER_CONF" BOARD_ID)}"
+  case "$board" in ''|*[!0-9]*) manager_refuse "mode refused: board id must be one number" ;; esac
   config_dir="$(readlink -f "$MANAGER_CONFIG_DIR")"
   shopt -s nullglob
   for candidate in "$config_dir"/*.conf; do

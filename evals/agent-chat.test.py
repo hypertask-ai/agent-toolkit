@@ -59,7 +59,7 @@ assert "agent-template ctl" not in regular_prompt
 assert "agent-template delegate" not in regular_prompt
 assert "agent-template ctl start|stop|status <slug>" in manager_prompt
 assert 'agent-template delegate <ticket> <slug> --why "<one line reason>"' in manager_prompt
-assert "agent-template mode manual|auto [--board <id>]" in manager_prompt
+assert "agent-template mode manual|auto [--board <id>|--runner <slug>]" in manager_prompt
 assert "agent-template model <slug> <preset>" in manager_prompt
 assert "agent-template quiet on|off [<slug>|all]" in manager_prompt
 assert "agent-template feedback --as <slug>" in manager_prompt

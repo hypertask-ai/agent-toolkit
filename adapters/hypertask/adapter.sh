@@ -1120,7 +1120,7 @@ adapter_pr_gate() (
   if ! gh pr list --repo "$repo" --state open --limit 1000 \
       --json number,state,url,title,body,headRefName,createdAt,author > "$tmp/open.json" \
      || ! gh pr list --repo "$repo" --state merged --limit 100 \
-      --json number,state,url,title,body,headRefName,createdAt,author > "$tmp/merged.json"; then
+      --json number,state,url,title,body,headRefName,createdAt,mergedAt,author > "$tmp/merged.json"; then
     printf 'ERROR: cannot list pull requests in %s for the one-ticket-until-live gate\n' "$repo" >&2
     return 1
   fi
@@ -1390,7 +1390,8 @@ import json, os
 pr, live = json.loads(os.environ["PR"]), json.loads(os.environ["LIVE"])
 print(json.dumps({"action":"wait", "state":live["state"], "definition":live["definition"],
                   "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
-                  "title":pr["title"], "branch":pr["headRefName"], "since":pr["createdAt"]}))
+                  "title":pr["title"], "branch":pr["headRefName"], "since":pr["createdAt"],
+                  "merged_at":pr.get("mergedAt")}))
 '
     return 0
   fi

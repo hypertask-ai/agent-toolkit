@@ -63,6 +63,10 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `MANAGER` | `on` allows the manager control commands; default `off`. |
 | `MAINTAINER` | `on` allows manager controls plus allowlisted build, merge, and advisor-instruction commands; default `off`. |
 | `GRAFT` | `on` adds the keyless structural Graft CLI and MCP command to ticket runs and tells the agent to ask Graft before grepping; default `off`. |
+| `FLEET_PROGRESS_SUPERVISOR` | `on` makes this runner evaluate every progress file. Defaults to `on` only for slug `product-bot`. |
+| `FLEET_STALL_TICKET` | Toolkit ticket for stalls with no runner ticket, default `AGTE-37`. |
+| `FLEET_TELEGRAM_NOTIFIER` | Existing notifier command that accepts the one-line alert as its final argument. Empty uses the established Telegram environment transport. |
+| `FLEET_TELEGRAM_ENV` | Shell environment file for that transport, default `~/.config/hypertask-env.sh`. |
 
 On this maintainer host, set `ANSWERER_FALLBACK="product-bot"` in the agent confs so Product Bot handles owner questions only when the first three answerer ranks do not apply. This is host configuration, not a runner default.
 

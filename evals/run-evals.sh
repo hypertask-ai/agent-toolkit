@@ -296,3 +296,8 @@ if [ -z "$ONLY" ] && [ -x "$HERE/feedback-loop.test.sh" ]; then
   echo "-- feedback loop behavioural checks --"
   bash "$HERE/feedback-loop.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/fleet-progress.test.sh" ]; then
+  echo ""
+  echo "-- fleet progress and stall checks --"
+  bash "$HERE/fleet-progress.test.sh"
+fi
