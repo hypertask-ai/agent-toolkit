@@ -1,0 +1,12 @@
+2026-09-17T08:00:00+00:00 run start AGTE-82 key=8200:1 dir=. graft=off attempt=1: assigned
+2026-09-17T08:00:01+00:00 model route for AGTE-82: model (cursor-agent --model cursor-grok-fast)
+2026-09-17T08:10:00+00:00 run done AGTE-82 exit=0
+2026-09-17T08:10:01+00:00 QA run fallback moved AGTE-82 to Bugs from verdict Handoff
+2026-09-18T08:00:00+00:00 run start AGTE-82 key=8200:2 dir=. graft=off attempt=1: assigned
+2026-09-18T08:00:01+00:00 model route for AGTE-82: model (cursor-agent --model cursor-grok-fast)
+2026-09-18T08:08:00+00:00 run done AGTE-82 exit=0
+2026-09-18T08:08:01+00:00 QA run fallback moved AGTE-82 to Done from verdict Done
+2026-09-18T09:00:00+00:00 run start AGTE-81 key=8100:1 dir=. graft=off attempt=1: assigned
+2026-09-18T09:00:01+00:00 model route for AGTE-81: model (cursor-agent --model cursor-grok-fast)
+2026-09-18T09:05:00+00:00 run done AGTE-81 exit=0
+2026-09-18T09:05:01+00:00 QA run fallback moved AGTE-81 to Done from verdict Done
