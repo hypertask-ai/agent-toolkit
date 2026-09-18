@@ -14,5 +14,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Install the real Hypertask CLI for dry-run evals
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/hypertask-cli"
+          gh release download v0.2.3 --repo hypertask-ai/cli \
+            --pattern checksums.txt --pattern hypertask-linux-x86_64 \
+            --dir "$RUNNER_TEMP/hypertask-cli"
+          cd "$RUNNER_TEMP/hypertask-cli"
+          awk '$2 == "hypertask-linux-x86_64"' checksums.txt | sha256sum --check
+          chmod 755 hypertask-linux-x86_64
+          echo "HYPERTASK_REAL_CLI=$RUNNER_TEMP/hypertask-cli/hypertask-linux-x86_64" >> "$GITHUB_ENV"
       - name: Run evals
         run: evals/run-evals.sh

@@ -375,6 +375,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/writer-gate.test.sh" ]; then
   echo "-- bot writer gate behavioural checks --"
   bash "$HERE/writer-gate.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -f "$HERE/comment-writer-real-cli.test.py" ]; then
+  echo ""
+  echo "-- real CLI comment writer dry-run check --"
+  python3 "$HERE/comment-writer-real-cli.test.py"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/reply-contract.test.sh" ]; then
   echo ""
   echo "-- reply contract behavioural checks --"

@@ -826,12 +826,13 @@ else:
     done
     FALLBACK_ARGS=("\${POST_ARGS[@]}")
     if [ "\$USE_IMPROVE" = yes ]; then
-      POST_ARGS+=(--improve)
+      POST_ARGS+=(--improve improve-readability)
       IMPROVE_ERR="\$(mktemp "\${TMPDIR:-/tmp}/agent-comment-improve.XXXXXX")"
       if OUT="\$(hypertask --token "\$TOKEN" "\${POST_ARGS[@]}" 2>"\$IMPROVE_ERR")"; then
         RC=0
       else
         RC=\$?
+        cat "\$IMPROVE_ERR" >&2
         if grep -qiE '(unknown|unrecognized|invalid).*(option|argument).*--improve|--improve.*(unknown|unrecognized|invalid)' "\$IMPROVE_ERR"; then
           _write_comment_with_ai "\$TEXT" "\$REF"
           _outbound_text_gate "\$TEXT" "\$VERBATIM" || { rm -f "\$IMPROVE_ERR"; exit 0; }
@@ -852,8 +853,6 @@ else:
           else
             RC=\$?
           fi
-        else
-          cat "\$IMPROVE_ERR" >&2
         fi
       fi
       rm -f "\$IMPROVE_ERR"
