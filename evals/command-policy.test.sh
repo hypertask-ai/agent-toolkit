@@ -4,7 +4,14 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+completed=no
+cleanup() {
+  if [ "$completed" != yes ]; then
+    printf 'FAIL command-policy.test.sh exited before its summary\n'
+  fi
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 pass=0
 fail=0
 ok() { printf 'PASS %-36s %s\n' "$1" "$2"; pass=$((pass + 1)); }
@@ -270,8 +277,8 @@ enable_provider_fallback
 seed_failures "$state" TEST-5 0
 COMMENT_JSON="" CODEX_RESULT=quota CURSOR_RESULT=success \
   run_poll "$state" "$capture" --once >"$TMP/quota-fallback.out" 2>"$TMP/quota-fallback.err" || true
-codex_line="$(grep -n -m1 '^codex ' "$capture" | cut -d: -f1)"
-cursor_line="$(grep -n -m1 '^cursor ' "$capture" | cut -d: -f1)"
+codex_line="$(grep -n -m1 '^codex ' "$capture" | cut -d: -f1 || true)"
+cursor_line="$(grep -n -m1 '^cursor ' "$capture" | cut -d: -f1 || true)"
 if [ -n "$codex_line" ] && [ -n "$cursor_line" ] && [ "$codex_line" -lt "$cursor_line" ] \
    && [ "$(grep -c '^codex ' "$capture")" -eq 1 ] \
    && [ "$(grep -c '^cursor ' "$capture")" -eq 1 ] \
@@ -292,8 +299,8 @@ sed -i 's/^PROVIDER_ORDER=.*/PROVIDER_ORDER="cursor,codex"/' "$TMP/home/.config/
 seed_failures "$state" TEST-8 0
 COMMENT_JSON="" CODEX_RESULT=success CURSOR_RESULT=quota \
   run_poll "$state" "$capture" --once >"$TMP/configured-order.out" 2>"$TMP/configured-order.err" || true
-codex_line="$(grep -n -m1 '^codex ' "$capture" | cut -d: -f1)"
-cursor_line="$(grep -n -m1 '^cursor ' "$capture" | cut -d: -f1)"
+codex_line="$(grep -n -m1 '^codex ' "$capture" | cut -d: -f1 || true)"
+cursor_line="$(grep -n -m1 '^cursor ' "$capture" | cut -d: -f1 || true)"
 if [ -n "$codex_line" ] && [ -n "$cursor_line" ] && [ "$cursor_line" -lt "$codex_line" ]; then
   ok configured-provider-order "Cursor then Codex is honored when that agent configures it"
 else
@@ -408,4 +415,5 @@ else
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
+completed=yes
 [ "$fail" -eq 0 ]

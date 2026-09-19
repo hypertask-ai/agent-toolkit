@@ -1493,9 +1493,18 @@ PYEOF
     if [ "$EVAL_STATUS" -ne 0 ]; then
       RED_COUNT="$(grep -c '^FAIL ' "$EVAL_OUTPUT" || true)"
       [ "$RED_COUNT" -gt 0 ] || RED_COUNT=1
-      REFUSAL="update to $TARGET_VERSION refused: $RED_COUNT evals red"
+      FAILURE_SUMMARY=""
+      while IFS= read -r failure_line; do
+        [ -z "$FAILURE_SUMMARY" ] || FAILURE_SUMMARY="$FAILURE_SUMMARY; "
+        FAILURE_SUMMARY="$FAILURE_SUMMARY$failure_line"
+      done < <(grep '^FAIL ' "$EVAL_OUTPUT" | head -n 3 || true)
+      [ -n "$FAILURE_SUMMARY" ] || FAILURE_SUMMARY="runner exited $EVAL_STATUS without a FAIL line"
+      REFUSAL="update to $TARGET_VERSION refused: $RED_COUNT evals red: $FAILURE_SUMMARY"
       echo "$REFUSAL"
-      mkdir -p "$FEEDBACK_LOG_DIR"
+      mkdir -p "$FEEDBACK_LOG_DIR" "$UPDATE_STATE_DIR"
+      EVAL_FAILURE_OUTPUT="$UPDATE_STATE_DIR/update-failure-$UPDATE_KEY.evals.log"
+      mv "$EVAL_OUTPUT" "$EVAL_FAILURE_OUTPUT"
+      EVAL_OUTPUT=""
       printf '%s\n' "$REFUSAL" >> "$FEEDBACK_LOG_DIR/update.log"
       if [ "$TIMER_RUN" = "yes" ]; then
         update_file_eval_failure \

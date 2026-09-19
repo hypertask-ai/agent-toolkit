@@ -48,7 +48,10 @@ if [ -n "${AGENT_TEMPLATE_CORE_ROOT:-}" ]; then
 fi
 if [ "${EVAL_MODE:-green}" = red ]; then
   echo 'FAIL staged-release staged failure'
-  echo '1 case(s) run, 1 failed'
+  echo 'FAIL command-policy.test.sh exited 124'
+  echo 'FAIL third-case another failure'
+  echo 'FAIL fourth-case omitted from refusal'
+  echo '4 case(s) run, 4 failed'
   exit 1
 fi
 if [ -n "${EVAL_REJECT_FILE:-}" ] \
@@ -243,12 +246,14 @@ set +e
 EVAL_MODE=red run_update --timer >"$TMP/red.out" 2>"$TMP/red.err"
 status=$?
 set -e
+failure_log="$TMP/state/agent-template/update-failure-test-version-deadbeefdeadbeefdeadbeefdeadbeefdeadbeef.evals.log"
 if [ "$status" -eq 0 ] && [ ! -e "$TMP/installed" ] \
-   && grep -q '^update to test-version refused: 1 evals red$' "$TMP/red.out" \
+   && grep -q '^update to test-version refused: 4 evals red: FAIL staged-release staged failure; FAIL command-policy.test.sh exited 124; FAIL third-case another failure$' "$TMP/red.out" \
+   && grep -q '^FAIL fourth-case omitted from refusal$' "$failure_log" \
    && [ "$(grep -c '^task create --raw --project 5500 ' "$TMP/update-board.log")" -eq 1 ]; then
-  ok red-evals-refuse-swap "red staged evals keep the installed release and file one toolkit bug"
+  ok red-evals-refuse-swap "red staged evals name three failures, preserve the log, and file one toolkit bug"
 else
-  bad red-evals-refuse-swap "status=$status installed=$([ -e "$TMP/installed" ] && echo yes || echo no) output=$(cat "$TMP/red.out") board=$(cat "$TMP/update-board.log")"
+  bad red-evals-refuse-swap "status=$status installed=$([ -e "$TMP/installed" ] && echo yes || echo no) output=$(cat "$TMP/red.out") log=$(cat "$failure_log" 2>/dev/null || true) board=$(cat "$TMP/update-board.log")"
 fi
 
 set +e
