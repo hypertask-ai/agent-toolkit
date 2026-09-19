@@ -345,7 +345,7 @@ fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owner-comment-classification.test.sh" ]; then
   echo ""
   echo "-- owner comment classification behavioural checks --"
-  bash "$HERE/owner-comment-classification.test.sh"
+  run_test bash "$HERE/owner-comment-classification.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/manager-actions.test.sh" ]; then
   echo ""
