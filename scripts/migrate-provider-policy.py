@@ -9,6 +9,8 @@ import shutil
 from pathlib import Path
 
 POLICY_KEYS = ("LADDER", "RESEARCH_CLI", "TRIAGE_HARD_CLI")
+FALLBACK_KEYS = ("PROVIDER_ORDER", "PROVIDER_CODEX_CLI", "PROVIDER_CURSOR_CLI")
+CURSOR_COMMAND = "cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
 
 
 def read_conf(path: Path) -> dict[str, str]:
@@ -36,17 +38,27 @@ def option(argv: list[str], name: str) -> str:
     return ""
 
 
-def had_314_policy(command: str) -> bool:
+def command_provider(command: str) -> str:
     try:
         argv = shlex.split(command)
     except ValueError:
-        return False
+        return ""
     if not argv:
-        return False
+        return ""
     executable = Path(argv[0]).name
-    if executable in {"cursor-agent", "codex", "claude"}:
-        return True
-    return executable == "hax" and option(argv, "--provider") == "codex"
+    if executable == "cursor-agent":
+        return "cursor"
+    if executable == "codex":
+        return "codex"
+    if executable == "claude":
+        return "claude"
+    if executable in {"hax", "pi"}:
+        return option(argv, "--provider")
+    return ""
+
+
+def had_314_policy(command: str) -> bool:
+    return command_provider(command) in {"cursor", "codex", "claude"}
 
 
 def quoted(value: str) -> str:
@@ -56,17 +68,27 @@ def quoted(value: str) -> str:
 def migrate(path: Path, version: str, dry_run: bool) -> bool:
     values = read_conf(path)
     command = values.get("MODEL_CLI", "")
-    if not command or any(key in values for key in POLICY_KEYS) or not had_314_policy(command):
+    if not command:
         return False
 
+    additions: dict[str, str] = {}
     binary = str(Path.home() / ".local/bin/hax")
     high = f"{binary} --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
-    research = f"{binary} --provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session --raw -p"
-    additions = {
-        "LADDER": f"{high}|{high}|{high}",
-        "RESEARCH_CLI": research,
-        "TRIAGE_HARD_CLI": high,
-    }
+    if not any(key in values for key in POLICY_KEYS) and had_314_policy(command):
+        research = f"{binary} --provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session --raw -p"
+        additions.update({
+            "LADDER": f"{high}|{high}|{high}",
+            "RESEARCH_CLI": research,
+            "TRIAGE_HARD_CLI": high,
+        })
+    if not any(key in values for key in FALLBACK_KEYS) and command_provider(command) == "codex":
+        additions.update({
+            "PROVIDER_ORDER": "codex,cursor",
+            "PROVIDER_CODEX_CLI": command,
+            "PROVIDER_CURSOR_CLI": CURSOR_COMMAND,
+        })
+    if not additions:
+        return False
     if dry_run:
         print(f"  would rewrite {path}: " + ", ".join(f"{key}={value}" for key, value in additions.items()))
         return True
@@ -99,7 +121,7 @@ def main() -> int:
         for path in sorted(directory.glob("*.conf")):
             changed += int(migrate(path, args.version, args.dry_run))
     action = "would rewrite" if args.dry_run else "rewrote"
-    print(f"  {action} {changed} conf(s) with the former 3.14 policy")
+    print(f"  {action} {changed} conf(s) with provider policy updates")
     return 0
 
 

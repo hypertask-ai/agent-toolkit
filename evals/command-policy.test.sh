@@ -75,6 +75,22 @@ cat > "$TMP/bin/failing-model" <<'EOF'
 echo 'provider unavailable' >&2
 exit 7
 EOF
+cat > "$TMP/bin/hax" <<'EOF'
+#!/usr/bin/env bash
+printf 'codex %s\n' "$*" >> "$MODEL_CAPTURE"
+case "${CODEX_RESULT:-success}" in
+  quota) echo 'HTTP 429: The usage limit has been reached. Resets at 2026-09-20T10:00:00Z' >&2; exit 1 ;;
+  failure) echo 'provider internal error' >&2; exit 7 ;;
+esac
+EOF
+cat > "$TMP/bin/cursor-agent" <<'EOF'
+#!/usr/bin/env bash
+printf 'cursor %s\n' "$*" >> "$MODEL_CAPTURE"
+case "${CURSOR_RESULT:-success}" in
+  quota) echo 'Quota exhausted. Resets at 2026-09-20T09:00:00Z' >&2; exit 1 ;;
+  failure) echo 'provider internal error' >&2; exit 7 ;;
+esac
+EOF
 cat > "$TMP/bin/timeout-stub" <<'EOF'
 #!/usr/bin/env bash
 shift
@@ -126,6 +142,15 @@ MODEL_OVERRIDE_DIR="$state/overrides"
 EOF
 }
 
+enable_provider_fallback() {
+  cat >> "$TMP/home/.config/agents/test.conf" <<'EOF'
+PROVIDER_ORDER="codex,cursor"
+PROVIDER_CODEX_CLI="hax --provider=codex --model=gpt-5.6-sol -p"
+PROVIDER_CURSOR_CLI="cursor-agent -p --model cursor-grok-4.6-high-fast"
+EOF
+  sed -i 's#^MODEL_CLI=.*#MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol -p"#' "$TMP/home/.config/agents/test.conf"
+}
+
 seed_failures() {
   local state="$1" ref="$2" count="$3" now
   mkdir -p "$state/agent-board-poll"
@@ -142,6 +167,7 @@ run_poll() {
     HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
     XDG_STATE_HOME="$state" COMPANY_SKILLS_DIR="$TMP/company" \
     BOARD_JSON="$TMP/board.json" MODEL_CAPTURE="$capture" \
+    CODEX_RESULT="${CODEX_RESULT:-success}" CURSOR_RESULT="${CURSOR_RESULT:-success}" \
     BOARD_CAPTURE="${BOARD_CAPTURE:-$TMP/board-capture}" BOARD_POST_CAPTURE="${BOARD_POST_CAPTURE:-}" \
     REPLY_POST_CAPTURE="${REPLY_POST_CAPTURE:-$TMP/reply-post}" \
     COMMENT_JSON="${COMMENT_JSON:-}" REPLY_HAX_BIN="$TMP/bin/failing-model" \
@@ -236,7 +262,122 @@ else
   bad failed-mention-obeys-cooldown "status=$(cat "$status_file" 2>/dev/null || true) request=$(cat "$TMP/failure-request.json" 2>/dev/null || true) board=$(cat "$board_capture" 2>/dev/null || true) next=$(cat "$TMP/failure-next.out")"
 fi
 
-# Migration preserves the old cursor policy and leaves a custom pi conf alone.
+# A Codex subscription limit retries the same run on Cursor immediately.
+state="$TMP/state-quota-fallback"; capture="$TMP/capture-quota-fallback"
+write_board TEST-5
+write_conf "$state"
+enable_provider_fallback
+seed_failures "$state" TEST-5 0
+COMMENT_JSON="" CODEX_RESULT=quota CURSOR_RESULT=success \
+  run_poll "$state" "$capture" --once >"$TMP/quota-fallback.out" 2>"$TMP/quota-fallback.err" || true
+codex_line="$(grep -n -m1 '^codex ' "$capture" | cut -d: -f1)"
+cursor_line="$(grep -n -m1 '^cursor ' "$capture" | cut -d: -f1)"
+if [ -n "$codex_line" ] && [ -n "$cursor_line" ] && [ "$codex_line" -lt "$cursor_line" ] \
+   && [ "$(grep -c '^codex ' "$capture")" -eq 1 ] \
+   && [ "$(grep -c '^cursor ' "$capture")" -eq 1 ] \
+   && [ ! -s "$state/agent-board-poll/test.attempts" ] \
+   && grep -qF 'resumed TEST-5 with provider cursor' "$state/agent-board-poll/test.log" \
+   && [ "$(grep -c 'opened local-only run' "$state/agent-board-poll/test.log")" -eq 1 ]; then
+  ok quota-falls-back-in-run "Codex quota resumes the same run on Cursor without spending an attempt"
+else
+  bad quota-falls-back-in-run "launch=$(cat "$capture" 2>/dev/null) attempts=$(cat "$state/agent-board-poll/test.attempts" 2>/dev/null) log=$(tail -n 30 "$state/agent-board-poll/test.log" 2>/dev/null)"
+fi
+
+# The per-agent order also controls the first provider, not only the fallback.
+state="$TMP/state-configured-order"; capture="$TMP/capture-configured-order"
+write_board TEST-8
+write_conf "$state"
+enable_provider_fallback
+sed -i 's/^PROVIDER_ORDER=.*/PROVIDER_ORDER="cursor,codex"/' "$TMP/home/.config/agents/test.conf"
+seed_failures "$state" TEST-8 0
+COMMENT_JSON="" CODEX_RESULT=success CURSOR_RESULT=quota \
+  run_poll "$state" "$capture" --once >"$TMP/configured-order.out" 2>"$TMP/configured-order.err" || true
+codex_line="$(grep -n -m1 '^codex ' "$capture" | cut -d: -f1)"
+cursor_line="$(grep -n -m1 '^cursor ' "$capture" | cut -d: -f1)"
+if [ -n "$codex_line" ] && [ -n "$cursor_line" ] && [ "$cursor_line" -lt "$codex_line" ]; then
+  ok configured-provider-order "Cursor then Codex is honored when that agent configures it"
+else
+  bad configured-provider-order "launch=$(cat "$capture" 2>/dev/null)"
+fi
+
+# A configured provider whose executable is absent is never launched.
+state="$TMP/state-missing-provider"; capture="$TMP/capture-missing-provider"
+write_board TEST-9
+write_conf "$state"
+enable_provider_fallback
+sed -i 's#^PROVIDER_CURSOR_CLI=.*#PROVIDER_CURSOR_CLI="absent-cursor -p"#' "$TMP/home/.config/agents/test.conf"
+seed_failures "$state" TEST-9 0
+COMMENT_JSON="" CODEX_RESULT=quota \
+  run_poll "$state" "$capture" --once >"$TMP/missing-provider.out" 2>"$TMP/missing-provider.err" || true
+status_file="$state/agent-board-poll/test.status"
+if [ "$(grep -c '^codex ' "$capture")" -eq 1 ] \
+   && ! grep -q '^cursor ' "$capture" \
+   && grep -qF 'skipped unavailable provider cursor' "$state/agent-board-poll/test.log" \
+   && python3 -c 'import json,sys; assert json.load(open(sys.argv[1]))["state"] == "waiting-provider-reset"' "$status_file"; then
+  ok missing-provider-skipped "an uninstalled configured provider is skipped before routing"
+else
+  bad missing-provider-skipped "launch=$(cat "$capture" 2>/dev/null) log=$(tail -n 25 "$state/agent-board-poll/test.log" 2>/dev/null) status=$(cat "$status_file" 2>/dev/null)"
+fi
+
+# A non-quota Codex failure is terminal and never routes to Cursor.
+state="$TMP/state-provider-failure"; capture="$TMP/capture-provider-failure"
+write_board TEST-6
+write_conf "$state"
+enable_provider_fallback
+seed_failures "$state" TEST-6 0
+COMMENT_JSON="" CODEX_RESULT=failure CURSOR_RESULT=success \
+  run_poll "$state" "$capture" --once >"$TMP/provider-failure.out" 2>"$TMP/provider-failure.err" || true
+if [ "$(grep -c '^codex ' "$capture")" -eq 1 ] \
+   && ! grep -q '^cursor ' "$capture" \
+   && [ "$(wc -l < "$state/agent-board-poll/test.attempts")" -eq 1 ]; then
+  ok nonquota-does-not-fallback "an ordinary provider error fails once without trying Cursor"
+else
+  bad nonquota-does-not-fallback "launch=$(cat "$capture" 2>/dev/null) attempts=$(cat "$state/agent-board-poll/test.attempts" 2>/dev/null)"
+fi
+
+# When every available subscription is exhausted, the ticket gets the earliest
+# reported reset and the run waits without consuming the generic attempt budget.
+state="$TMP/state-all-quota"; capture="$TMP/capture-all-quota"; board_capture="$TMP/board-all-quota"
+write_board TEST-7
+write_conf "$state"
+enable_provider_fallback
+seed_failures "$state" TEST-7 0
+COMMENT_JSON="" CODEX_RESULT=quota CURSOR_RESULT=quota BOARD_CAPTURE="$board_capture" \
+  run_poll "$state" "$capture" --once >"$TMP/all-quota.out" 2>"$TMP/all-quota.err" || true
+status_file="$state/agent-board-poll/test.status"
+if [ "$(grep -c '^codex ' "$capture")" -eq 1 ] \
+   && [ "$(grep -c '^cursor ' "$capture")" -eq 1 ] \
+   && [ ! -s "$state/agent-board-poll/test.attempts" ] \
+   && grep -qF 'earliest reset at 2026-09-20T09:00:00Z' "$board_capture" \
+   && python3 -c 'import json,sys; row=json.load(open(sys.argv[1])); assert row["state"] == "waiting-provider-reset" and row["reset_at"] == "2026-09-20T09:00:00Z"' "$status_file"; then
+  ok all-quota-waits-for-reset "all subscriptions exhausted records and states the earliest reset"
+else
+  bad all-quota-waits-for-reset "launch=$(cat "$capture" 2>/dev/null) attempts=$(cat "$state/agent-board-poll/test.attempts" 2>/dev/null) board=$(cat "$board_capture" 2>/dev/null) status=$(cat "$status_file" 2>/dev/null)"
+fi
+
+# The handled ticket becomes eligible again as soon as that reset passes.
+python3 - "$status_file" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row["reset_at"] = "2000-01-01T00:00:00Z"
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(row, handle)
+    handle.write("\n")
+PYEOF
+COMMENT_JSON="" CODEX_RESULT=quota CURSOR_RESULT=success BOARD_CAPTURE="$board_capture" \
+  run_poll "$state" "$capture" --once >"$TMP/reset-retry.out" 2>"$TMP/reset-retry.err" || true
+if [ "$(grep -c '^codex ' "$capture")" -eq 2 ] \
+   && [ "$(grep -c '^cursor ' "$capture")" -eq 2 ] \
+   && [ ! -e "$status_file" ] \
+   && grep -qF 'the earliest reported provider reset has passed' "$state/agent-board-poll/test.log"; then
+  ok provider-reset-retries "the ticket retries automatically after its earliest reset"
+else
+  bad provider-reset-retries "launch=$(cat "$capture" 2>/dev/null) status=$(cat "$status_file" 2>/dev/null) log=$(tail -n 35 "$state/agent-board-poll/test.log" 2>/dev/null)"
+fi
+
+# Migration preserves the old cursor policy, configures Codex then Cursor for
+# existing Codex agents, and leaves a custom pi conf alone.
 migrate="$TMP/migrate"
 mkdir -p "$migrate"
 cat > "$migrate/cursor.conf" <<'EOF'
@@ -245,15 +386,23 @@ EOF
 cat > "$migrate/pi.conf" <<'EOF'
 MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash"
 EOF
+cat > "$migrate/codex.conf" <<'EOF'
+MODEL_CLI="/opt/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+LADDER="kept"
+EOF
 HOME="$TMP/home" python3 "$ROOT/scripts/migrate-provider-policy.py" \
   --version 3.16.0 "$migrate" > "$TMP/migrate.out"
 if grep -q '^LADDER=.*/hax --provider=codex.*|.*/hax --provider=codex.*|.*/hax --provider=codex.*--model=gpt-5.6-sol' "$migrate/cursor.conf" \
    && grep -q '^RESEARCH_CLI=.*/hax --provider=codex.*--effort=xhigh' "$migrate/cursor.conf" \
    && grep -q '^TRIAGE_HARD_CLI=.*/hax --provider=codex.*--effort=high' "$migrate/cursor.conf" \
    && [ -f "$migrate/cursor.conf.bak-3.16.0" ] \
+   && grep -qxF 'PROVIDER_ORDER="codex,cursor"' "$migrate/codex.conf" \
+   && grep -qxF 'PROVIDER_CODEX_CLI="/opt/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"' "$migrate/codex.conf" \
+   && grep -qxF 'PROVIDER_CURSOR_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"' "$migrate/codex.conf" \
+   && grep -qxF 'LADDER="kept"' "$migrate/codex.conf" \
    && cmp -s "$migrate/pi.conf" <(printf '%s\n' 'MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash"') \
    && [ ! -e "$migrate/pi.conf.bak-3.16.0" ]; then
-  ok migration-selective "cursor gets explicit policy; pi remains byte-for-byte unchanged"
+  ok migration-selective "Codex gets fallback, Cursor keeps explicit policy, and pi is unchanged"
 else
   bad migration-selective "output=$(cat "$TMP/migrate.out"); cursor=$(cat "$migrate/cursor.conf"); pi=$(cat "$migrate/pi.conf")"
 fi

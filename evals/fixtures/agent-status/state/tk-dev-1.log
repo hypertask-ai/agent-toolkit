@@ -1,2 +1,4 @@
 2026-09-18T10:00:00+00:00 run start AGTE-83 key=8300:1 dir=. graft=off attempt=1: assigned
 2026-09-18T10:00:01+00:00 model route for AGTE-83: model (runner --model gpt-5.6-sol)
+2026-09-18T10:00:02+00:00 provider route for AGTE-83: codex (hax --provider=codex --model=gpt-5.6-sol -p)
+2026-09-18T10:00:03+00:00 provider route for AGTE-83: cursor (cursor-agent -p --model cursor-grok-fast)
