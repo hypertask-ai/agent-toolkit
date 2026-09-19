@@ -53,7 +53,7 @@ cat > "$TMP/bin/hax" <<'EOF'
 #!/usr/bin/env bash
 printf 'reply\n' >> "$MOCK_MODEL_LOG"
 printf '%s\n' "${!#}" > "$MOCK_PROMPT"
-printf '<p><strong>Yes, a flagged ticket should name its flag before it moves to Done.</strong></p><p>Next: I will name the flag and its audience in the closing comment.</p>\n'
+printf '<p><strong>Yes, every feature-flag ticket should name its flag in the closing comment.</strong></p><p>For this ticket, no feature flag is identified, so the closing comment should not invent one.</p><p>Next: I will apply this rule if a flag is added.</p>\n'
 EOF
 # The feedback filer, standing in for scripts/agent-template feedback.
 cat > "$TMP/bin/agent-template" <<'EOF'
@@ -110,7 +110,7 @@ FLEET_PROGRESS_SUPERVISOR="off"
 EOF
 
 cat > "$TMP/tasks.json" <<'EOF'
-{"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"Backlog","title":"Hide the empty row","description":"A UI change","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":1,"updatedAt":"2026-09-19T08:02:00Z"}]}
+{"tasks":[{"id":"task-1","ticketNumber":"HTPR-6564","projectId":15,"section":"Backlog","title":"Hide the empty row","description":"A UI change. No feature flag is identified on the ticket.","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":1,"updatedAt":"2026-09-19T08:02:00Z"}]}
 EOF
 
 run_tick() {
@@ -138,11 +138,14 @@ comments="$(grep -c . "$TMP/board.log" || true)"
 posted="$(cat "$TMP/board.log")"
 if [ "$comments" = "1" ] \
   && printf '%s' "$posted" | grep -qiE '<strong>(yes|no),' \
+  && printf '%s' "$posted" | grep -qF 'For this ticket, no feature flag is identified' \
   && printf '%s' "$posted" | grep -qF 'https://app.hypertask.ai/detail/project-5500/777' \
   && printf '%s' "$posted" | grep -qF 'AGTE-777' \
   && ! printf '%s' "$posted" | grep -qF 'I read your comment as a question' \
   && grep -qF -- '--kind bug' "$TMP/feedback.log" \
-  && grep -qF -- 'can we agree that every ticket' "$TMP/feedback.log"; then
+  && grep -qF -- 'Owner rule from HTPR-6564' "$TMP/feedback.log" \
+  && grep -qF -- 'can we agree that every ticket' "$TMP/feedback.log" \
+  && grep -qF 'what the rule means for this ticket right now' "$TMP/prompt.txt"; then
   ok rule-proposal-one-comment-and-filed 'one comment carries the verdict and the filed toolkit link'
 else
   bad rule-proposal-one-comment-and-filed "comments=$comments board=$posted feedback=$(cat "$TMP/feedback.log")"
@@ -171,7 +174,7 @@ fi
 rm -rf "$TMP/state"
 mkdir -p "$TMP/state/agent-board-poll"
 printf '15\t92\tquestion\t%s\n' "$(( $(date +%s) - 300 ))" \
-  > "$TMP/state/agent-board-poll/dev-TEST-1.owner-ack"
+  > "$TMP/state/agent-board-poll/dev-HTPR-6564.owner-ack"
 cat > "$TMP/comments.json" <<'EOF'
 {"comments":[{"id":93,"createdAt":"2026-09-19T08:02:00Z","agent":{"id":"agent-dev","displayName":"Dev"},"creator":null,"text":"<p>Answer: already said.</p>"}]}
 EOF
@@ -184,7 +187,7 @@ HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
   REPLY_HAX_BIN="$TMP/bin/hax" REPLY_CODEX_AUTH="$TMP/codex-auth.json" \
   "$ROOT/scripts/agent-board-poll" --once dev > "$TMP/out" 2>&1 || true
 if grep -qF 'I read your comment as a question' "$TMP/board.log" \
-  && [ ! -f "$TMP/state/agent-board-poll/dev-TEST-1.owner-ack" ]; then
+  && [ ! -f "$TMP/state/agent-board-poll/dev-HTPR-6564.owner-ack" ]; then
   ok stale-ack-past-wait-window-is-posted 'an unanswered acknowledgement is posted once and cleared'
 else
   bad stale-ack-past-wait-window-is-posted "board=$(cat "$TMP/board.log") pending=$(ls "$TMP/state/agent-board-poll" 2>/dev/null)"
