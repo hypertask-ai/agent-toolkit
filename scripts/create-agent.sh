@@ -472,14 +472,14 @@ fi
 case "$WIRING" in
   poll|events)
     if [ "$WIRING" = "events" ]; then
-      step 4 "install event wiring and start the hourly poll safety net"
+      step 4 "install event wiring and start the five-minute poll safety net"
     else
       step 4 "install the poll units and start the timer"
     fi
     SERVICE="$SYSTEMD_USER_DIR/agent-board-poll@.service"
     TIMER="$SYSTEMD_USER_DIR/agent-board-poll@.timer"
     if [ "$WIRING" = "events" ]; then
-      echo "    agent-events.service + $TIMER (hourly safety net)"
+      echo "    agent-events.service + $TIMER (five-minute safety net)"
     else
       echo "    $SERVICE (Type=oneshot) + $TIMER (every 60s)"
     fi

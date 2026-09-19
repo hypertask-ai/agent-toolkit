@@ -1,0 +1,1 @@
+- AGTE-110 routes hooks.hypertask.ai to the event receiver, registers product-bot, dev-1, dev-2, qa-1, tk-dev-1, and tk-qa-1 for comments, mentions, and assignments, and keeps polling as a five-minute safety net until https://app.hypertask.ai/detail/project-15/6566 adds failed-delivery retries.

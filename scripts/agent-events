@@ -285,7 +285,7 @@ def register_all() -> int:
     url = host.get("EVENTS_URL", host.get("WEBHOOK_URL", "")).strip()
     rows = agent_rows(events_only=True)
     if not url:
-        print("no EVENTS_URL or WEBHOOK_URL; receiver is ready and hourly polls remain the path")
+        print("no EVENTS_URL or WEBHOOK_URL; receiver is ready and five-minute polls remain the path")
         return 0
     failed = 0
     for path, values in rows:
