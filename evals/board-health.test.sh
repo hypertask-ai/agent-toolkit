@@ -70,6 +70,9 @@ CONTRACT="$ROOT/scripts/agent-reply-contract"
 "$CONTRACT" answered --state-dir "$TMP/state" --slug dev-1 --event-id 15:1 --at 2026-09-18T10:10:00Z
 "$CONTRACT" received --state-dir "$TMP/state" --slug dev-1 --event-id 15:2 --at 2026-09-18T09:00:00Z --board 15 --ticket TEST-2 --url https://app.hypertask.ai/detail/project-15/2 --kind mention
 printf '%s\n' '{"agent":"dev-1","state":"failed","at":"2026-09-18T09:30:00Z","detail":"runner failed"}' > "$TMP/state/dev-1.status"
+cat > "$TMP/state/dev-1.progress.json" <<'EOF'
+{"runner":"dev-1","wait":{"state":"blocked","since":"2026-09-18T09:00:00Z","ticket":"TEST-86","reason":"red: ci-tests","pr":{"number":86,"url":"https://github.com/example/repo/pull/86"}}}
+EOF
 
 run_health() {
   FIXTURE="$TMP" PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-health" tick \
@@ -95,6 +98,7 @@ if [ "$(cat "$TMP/create-count")" -eq 2 ] \
    && grep -q 'Backlog has 9 tickets' "$TMP/comments/1.html" \
    && grep -q 'AI Review over 24 hours' "$TMP/comments/1.html" \
    && grep -q 'example/repo#4' "$TMP/comments/1.html" \
+   && grep -q 'dev-1 cannot fix.*PR #86.*after two hours: red: ci-tests' "$TMP/comments/1.html" \
    && grep -q 'Runner dev-1 error' "$TMP/comments/1.html" \
    && grep -q 'Timer for dev-1 is down' "$TMP/comments/1.html" \
    && grep -q 'QA has 9 tickets' "$TMP/comments/2.html" \

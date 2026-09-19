@@ -1,0 +1,1 @@
+- AGTE-94 lets agents start a second ticket with one open PR, reports unfixable PRs after two hours, and pauses new pickups only when two active PR slots are full.

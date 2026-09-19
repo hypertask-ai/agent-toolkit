@@ -356,13 +356,14 @@ branch, or by `<slug>.opened-prs` recording that the runner first saw the PR
 during this agent's run. Shared GitHub authorship and comments do not transfer
 ownership.
 
-Every blocking owned PR is ranked oldest first. The oldest is the only PR work,
-and more than one blocking debt stops every new claim, including an `emergency`.
-An open green PR is monitored without blocking pickup. A red or pending PR stops
-pickup for its first two hours, then remains monitored while new work can start.
-An open PR with no active owner is ignored by every gate. Once per UTC day, a
-tick logs `orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can
-decide who should take it.
+One owned open PR leaves one pickup slot free. Two owned open PRs fill the slots
+and stop every new claim, including an `emergency`; the runner ranks that queue
+oldest first. A red or pending PR older than two hours releases its slot because
+the agent has not been able to fix it, but remains monitored and appears on
+Board health. One green, red, or pending PR never blocks pickup. An open PR with
+no active owner is ignored by every gate. Once per UTC day, a tick logs
+`orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can decide
+who should take it.
 
 LIVE means all of the following:
 
@@ -377,14 +378,14 @@ deployment records, the logged fallback is merged plus base-contains-merge.
 A repository that has deployment records but no qualifying Production success
 is not LIVE.
 
-A red PR starts another fix run with exact failed check names, failed-run logs,
-and verbatim reviewer `CONCERNS` during its first two hours. Pending checks log
-`waiting on PR #<n>: checks pending` and start nothing during that window. At
-two hours, either state files one deduplicated toolkit bug, including exact
-failed check names for a red PR, and stops blocking pickup. A green open PR
-never blocks pickup. A merged but undeployed PR still starts nothing. The
-attempts file, retry limit, six-hour cooldown, model escalation, and manager
-hand-off do not apply to PR fix runs.
+At the two-PR limit, a red PR starts another fix run with exact failed check
+names, failed-run logs, and verbatim reviewer `CONCERNS`. Pending checks log
+`waiting on PR #<n>: checks pending` and start nothing. At two hours, either
+state files one deduplicated toolkit bug, appears on Board health, and releases
+its pickup slot. A red PR's report includes its exact failed check names. A
+green open PR uses one slot but does not block pickup by itself. A merged but
+undeployed PR still starts nothing. The attempts file, retry limit, six-hour
+cooldown, model escalation, and manager hand-off do not apply to PR fix runs.
 
 The owner-facing blocking state is one JSON line at
 `~/.local/state/agent-board-poll/<slug>.blocked`. Its top-level fields describe

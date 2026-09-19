@@ -1460,12 +1460,16 @@ if run_advisor_instruction; then
 fi
 check_maintainer_builds
 
-# Pull-request debt is a hard pickup gate, not a ranking hint. The adapter
-# proves LIVE and returns every owned debt oldest first. Core works only the
-# first one, while recording and explaining the full queue.
+# Open pull requests are a two-slot pickup cap, not a one-PR freeze. The
+# adapter proves LIVE and marks red or pending PRs older than two hours as
+# unfixable, so they remain reportable without consuming a slot. Merged but
+# undeployed work keeps its existing hard gate.
 PR_GATES=""
 PR_GATE=""
+PR_REPORT_GATE=""
 PR_GATE_COUNT=0
+PR_DEPLOY_GATE_COUNT=0
+PR_PICKUP_BLOCKED="no"
 PR_GATE_ACTION=""
 PR_GATE_NUMBER=""
 PR_GATE_STATE=""
@@ -1474,7 +1478,7 @@ PR_GATE_URL=""
 PR_GATE_SINCE=""
 PR_GATE_REASON=""
 PR_GATE_MERGED_AT=""
-PR_NONBLOCKING_TICKETS=""
+PR_OPEN_TICKETS=""
 if declare -F adapter_pr_gate >/dev/null 2>&1; then
   PR_GATES="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
               "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" "$OPENED_PRS" 2>>"$LOG")" || die \
@@ -1485,18 +1489,40 @@ if [ -n "$PR_GATES" ]; then
   PR_GATE="$(printf '%s\n' "$PR_GATES" | python3 -c '
 import json, sys
 rows = [json.loads(line) for line in sys.stdin if line.strip()]
-blocking = [row for row in rows if row.get("action") in ("fix", "wait")]
-print(json.dumps((blocking or rows)[0]))
+deploy = [row for row in rows if str(row.get("state") or "").startswith("merged-")]
+slots = [row for row in rows if row.get("pickup_slot") is True]
+actionable = [row for row in slots if row.get("action") == "fix"]
+if deploy:
+    chosen = deploy[0]
+elif len(slots) >= 2:
+    chosen = (actionable or slots)[0]
+else:
+    chosen = rows[0]
+print(json.dumps(chosen))
+')"
+  PR_REPORT_GATE="$(printf '%s\n' "$PR_GATES" | python3 -c '
+import json, sys
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+unfixable = [row for row in rows if row.get("unfixable") is True]
+print(json.dumps((unfixable or rows)[0]))
 ')"
   PR_GATE_COUNT="$(printf '%s\n' "$PR_GATES" | python3 -c '
 import json, sys
-print(sum(json.loads(line).get("action") in ("fix", "wait") for line in sys.stdin if line.strip()))
+print(sum(json.loads(line).get("pickup_slot") is True for line in sys.stdin if line.strip()))
 ')"
-  PR_NONBLOCKING_TICKETS="$(printf '%s\n' "$PR_GATES" | python3 -c '
+  PR_DEPLOY_GATE_COUNT="$(printf '%s\n' "$PR_GATES" | python3 -c '
+import json, sys
+print(sum(str(json.loads(line).get("state") or "").startswith("merged-") for line in sys.stdin if line.strip()))
+')"
+  if [ "$PR_GATE_COUNT" -ge 2 ] || [ "$PR_DEPLOY_GATE_COUNT" -gt 0 ]; then
+    PR_PICKUP_BLOCKED="yes"
+  fi
+  PR_OPEN_TICKETS="$(printf '%s\n' "$PR_GATES" | python3 -c '
 import json, sys
 for line in sys.stdin:
     row = json.loads(line)
-    if row.get("action") == "observe": print(row.get("ticket") or "")
+    if not str(row.get("state") or "").startswith("merged-"):
+        print(row.get("ticket") or "")
 ')"
   PR_GATE_ACTION="$(row_field "$PR_GATE" action)"
   PR_GATE_NUMBER="$(row_field "$PR_GATE" number)"
@@ -1514,14 +1540,17 @@ for line in sys.stdin:
   esac
   gate_rows="$BLOCKED.gates.$$"
   printf '%s\n' "$PR_GATES" > "$gate_rows"
-  if [ "$PR_GATE_COUNT" -gt 0 ]; then
+  if [ "$PR_PICKUP_BLOCKED" = "yes" ]; then
     python3 - "$gate_rows" "$BLOCKED" <<'PYEOF'
 import json, os, sys
 source, path = sys.argv[1:]
 with open(source, encoding="utf-8") as handle:
     rows = [json.loads(line) for line in handle if line.strip()]
+deploy = [row for row in rows if str(row.get("state") or "").startswith("merged-")]
+slots = [row for row in rows if row.get("pickup_slot") is True]
+blocking = [row for row in rows if row in deploy or (len(slots) >= 2 and row in slots)]
 items = [{"pr": row["number"], "state": row["state"], "since": row["since"],
-          "ticket": row["ticket"]} for row in rows if row.get("action") in ("fix", "wait")]
+          "ticket": row["ticket"]} for row in blocking]
 oldest = dict(items[0])
 oldest["prs"] = items
 temporary = path + ".new"
@@ -1546,18 +1575,23 @@ print("owned non-live PRs oldest first: " + ", ".join(parts))
 else
   rm -f "$BLOCKED"
 fi
-if [ "$PR_GATE_ACTION" = "wait" ] || [ "$PR_GATE_ACTION" = "fix" ] || [ "$PR_GATE_ACTION" = "observe" ]; then
-  PROGRESS_WAIT_TICKET="$PR_GATE_TICKET"
-  PROGRESS_WAIT_PR="$PR_GATE_NUMBER"
-  PROGRESS_WAIT_PR_URL="$PR_GATE_URL"
-  PROGRESS_WAIT_SINCE="$PR_GATE_SINCE"
-  case "$PR_GATE_STATE" in
-    checks-pending|awaiting-merge) PROGRESS_WAIT_STATE="$PR_GATE_STATE" ;;
-    *)
-      PROGRESS_WAIT_STATE="blocked"
-      PROGRESS_WAIT_REASON="${PR_GATE_REASON:-$PR_GATE_STATE}"
-      ;;
-  esac
+if [ -n "$PR_REPORT_GATE" ]; then
+  report_action="$(row_field "$PR_REPORT_GATE" action)"
+  report_state="$(row_field "$PR_REPORT_GATE" state)"
+  if [ "$report_action" = "wait" ] || [ "$report_action" = "fix" ] || [ "$report_action" = "observe" ]; then
+    PROGRESS_WAIT_TICKET="$(row_field "$PR_REPORT_GATE" ticket)"
+    PROGRESS_WAIT_PR="$(row_field "$PR_REPORT_GATE" number)"
+    PROGRESS_WAIT_PR_URL="$(row_field "$PR_REPORT_GATE" url)"
+    PROGRESS_WAIT_SINCE="$(row_field "$PR_REPORT_GATE" since)"
+    case "$report_state" in
+      checks-pending|awaiting-merge) PROGRESS_WAIT_STATE="$report_state" ;;
+      *)
+        PROGRESS_WAIT_STATE="blocked"
+        PROGRESS_WAIT_REASON="$(row_field "$PR_REPORT_GATE" wait_reason)"
+        [ -n "$PROGRESS_WAIT_REASON" ] || PROGRESS_WAIT_REASON="$report_state"
+        ;;
+    esac
+  fi
 fi
 
 # A third source of candidates, alongside the board's own list: tickets this
@@ -1612,7 +1646,7 @@ fi
 # A red owed PR is represented as a candidate so it uses the normal isolated
 # workdir and model launch. It is never a board claim or part of the failure
 # retry ladder, but it shares the per-ticket run cooldown.
-if [ "$PR_GATE_ACTION" = "fix" ]; then
+if [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$PR_GATE_ACTION" = "fix" ]; then
   pr_row="$(GATE="$PR_GATE" AID="$AGENT_ID" BOARD="${BOARD_ID%%,*}" python3 -c '
 import json, os
 p = json.loads(os.environ["GATE"])
@@ -1906,13 +1940,13 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     continue
   fi
   if [ "$is_reply_only" = "no" ] && [ "$is_pr_fix" = "no" ] \
-     && printf '%s\n' "$PR_NONBLOCKING_TICKETS" | grep -qxF "$ref"; then
+     && printf '%s\n' "$PR_OPEN_TICKETS" | grep -qxF "$ref"; then
     explain "skip  $ref: its open PR is monitored without blocking new work"
     continue
   fi
-  if [ "$is_reply_only" = "no" ] && [ "$PR_GATE_COUNT" -gt 0 ] && [ "$is_pr_fix" = "no" ]; then
-    if [ "$PR_GATE_COUNT" -gt 1 ]; then
-      explain "skip  $ref: $PR_GATE_COUNT owned PRs are not live, so only oldest PR #$PR_GATE_NUMBER may run"
+  if [ "$is_reply_only" = "no" ] && [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$is_pr_fix" = "no" ]; then
+    if [ "$PR_GATE_COUNT" -ge 2 ]; then
+      explain "skip  $ref: $PR_GATE_COUNT owned open PRs fill the pickup slots, so only PR #$PR_GATE_NUMBER may run"
       continue
     fi
     case ",$(row_labels "$row")," in

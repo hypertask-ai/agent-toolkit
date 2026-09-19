@@ -33,9 +33,13 @@ if [ "$1 $2" = "pr list" ]; then
     fi
     exit 0
   fi
-  if [ "$scenario" = "oldest" ]; then
+  if [ "$scenario" = "oldest" ] || [ "$scenario" = "two-green" ]; then
     cat <<JSON
 [{"number":9,"state":"OPEN","url":"https://github.test/pull/9","title":"HTPR-9 old","body":"","headRefName":"agent/dev-1-htpr-9","createdAt":"2026-09-18T21:00:00Z"},{"number":10,"state":"OPEN","url":"https://github.test/pull/10","title":"HTPR-10 new","body":"","headRefName":"agent/dev-1-htpr-10","createdAt":"2026-09-18T21:01:00Z"}]
+JSON
+  elif [ "$scenario" = "stale-red-green" ]; then
+    cat <<JSON
+[{"number":9,"state":"OPEN","url":"https://github.test/pull/9","title":"HTPR-9 stale","body":"","headRefName":"agent/dev-1-htpr-9","createdAt":"2026-09-18T19:00:00Z"},{"number":10,"state":"OPEN","url":"https://github.test/pull/10","title":"HTPR-10 green","body":"","headRefName":"agent/dev-1-htpr-10","createdAt":"2026-09-18T21:01:00Z"}]
 JSON
   elif [ "$scenario" = "qa-claim" ]; then
     cat <<JSON
@@ -89,9 +93,10 @@ if [ "$1 $2" = "pr view" ]; then
   checks='[{"name":"ci-tests","status":"IN_PROGRESS","conclusion":"","detailsUrl":"https://github.test/actions/runs/77/job/1"}]'
   reviews='[]'
   comments='[]'
-  if [ "$scenario" = "green" ]; then
+  if [ "$scenario" = "green" ] || [ "$scenario" = "two-green" ] \
+     || { [ "$scenario" = "stale-red-green" ] && [ "$number" = "10" ]; }; then
     checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.test/actions/runs/77/job/1"}]'
-  elif [ "$scenario" = "red" ] || [ "$scenario" = "stale-red" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "qa-claim" ] || [ "$scenario" = "orphan" ] || [ "$scenario" = "author-owned" ] || [ "$scenario" = "custom-prefix" ]; then
+  elif [ "$scenario" = "red" ] || [ "$scenario" = "stale-red" ] || [ "$scenario" = "stale-red-green" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "qa-claim" ] || [ "$scenario" = "orphan" ] || [ "$scenario" = "author-owned" ] || [ "$scenario" = "custom-prefix" ]; then
     checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/1"},{"name":"revert-guard","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/2"},{"name":"pr-title","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/3"}]'
     comments='[{"author":{"login":"claude-review"},"body":"CONCERNS: preserve the existing authorization check."}]'
   fi
@@ -231,7 +236,12 @@ pending="$(run_gate pending)"
 echo 'PASS pending PR waits without inventing work'
 
 green="$(run_gate green)"
-[[ "$green" == *'"action": "observe"'* && "$green" == *'"state": "awaiting-merge"'* ]]
+GREEN="$green" python3 - <<'PYEOF'
+import json, os
+result = json.loads(os.environ["GREEN"])
+assert result["action"] == "observe" and result["state"] == "awaiting-merge"
+assert result["pickup_slot"] is True and result["unfixable"] is False
+PYEOF
 echo 'PASS one open green PR is monitored without blocking pickup'
 
 stale_red="$(run_gate stale-red)"
@@ -241,6 +251,7 @@ result = json.loads(os.environ["STALE_RED"])
 assert result["action"] == "observe" and result["state"] == "red"
 assert result["failed_checks"] == ["ci-tests", "revert-guard", "pr-title"]
 assert result["wait_reason"] == "red: ci-tests, revert-guard, pr-title"
+assert result["pickup_slot"] is False and result["unfixable"] is True
 PYEOF
 echo 'PASS a red PR older than two hours reports exact checks without blocking pickup'
 
@@ -312,8 +323,18 @@ oldest="$(run_gate oldest)"
 [[ "$(printf '%s\n' "$oldest" | grep -c .)" = 2 ]]
 echo 'PASS every owed PR is returned oldest first'
 
-# Run the real pickup path in dry-run mode. One pending PR blocks ordinary work
-# but the emergency row remains eligible.
+mixed="$(run_gate stale-red-green)"
+MIXED="$mixed" python3 - <<'PYEOF'
+import json, os
+rows = [json.loads(line) for line in os.environ["MIXED"].splitlines()]
+assert rows[0]["number"] == 9 and rows[0]["unfixable"] is True
+assert rows[0]["pickup_slot"] is False
+assert rows[1]["number"] == 10 and rows[1]["pickup_slot"] is True
+PYEOF
+echo 'PASS an unfixable old PR remains reportable without using a pickup slot'
+
+# Run the real pickup path in dry-run mode. Two open PRs fill the pickup slots,
+# while one open PR leaves room for another ticket.
 cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<EOF
 AGENT_ID="agent-1"
 AGENT_NAME="Dev One"
@@ -321,7 +342,7 @@ BOARD_ADAPTER="hypertask"
 BOARD_ID="15"
 TOKEN_FILE="$TMP/token"
 WATCH_SECTIONS="Bugs"
-MODEL_CLI="claude --print --model sonnet"
+MODEL_CLI="$TMP/bin/claude --print --model sonnet"
 BOARD_CLI="$TMP/bin/hypertask"
 PR_REPO="example/repo"
 AGENT_REPO="$TMP/repo"
@@ -336,10 +357,24 @@ multi_run="$(PR_TEST_SCENARIO=oldest HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMP
 [[ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["prs"]))' "$TMP/home/.local/state/agent-board-poll/dev-1.blocked")" = 2 ]]
 echo 'PASS multiple debts list every PR, work oldest first, and block new claims'
 
-pending_run="$(PR_TEST_SCENARIO=pending HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
+two_green_run="$(PR_TEST_SCENARIO=two-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$two_green_run" == *'2 owned open PRs fill the pickup slots'* ]]
+[[ "$two_green_run" != *'would pick up'* ]]
+[[ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["prs"]))' "$TMP/home/.local/state/agent-board-poll/dev-1.blocked")" = 2 ]]
+echo 'PASS two open green PRs fill both pickup slots'
+
+rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
+stale_red_green_run="$(PR_TEST_SCENARIO=stale-red-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$stale_red_green_run" == *'would pick up HTPR-1'* ]]
+[[ ! -e "$TMP/home/.local/state/agent-board-poll/dev-1.blocked" ]]
+echo 'PASS an old unfixable PR does not consume a pickup slot'
+
+pending_run="$(PR_TEST_SCENARIO=pending BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$pending_run" == *'skip  HTPR-1: its open PR is monitored without blocking new work'* ]]
 [[ "$pending_run" == *'would pick up HTPR-2'* ]]
-[[ "$pending_run" != *'would pick up HTPR-1'* ]]
-echo 'PASS emergency ticket is the only pickup that bypasses an owed PR'
+[[ ! -e "$TMP/home/.local/state/agent-board-poll/dev-1.blocked" ]]
+echo 'PASS one open pending PR leaves a pickup slot for normal work'
 
 rm -rf "$TMP/home/.local/state/agent-board-poll/pr-live-cache"
 green_run="$(PR_TEST_SCENARIO=green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
@@ -374,16 +409,15 @@ deployed_run="$(PR_TEST_SCENARIO=deployed BOARD_TEST_SCENARIO=no-emergency HOME=
 [[ "$deployed_run" == *'skip  HTPR-4: assigned to another owner and neither assigned nor mentioned to this agent'* ]]
 echo 'PASS deployed PR releases the next ticket and explains every ineligible candidate'
 
-# Six recent failures for the synthetic PR key do not stop the PR-fix path.
+# One red PR is monitored instead of freezing the only remaining pickup slot.
 state="$TMP/home/.local/state/agent-board-poll"
 mkdir -p "$state"
-: > "$state/dev-1.attempts"
-for _ in 1 2 3 4 5 6; do printf 'pr-1 %s cursor-agent failed\n' "$(date +%s)" >> "$state/dev-1.attempts"; done
 rm -rf "$state/pr-live-cache"
-red_run="$(PR_TEST_SCENARIO=red HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$red_run" == *'would pick up HTPR-1'* ]]
-[[ "$red_run" == *'no ticket attempts, triage, or escalation; ticket cooldown still applies'* ]]
-echo 'PASS red PR ignores failed attempts while retaining the ticket cooldown'
+red_run="$(PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$red_run" == *'skip  HTPR-1: its open PR is monitored without blocking new work'* ]]
+[[ "$red_run" == *'would pick up HTPR-2'* ]]
+[[ "$red_run" != *'pull-request fix'* ]]
+echo 'PASS one open red PR leaves a pickup slot for normal work'
 
 rm -f "$TMP/opened-marker"
 PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency MODEL_OPEN_MARKER="$TMP/opened-marker" \
@@ -392,4 +426,4 @@ PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency MODEL_OPEN_MARKER=
 [[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "8" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.opened-prs")" = yes ]]
 echo 'PASS runner persists a PR first seen after its ticket run'
 
-echo '28 one-ticket-until-live checks passed'
+echo '31 one-ticket-until-live checks passed'

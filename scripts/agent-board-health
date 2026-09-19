@@ -349,6 +349,28 @@ class Health:
 
     def runner_alarms(self) -> dict[str, str]:
         active: dict[str, str] = {}
+        for progress_path in self.state_dir.glob("*.progress.json"):
+            row = read_json(progress_path, {})
+            wait = row.get("wait") if isinstance(row.get("wait"), dict) else {}
+            since = parsed_time(wait.get("since"))
+            state = str(wait.get("state") or "")
+            reason = str(wait.get("reason") or "")
+            unfixable = state == "checks-pending" or (
+                state == "blocked" and (reason == "red" or reason.startswith("red: "))
+            )
+            if not unfixable or not since or (self.now - since).total_seconds() < PR_SECONDS:
+                continue
+            runner = str(row.get("runner") or progress_path.name.removesuffix(".progress.json"))
+            pr = wait.get("pr") if isinstance(wait.get("pr"), dict) else {}
+            number = str(pr.get("number") or "")
+            url = str(pr.get("url") or "")
+            label = f"PR #{number}" if number else "The open PR"
+            link = (f'<a href="{html.escape(url, quote=True)}">{html.escape(label)}</a>'
+                    if url.startswith("https://") else html.escape(label))
+            detail = reason or "checks are still pending"
+            active[f"runner:{runner}:pr:{number or wait.get('ticket') or 'unknown'}"] = (
+                f"{html.escape(runner)} cannot fix {link} after two hours: {html.escape(detail)}."
+            )
         for status_path in self.state_dir.glob("*.status"):
             row = read_json(status_path, {})
             if row.get("state") != "failed":
