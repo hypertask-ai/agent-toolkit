@@ -1006,8 +1006,8 @@ PYEOF
       || log "progress snapshot failed for $SLUG"
     if [ "$FLEET_PROGRESS_SUPERVISOR" = "on" ]; then
       "$AGENT_PROGRESS" supervise --state-dir "$STATE_DIR" --board-cli "$BOARD_CLI" \
-        --manager-cli "$CORE_ROOT/scripts/agent-template" --manager-slug "$SLUG" \
-        --toolkit-ticket "$FLEET_STALL_TICKET" >> "$LOG" 2>&1 \
+        --token-file "$TOKEN_FILE" --manager-cli "$CORE_ROOT/scripts/agent-template" \
+        --manager-slug "$SLUG" --toolkit-ticket "$FLEET_STALL_TICKET" >> "$LOG" 2>&1 \
         || log "fleet progress supervision failed"
       "$AGENT_BOARD_HEALTH" tick --state-dir "$STATE_DIR" --boards "$BOARD_ID" \
         --token-file "$TOKEN_FILE" --board-cli "$BOARD_CLI" \

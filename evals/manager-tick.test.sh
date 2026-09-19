@@ -92,3 +92,16 @@ if ! grep -qF 'ExecStart='"$TMP/bin"'/agent-board-poll-tick %i' \
   exit 1
 fi
 printf 'PASS poll-unit-uses-tick-wrapper     systemd runs the failure-logging entrypoint\n'
+
+core_write_event_timer_dropin "$TMP/units" product-bot
+event_timer="$TMP/units/agent-board-poll@product-bot.timer.d/events.conf"
+if ! grep -qFx 'OnUnitActiveSec=5m' "$event_timer"; then
+  printf 'FAIL event-poll-five-minute-safety-net\n'
+  exit 1
+fi
+core_remove_event_timer_dropin "$TMP/units" product-bot
+if [ -e "$event_timer" ]; then
+  printf 'FAIL event-poll-dropin-removal\n'
+  exit 1
+fi
+printf 'PASS event-poll-five-minute-safety-net events mode retains a five-minute fallback\n'
