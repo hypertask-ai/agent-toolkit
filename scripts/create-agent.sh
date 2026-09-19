@@ -511,6 +511,11 @@ case "$WIRING" in
     ;;
 esac
 
+if [ "$DRY_RUN" != "yes" ]; then
+  AGENT_CONFIG_DIR="$CONFIG_DIR" "$CORE_ROOT/scripts/agent-events" reconcile-all \
+    || echo "WARNING: managed-agent webhook check failed; polling remains available" >&2
+fi
+
 # ---------- 5. acceptance ----------
 echo
 echo "Ticket comments have exactly five kinds: Question: asks a human and ends with a question mark; Answer: replies to a direct owner question or mention; Decision: states a fact the owner must know; Handoff: names the receiving agent and explains what shipped; Done: explains what shipped and includes the PR link. Reply-only runs default to Answer and may end with Decision needed: only when the owner must choose. In quiet mode, an Answer to the owner's direct mention keeps a mention to the owner even after the daily owner-mention allowance was used. Handoff and Done cannot be only a link. Everything else is run activity."

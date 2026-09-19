@@ -1280,6 +1280,20 @@ print(ref)
     AGENT_COMMENT_VERBATIM=yes "$UPDATE_BOARD_CLI" comment add "$health_ref" --text "$message" >/dev/null
   }
 
+  update_check_webhooks() {
+    local events_script action
+    events_script="$INSTALLED_TEMPLATE/scripts/agent-events"
+    [ -x "$events_script" ] || events_script="$CORE_ROOT/scripts/agent-events"
+    if [ ! -x "$events_script" ]; then
+      echo "WARNING: managed-agent webhook check unavailable; polling remains available" >&2
+      return 0
+    fi
+    action="reconcile-all"
+    [ "$DRY_RUN" = "yes" ] && action="audit-all"
+    AGENT_CONFIG_DIR="$CONFIG_DIR" "$events_script" "$action" \
+      || echo "WARNING: managed-agent webhook check failed; polling remains available" >&2
+  }
+
   update_file_eval_failure() {
     local marker project_json section_result section title description output
     mkdir -p "$UPDATE_STATE_DIR"
@@ -1297,6 +1311,7 @@ print(ref)
     printf '%s\n' "$output" > "$marker"
     echo "eval failure ticket filed for $TARGET_VERSION"
   }
+  update_check_webhooks
   if [ "$TIMER_RUN" = "yes" ] && [ "$AUTO_UPDATE" = "off" ]; then
     current="$(cat "$INSTALLED_TEMPLATE/VERSION" 2>/dev/null || echo unknown)"
     stable="$(git -C "$REPO" show stable:VERSION 2>/dev/null || echo unknown)"

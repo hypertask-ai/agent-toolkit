@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import importlib.machinery
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -49,6 +51,76 @@ with tempfile.TemporaryDirectory() as temporary:
     os.environ["AGENT_EVENTS_STATE_DIR"] = str(state)
     os.environ["AGENT_BOARD_POLL"] = str(runner)
     os.environ["RUNNER_CALLS"] = str(calls)
+
+    host_config = base / "host-config"
+    host_config.write_text('EVENTS_URL="https://toolkit.example/webhook/hypertask"\n', encoding="utf-8")
+    os.environ["AGENT_TEMPLATE_HOST_CONFIG"] = str(host_config)
+    subscriptions = {
+        "local-agent": {"active": True, "url": "https://toolkit.example/old-path"},
+        "foreign-agent": {"active": True, "url": "https://retired.example/webhook"},
+        "inactive-agent": {"active": False, "url": "https://retired.example/webhook"},
+        "missing-agent": None,
+        "poll-agent": {"active": True, "url": "https://toolkit.example/webhook/hypertask"},
+        "registered-agent": {"active": True, "url": "https://manual.example/webhook/hypertask"},
+    }
+    for slug in subscriptions:
+        token = base / f"{slug}.token"
+        token.write_text("token\n", encoding="utf-8")
+        wiring = "events" if slug in ("local-agent", "registered-agent") else "poll"
+        (config / f"{slug}.conf").write_text(
+            f'AGENT_SLUG="{slug}"\nAGENT_ID="{slug}-id"\nBOARD_ADAPTER="hypertask"\n'
+            f'TOKEN_FILE="{token}"\nWIRING="{wiring}"\n',
+            encoding="utf-8",
+        )
+    (state / "registered-agent.registration.json").write_text(
+        '{"url":"https://manual.example/webhook/hypertask"}\n', encoding="utf-8"
+    )
+    (secrets / "registered-agent.secret").write_text("secret\n", encoding="utf-8")
+
+    original_subscription = module.webhook_subscription
+    original_request = module.api_request
+    configure_calls = []
+
+    def fake_subscription(values):
+        return subscriptions[values["AGENT_SLUG"]]
+
+    def fake_request(values, body):
+        configure_calls.append((values["AGENT_SLUG"], body))
+        subscriptions[values["AGENT_SLUG"]]["active"] = False
+        return {"success": True}
+
+    module.webhook_subscription = fake_subscription
+    module.api_request = fake_request
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert module.audit_all(json_output=True) == 0
+    audit = json.loads(output.getvalue())
+    assert audit["foreign_webhooks"] == [{
+        "agent": "foreign-agent",
+        "url": "https://retired.example/webhook",
+        "host": "retired.example",
+    }, {
+        "agent": "poll-agent",
+        "url": "https://toolkit.example/webhook/hypertask",
+        "host": "toolkit.example",
+    }]
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        assert module.reconcile_all() == 0
+        assert module.reconcile_all() == 0
+    assert output.getvalue().splitlines() == [
+        "foreign webhook deactivated for foreign-agent: retired.example",
+        "foreign webhook deactivated for poll-agent: toolkit.example",
+    ]
+    assert configure_calls == [
+        ("foreign-agent", {"action": "configure", "agent_id": "self", "active": False}),
+        ("poll-agent", {"action": "configure", "agent_id": "self", "active": False}),
+    ]
+    module.webhook_subscription = original_subscription
+    module.api_request = original_request
+
+    assert '"$CORE_ROOT/scripts/agent-events" reconcile-all' in (root / "scripts/create-agent.sh").read_text()
+    assert '"$BIN/agent-events" reconcile-all' in (root / "install.sh").read_text()
 
     threading.Thread(target=module.dispatch, daemon=True).start()
     server = module.ThreadingHTTPServer(("127.0.0.1", 0), module.EventHandler)

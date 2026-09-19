@@ -192,6 +192,11 @@ one agent with `agent-template events register <slug> --url <public-url>`, or pu
 `EVENTS_URL` in `~/.config/agent-template/config` before installation. If no URL
 is configured, the receiver still runs and the hourly timer remains the path.
 
+Agent creation and toolkit updates inspect every managed agent subscription. Only
+an events-wired agent's configured host or recorded manual registration is served.
+The toolkit deactivates every other active webhook and logs it once. Board health
+reports active foreign webhooks that remain.
+
 Run `agent-template events status` to see the registered URL, last event time,
 and queue length per agent. The 60-second poll mode remains available as a
 fallback. Its ordinary ticks use paginated task lists and `updatedAt` cursors,

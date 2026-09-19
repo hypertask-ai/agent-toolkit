@@ -389,6 +389,23 @@ class Health:
                 active[f"timer:{slug}:down"] = f"Timer for {html.escape(slug)} is down."
         return active
 
+    def webhook_alarms(self) -> dict[str, str]:
+        result = self.command(
+            [self.args.agent_events, "audit-all", "--json"],
+            env={"AGENT_CONFIG_DIR": self.args.config_dir},
+        )
+        payload = json_document(result.stdout)
+        active: dict[str, str] = {}
+        for row in payload.get("foreign_webhooks") or []:
+            if not isinstance(row, dict):
+                continue
+            slug = str(row.get("agent") or "unknown")
+            host = str(row.get("host") or "invalid")
+            active[f"webhook:{slug}:foreign:{host}"] = (
+                f"Active foreign webhook: {html.escape(slug)}, {html.escape(host)}."
+            )
+        return active
+
     def health_line(self) -> str:
         row = read_json(Path(self.args.health_file), {})
         score = row.get("score") if isinstance(row, dict) else None
@@ -410,7 +427,7 @@ class Health:
         )
 
     def run(self) -> int:
-        all_active = self.pr_alarms() | self.runner_alarms()
+        all_active = self.pr_alarms() | self.runner_alarms() | self.webhook_alarms()
         today = self.now.date().isoformat()
         for board in [item.strip() for item in self.args.boards.split(",") if item.strip()]:
             task_doc = self.get(f"/mcp/tasks?project_id={board}&limit=100")
@@ -447,8 +464,8 @@ class Health:
                 if not last_mention or (self.now - last_mention).total_seconds() >= 24 * 60 * 60:
                     mention = " " + self.owner_mention(project)
                     board_state["owner_mentioned_at"] = iso(self.now)
-                blocks.append(f"<p>New pile-up: {alarm_text}{mention}</p>")
-            blocks.append("<p>Next: Clear the listed misses and pile-ups.</p>")
+                blocks.append(f"<p>Violations: {alarm_text}{mention}</p>")
+            blocks.append("<p>Next: Clear violations.</p>")
             result = self.board_command("comment", "add", health_ref, "--text", "\n".join(blocks), verbatim=True)
             if result.returncode != 0:
                 raise RuntimeError(f"Board health comment failed on {health_ref}: {result.stderr.strip()[:200]}")
@@ -466,6 +483,7 @@ def main() -> int:
     parser.add_argument("--board-cli", required=True)
     parser.add_argument("--repos-allow", required=True)
     parser.add_argument("--config-dir", required=True)
+    parser.add_argument("--agent-events", default="agent-events")
     parser.add_argument("--health-file", default=str(Path.home() / ".local/state/ht-supervisor/health.json"))
     parser.add_argument("--tick-seconds", type=int, default=60)
     parser.add_argument("--now")

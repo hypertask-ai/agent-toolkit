@@ -35,6 +35,10 @@ cat > "$TMP/bin/systemctl" <<'EOF'
 printf 'inactive\n'
 exit 3
 EOF
+cat > "$TMP/bin/agent-events" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"foreign_webhooks":[{"agent":"dev-1","host":"retired.example","url":"https://retired.example/webhook"}],"errors":[]}'
+EOF
 cat > "$TMP/bin/board" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-} ${2:-} ${3:-}" = "--json project show" ]; then
@@ -101,6 +105,7 @@ if [ "$(cat "$TMP/create-count")" -eq 2 ] \
    && grep -q 'dev-1 cannot fix.*PR #86.*after two hours: red: ci-tests' "$TMP/comments/1.html" \
    && grep -q 'Runner dev-1 error' "$TMP/comments/1.html" \
    && grep -q 'Timer for dev-1 is down' "$TMP/comments/1.html" \
+   && grep -q 'Active foreign webhook: dev-1, retired.example' "$TMP/comments/1.html" \
    && grep -q 'QA has 9 tickets' "$TMP/comments/2.html" \
    && [ "$(grep -h -o 'name-owner-1' "$TMP/comments"/*.html | wc -l)" -eq 1 ] \
    && python3 "$ROOT/adapters/hypertask/plain-language/check-comment.py" < "$TMP/comments/1.html" \

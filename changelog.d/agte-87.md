@@ -1,0 +1,1 @@
+- AGTE-87 makes agent creation and toolkit updates deactivate active agent webhooks whose host is not served by the current toolkit host, logs each deactivation once, and reports any remaining active foreign webhook in board health.
