@@ -1,1 +1,2 @@
 - AGTE-117 stops silent or overlong model runs, restores and unassigns their tickets with one failure comment, preserves runs waiting on their own pull request, and rechecks ownership immediately before every claim.
+- Claim checks now fail closed when the adapter or API read is unavailable, log every gated, clear, claimed, or error outcome, and cannot be removed by an unevaluated stale host patch.

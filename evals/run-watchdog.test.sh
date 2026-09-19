@@ -15,7 +15,9 @@ cat > "$TMP/bin/curl" <<'EOF'
 url="${!#}"
 case "$url" in
   *'/mcp/tasks?ticket_number='*)
-    if [ "${MOCK_CLAIM_AT_GET:-no}" = yes ]; then
+    if [ "${MOCK_CLAIM_GET_ERROR:-no}" = yes ]; then
+      printf '{}\n500'
+    elif [ "${MOCK_CLAIM_AT_GET:-no}" = yes ]; then
       python3 - "$MOCK_TASKS" <<'PYEOF'
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -24,10 +26,11 @@ task["section"] = "In Progress"
 task["assignees"] = [{"agent": {"id": "agent-other", "displayName": "Dev 1"}}]
 print(json.dumps(doc))
 PYEOF
+      printf '\n200'
     else
       cat "$MOCK_TASKS"
+      printf '\n200'
     fi
-    printf '\n200'
     ;;
   *'/mcp/tasks?'*) cat "$MOCK_TASKS"; printf '\n200' ;;
   *'/mcp/comments?'*) printf '%s\n200' '{"comments":[]}' ;;
@@ -47,6 +50,9 @@ case "${MOCK_MODEL_MODE:-stall}" in
     ;;
   waiting)
     sleep 3
+    touch "$MOCK_MODEL_DONE"
+    ;;
+  done)
     touch "$MOCK_MODEL_DONE"
     ;;
   max)
@@ -133,11 +139,12 @@ reset_case() {
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"Backlog","title":"Change it","description":"Open a PR","assignees":[],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
 EOF
 }
+RUNNER="$ROOT/scripts/agent-board-poll"
 run_tick() {
   env HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_TASKS="$TMP/tasks.json" \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_TERM="$TMP/model-term" \
-    MOCK_MODEL_DONE="$TMP/model-done" "$@" "$ROOT/scripts/agent-board-poll" --once --explain dev
+    MOCK_MODEL_DONE="$TMP/model-done" "$@" "$RUNNER" --once --explain dev
 }
 
 reset_case
@@ -180,10 +187,62 @@ fi
 
 reset_case
 run_tick MOCK_CLAIM_AT_GET=yes MOCK_MODEL_MODE=waiting >"$TMP/claim.out" 2>&1
-if grep -qF 'skip  TEST-1: claimed by Dev 1 since ranking' "$TMP/claim.out" \
+if [ "$(grep -cF 'claim-check TEST-1: claimant Dev 1' "$TMP/claim.out")" -eq 1 ] \
    && ! grep -Eq '^(assign|move|comment) ' "$TMP/board.log" \
    && [ ! -f "$TMP/model-done" ]; then
-  printf 'PASS %-36s %s\n' claim-rechecked-at-start 'a foreign claim after ranking is explained and left untouched'
+  printf 'PASS %-36s %s\n' claim-rechecked-at-start 'the real tick path sees a foreign API assignee and leaves the ticket untouched'
 else
   echo "FAIL claim-rechecked-at-start log=$(cat "$TMP/board.log") output=$(cat "$TMP/claim.out")"; exit 1
+fi
+
+reset_case
+run_tick MOCK_CLAIM_GET_ERROR=yes MOCK_MODEL_MODE=waiting >"$TMP/claim-error.out" 2>&1
+if [ "$(grep -cF 'claim-check TEST-1: error (could not re-read ticket)' "$TMP/claim-error.out")" -eq 1 ] \
+   && ! grep -Eq '^(assign|move|comment) ' "$TMP/board.log" \
+   && [ ! -f "$TMP/model-done" ]; then
+  printf 'PASS %-36s %s\n' claim-check-api-error 'a failed last-moment API read is explained and fails closed'
+else
+  echo "FAIL claim-check-api-error log=$(cat "$TMP/board.log") output=$(cat "$TMP/claim-error.out")"; exit 1
+fi
+
+mkdir -p "$TMP/core"
+cp -a "$ROOT/scripts" "$ROOT/adapters" "$TMP/core/"
+python3 - "$TMP/core/adapters/hypertask/adapter.sh" <<'PYEOF'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+start = text.index("# adapter_claimed_by_other <token-file>")
+end = text.index("# adapter_assign_task <board-cli>", start)
+path.write_text(text[:start] + text[end:], encoding="utf-8")
+PYEOF
+RUNNER="$TMP/core/scripts/agent-board-poll"
+reset_case
+run_tick MOCK_CLAIM_AT_GET=yes MOCK_MODEL_MODE=waiting >"$TMP/claim-adapter-missing.out" 2>&1
+if [ "$(grep -cF 'claim-check TEST-1: error (adapter has no ownership re-read)' "$TMP/claim-adapter-missing.out")" -eq 1 ] \
+   && ! grep -Eq '^(assign|move|comment) ' "$TMP/board.log" \
+   && [ ! -f "$TMP/model-done" ]; then
+  printf 'PASS %-36s %s\n' claim-check-adapter-missing 'a stale adapter cannot silently bypass the ownership re-read'
+else
+  echo "FAIL claim-check-adapter-missing log=$(cat "$TMP/board.log") output=$(cat "$TMP/claim-adapter-missing.out")"; exit 1
+fi
+RUNNER="$ROOT/scripts/agent-board-poll"
+
+reset_case
+run_tick MOCK_MODEL_MODE=done >"$TMP/no-claim.out" 2>&1
+if [ "$(grep -cF 'claim-check TEST-1: no claimant' "$TMP/no-claim.out")" -eq 1 ] \
+   && [ -f "$TMP/model-done" ]; then
+  printf 'PASS %-36s %s\n' claim-check-no-claimant 'a clear last-moment API read is explained before the run starts'
+else
+  echo "FAIL claim-check-no-claimant log=$(cat "$TMP/board.log") output=$(cat "$TMP/no-claim.out")"; exit 1
+fi
+
+sed -i 's/AGENT_KIND="dev"/AGENT_KIND="worker"/' "$TMP/config/dev.conf"
+reset_case
+run_tick MOCK_MODEL_MODE=done >"$TMP/claim-gated.out" 2>&1
+if [ "$(grep -cF 'claim-check TEST-1: skipped-because-gated (agent kind worker)' "$TMP/claim-gated.out")" -eq 1 ] \
+   && [ -f "$TMP/model-done" ]; then
+  printf 'PASS %-36s %s\n' claim-check-gated 'a non-development run explains why no ownership re-read was made'
+else
+  echo "FAIL claim-check-gated log=$(cat "$TMP/board.log") output=$(cat "$TMP/claim-gated.out")"; exit 1
 fi

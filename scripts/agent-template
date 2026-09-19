@@ -1473,10 +1473,17 @@ PYEOF
   echo "== 2. stage and evaluate $TARGET_VERSION =="
   STAGED_TEMPLATE="$(mktemp -d "${TMPDIR:-/tmp}/agent-template-stage.XXXXXX")"
   EVAL_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/agent-template-evals.XXXXXX")"
-  trap 'rm -f "$AGENT_TEMPLATE_UPDATE_REEXEC" "${EVAL_OUTPUT:-}" "${INSTALLED_UNITS_MANIFEST:-}"; rm -rf "${STAGED_TEMPLATE:-}"' EXIT
+  PATCH_EVAL_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/agent-template-patch-evals.XXXXXX")"
+  trap 'rm -f "$AGENT_TEMPLATE_UPDATE_REEXEC" "${EVAL_OUTPUT:-}" "${PATCH_EVAL_OUTPUT:-}" "${INSTALLED_UNITS_MANIFEST:-}"; rm -rf "${STAGED_TEMPLATE:-}"' EXIT
   cp -a "$TEMPLATE_DIR/." "$STAGED_TEMPLATE/"
+  PATCHES_PRESENT="no"
+  PATCHES_APPROVED="no"
+  if [ -d "$LOCAL_PATCH_DIR" ] && [ -n "$(find "$LOCAL_PATCH_DIR" -type f -print -quit)" ]; then
+    PATCHES_PRESENT="yes"
+  fi
   if [ "$FORCE" = "yes" ]; then
     echo "eval gate skipped (--force)"
+    [ "$PATCHES_PRESENT" = "no" ] || PATCHES_APPROVED="yes"
   else
     set +e
     bash "$STAGED_TEMPLATE/evals/run-evals.sh" >"$EVAL_OUTPUT" 2>&1
@@ -1496,6 +1503,32 @@ PYEOF
               "restore the maintainer board CLI; the timer will retry without changing the installed version"
       fi
       exit 0
+    fi
+    if [ "$PATCHES_PRESENT" = "yes" ]; then
+      echo "== 2a. evaluate local patches against $TARGET_VERSION =="
+      while IFS= read -r -d '' patch_file; do
+        relative="${patch_file#"$LOCAL_PATCH_DIR"/}"
+        # The incoming eval suite is the gate. An archived copy of the old
+        # suite must not be able to omit the test which makes its code patch red.
+        case "$relative" in evals/*) continue ;; esac
+        target="$STAGED_TEMPLATE/$relative"
+        mkdir -p "$(dirname "$target")"
+        cp -a "$patch_file" "$target"
+      done < <(find "$LOCAL_PATCH_DIR" -type f -print0 | sort -z)
+      set +e
+      bash "$STAGED_TEMPLATE/evals/run-evals.sh" >"$PATCH_EVAL_OUTPUT" 2>&1
+      PATCH_EVAL_STATUS=$?
+      set -e
+      cat "$PATCH_EVAL_OUTPUT"
+      if [ "$PATCH_EVAL_STATUS" -eq 0 ]; then
+        PATCHES_APPROVED="yes"
+        echo "local patches passed the incoming eval suite and may be reapplied"
+      else
+        echo "local patches failed the incoming eval suite and remain archived without reapply"
+      fi
+      rm -rf "$STAGED_TEMPLATE"
+      mkdir -p "$STAGED_TEMPLATE"
+      cp -a "$TEMPLATE_DIR/." "$STAGED_TEMPLATE/"
     fi
   fi
 
@@ -1566,7 +1599,7 @@ PYEOF
 
   echo "== 2d. reapply local patches =="
   reapplied=no
-  if [ -d "$LOCAL_PATCH_DIR" ]; then
+  if [ "$PATCHES_APPROVED" = "yes" ] && [ -d "$LOCAL_PATCH_DIR" ]; then
     while IFS= read -r -d '' patch_file; do
       relative="${patch_file#"$LOCAL_PATCH_DIR"/}"
       target="$INSTALLED_TEMPLATE/$relative"
@@ -1575,8 +1608,12 @@ PYEOF
       echo "local patch reapplied: $relative"
       reapplied=yes
     done < <(find "$LOCAL_PATCH_DIR" -type f -print0 | sort -z)
+  elif [ "$PATCHES_PRESENT" = "yes" ]; then
+    echo "local patches remain archived because they failed the incoming eval suite"
   fi
-  [ "$reapplied" = "yes" ] || echo "no local patches to reapply"
+  if [ "$reapplied" = "no" ] && [ "$PATCHES_PRESENT" = "no" ]; then
+    echo "no local patches to reapply"
+  fi
 
   echo "== 2d. shared company skills pack =="
   # install.sh above clones or fast-forwards it; this prints where it landed

@@ -425,5 +425,5 @@ fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owner-rule-proposal.test.sh" ]; then
   echo ""
   echo "-- one comment per owner message and rule proposal filing --"
-  bash "$HERE/owner-rule-proposal.test.sh"
+  run_test bash "$HERE/owner-rule-proposal.test.sh"
 fi

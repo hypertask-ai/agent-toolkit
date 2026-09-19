@@ -3084,22 +3084,36 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
     origin_section="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$LOG" || true)"
   fi
   [ -n "$origin_section" ] || origin_section="$IN_PROGRESS_SECTION"
-  if [ "$AGENT_KIND" = "dev" ] && [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] \
-     && declare -F adapter_claimed_by_other >/dev/null 2>&1; then
+  claim_check_gate=""
+  if [ "$AGENT_KIND" != "dev" ]; then
+    claim_check_gate="agent kind $AGENT_KIND"
+  elif [ "$is_pr_fix" = "yes" ]; then
+    claim_check_gate="pull request fix"
+  elif [ "$is_reply_only" = "yes" ]; then
+    claim_check_gate="reply-only run"
+  fi
+  if [ -n "$claim_check_gate" ]; then
+    explain "claim-check $ref: skipped-because-gated ($claim_check_gate)"
+  elif ! declare -F adapter_claimed_by_other >/dev/null 2>&1; then
+    explain "claim-check $ref: error (adapter has no ownership re-read)"
+    [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+    continue
+  else
     set +e
     claimant="$(adapter_claimed_by_other "$TOKEN_FILE" "$board" "$ref" "$AGENT_ID" 2>>"$LOG")"
     claim_check_rc=$?
     set -e
     if [ "$claim_check_rc" -ne 0 ]; then
-      explain "skip  $ref: could not re-read the ticket immediately before claim"
+      explain "claim-check $ref: error (could not re-read ticket)"
       [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
       continue
     fi
     if [ -n "$claimant" ]; then
-      explain "skip  $ref: claimed by $claimant since ranking"
+      explain "claim-check $ref: claimant $claimant"
       [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
       continue
     fi
+    explain "claim-check $ref: no claimant"
   fi
   record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
   if [ "$is_reply_only" = "no" ]; then

@@ -179,11 +179,13 @@ every runner timer in its current started or stopped state.
 ## Local patches
 
 The install baseline is `~/.claude/skills/create-agent/.manifest.sha256`. Changed
-files are copied to `local-patches/<installed-version>/<path>`, printed, and
-reapplied automatically after the new release installs. The updater also removes
-untracked Python and pytest cache artifacts before staging the release. File each
-patch with `agent-template feedback` so the host override can eventually be
-removed.
+files are copied to `local-patches/<installed-version>/<path>` and printed. The
+updater applies them to a staged copy and runs the incoming release's eval suite,
+so an archived old eval runner cannot hide a regression. Passing patches are
+reapplied after install. Failing patches remain archived while the clean release
+installs. The updater also removes untracked Python and pytest cache artifacts
+before staging the release. File each patch with `agent-template feedback` so the
+host override can eventually be removed.
 
 ## Events
 
@@ -592,7 +594,10 @@ paste-it-yourself fallback appears only when no bot token is configured.
   model call for the score.
 - `printf '{"title":"...","description":"...","comments":[]}' | triage.sh --rules-only`
   — score a ticket by hand, without a model.
-- `agent-board-poll --once <slug>` — run one real tick.
+- `agent-board-poll --once <slug>` — run one real tick. Each candidate reaching
+  its start point logs one `claim-check` outcome: `skipped-because-gated`,
+  `no claimant`, `claimant`, or `error`. Development runs continue only after
+  `no claimant`; a missing adapter check or failed ticket read stops the claim.
 - `agent-template update --dry-run` — see what this host would pull in,
   convert, and clean up without changing anything.
 - `agent-template update` — do it for real; safe to run any time, and

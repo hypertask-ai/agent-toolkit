@@ -22,6 +22,10 @@ printf '%s\n' '- ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-a
 cat > "$TEMPLATE/install.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'installed\n' > "$INSTALL_MARKER"
+if [ -n "${FAKE_INSTALL_COPY_FILE:-}" ]; then
+  mkdir -p "$AGENT_TEMPLATE_INSTALL_DIR/$(dirname "$FAKE_INSTALL_COPY_FILE")"
+  cp "$(dirname "$0")/$FAKE_INSTALL_COPY_FILE" "$AGENT_TEMPLATE_INSTALL_DIR/$FAKE_INSTALL_COPY_FILE"
+fi
 mkdir -p "$AGENT_SYSTEMD_DIR"
 printf '[Timer]\nOnBootSec=1m\n[Install]\nWantedBy=timers.target\n' > "$AGENT_SYSTEMD_DIR/fresh-update.timer"
 printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n' > "$AGENT_SYSTEMD_DIR/fresh-update.service"
@@ -37,12 +41,19 @@ EOF
 cp "$ROOT/scripts/migrate-quiet-mode.py" "$TEMPLATE/scripts/migrate-quiet-mode.py"
 cat > "$TEMPLATE/evals/run-evals.sh" <<'EOF'
 #!/usr/bin/env bash
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [ -n "${AGENT_TEMPLATE_CORE_ROOT:-}" ]; then
   echo 'FAIL staged-core-root inherited installed tree'
   exit 1
 fi
 if [ "${EVAL_MODE:-green}" = red ]; then
   echo 'FAIL staged-release staged failure'
+  echo '1 case(s) run, 1 failed'
+  exit 1
+fi
+if [ -n "${EVAL_REJECT_FILE:-}" ] \
+   && grep -qF "${EVAL_REJECT_TEXT:?}" "$ROOT/$EVAL_REJECT_FILE"; then
+  echo 'FAIL staged-local-patch unsafe local patch'
   echo '1 case(s) run, 1 failed'
   exit 1
 fi
@@ -268,6 +279,33 @@ if [ "$status" -eq 0 ] && [ -e "$TMP/installed" ] \
   ok local-patch-reapplied "host edit is archived, reported, and restored after install"
 else
   bad local-patch-reapplied "status=$status output=$(cat "$TMP/patch.out")"
+fi
+
+# A local patch that breaks the incoming behavioural suite stays archived. The
+# clean release installs instead of restoring code which silently removes a guard.
+QUARANTINED="$TMP/quarantined-template"
+mkdir -p "$QUARANTINED/scripts"
+printf 'old-version\n' > "$QUARANTINED/VERSION"
+printf 'release runner\n' > "$QUARANTINED/scripts/agent-board-poll"
+(cd "$QUARANTINED" && sha256sum scripts/agent-board-poll > .manifest.sha256)
+printf 'unsafe stale runner\n' > "$QUARANTINED/scripts/agent-board-poll"
+printf 'incoming guarded runner\n' > "$TEMPLATE/scripts/agent-board-poll"
+rm -f "$TMP/installed"
+set +e
+AGENT_TEMPLATE_INSTALL_DIR="$QUARANTINED" \
+  FAKE_INSTALL_COPY_FILE="scripts/agent-board-poll" \
+  EVAL_REJECT_FILE="scripts/agent-board-poll" EVAL_REJECT_TEXT="unsafe stale runner" \
+  run_update >"$TMP/quarantined.out" 2>"$TMP/quarantined.err"
+status=$?
+set -e
+if [ "$status" -eq 0 ] && [ -e "$TMP/installed" ] \
+   && grep -qxF 'unsafe stale runner' "$QUARANTINED/local-patches/old-version/scripts/agent-board-poll" \
+   && grep -qxF 'incoming guarded runner' "$QUARANTINED/scripts/agent-board-poll" \
+   && grep -q 'local patches failed the incoming eval suite and remain archived without reapply' "$TMP/quarantined.out" \
+   && ! grep -q 'local patch reapplied: scripts/agent-board-poll' "$TMP/quarantined.out"; then
+  ok unsafe-local-patch-quarantined "a stale runner that removes a tested guard cannot replace the green release"
+else
+  bad unsafe-local-patch-quarantined "status=$status output=$(cat "$TMP/quarantined.out") installed=$(cat "$QUARANTINED/scripts/agent-board-poll")"
 fi
 
 # A host edit already present byte-for-byte upstream is no longer a conflict.
