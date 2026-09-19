@@ -320,6 +320,7 @@ AGENT_ID="$agent_id"
 BOARD_IDS="$board_ids"
 QUIET="$quiet"
 VERBATIM="\${AGENT_COMMENT_VERBATIM:-no}"
+REPLY_TO_COMMENT_ID="\${AGENT_REPLY_TO_COMMENT_ID:-}"
 OWNER_MENTION_REPLY="no"
 if [ "\${AGENT_REPLY_ONLY:-no}" = "yes" ] && [ "\${AGENT_OWNER_MENTION_REPLY:-no}" = "yes" ]; then
   OWNER_MENTION_REPLY="yes"
@@ -663,6 +664,7 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
   FILE=""
   RAW=no
   USE_IMPROVE=no
+  POSTED_ID=""
   args=("\$@")
   for ((i = 0; i < \${#args[@]}; i++)); do
     case "\${args[\$i]}" in
@@ -825,7 +827,51 @@ else:
       esac
     done
     FALLBACK_ARGS=("\${POST_ARGS[@]}")
-    if [ "\$USE_IMPROVE" = yes ]; then
+    if [ -n "\$REPLY_TO_COMMENT_ID" ]; then
+      if [ "\$USE_IMPROVE" = yes ]; then
+        _write_comment_with_ai "\$TEXT" "\$REF"
+        _outbound_text_gate "\$TEXT" "\$VERBATIM" || exit 0
+        for ((i = 0; i < \${#FALLBACK_ARGS[@]}; i++)); do
+          if [ "\${FALLBACK_ARGS[\$i]}" = "--text" ]; then
+            FALLBACK_ARGS[\$((i + 1))]="\$TEXT"
+          fi
+        done
+      fi
+      PAYLOAD="\$(REF="\$REF" TEXT="\$TEXT" REPLY_TO_COMMENT_ID="\$REPLY_TO_COMMENT_ID" python3 -c '
+import json, os
+reply_id = os.environ["REPLY_TO_COMMENT_ID"]
+if reply_id.isdigit():
+    reply_id = int(reply_id)
+print(json.dumps({"ticket_number": os.environ["REF"], "text": os.environ["TEXT"],
+                  "reply_to_comment_id": reply_id}))')"
+      if REPLY="\$(curl -sS -w '\n%{http_code}' -X POST \
+        -H "Authorization: Bearer \$TOKEN" -H 'Content-Type: application/json' \
+        --data "\$PAYLOAD" "\${BOARD_API_URL%/}/mcp/comments" 2>/dev/null)"; then
+        STATUS="\${REPLY##*\$'\n'}"
+        OUT="\${REPLY%\$'\n'*}"
+      else
+        STATUS=000
+        OUT=""
+      fi
+      if [[ "\$STATUS" = 2* ]]; then
+        RC=0
+        POSTED_ID="\$(REPLY_BODY="\$OUT" python3 -c '
+import json, os
+try:
+    row = json.loads(os.environ["REPLY_BODY"])
+except json.JSONDecodeError:
+    row = {}
+comment = row.get("comment") if isinstance(row.get("comment"), dict) else row
+print(comment.get("id") or "")' 2>/dev/null || true)"
+      else
+        _comment_cap_note "reply-stamped comment API failed on \$REF (HTTP \$STATUS); falling back to CLI without reply stamp"
+        if OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
+          RC=0
+        else
+          RC=\$?
+        fi
+      fi
+    elif [ "\$USE_IMPROVE" = yes ]; then
       POST_ARGS+=(--improve --improve-command improve-readability)
       IMPROVE_ERR="\$(mktemp "\${TMPDIR:-/tmp}/agent-comment-improve.XXXXXX")"
       if OUT="\$(hypertask --token "\$TOKEN" "\${POST_ARGS[@]}" 2>"\$IMPROVE_ERR")"; then
@@ -877,8 +923,10 @@ with open(temporary, "w", encoding="utf-8") as handle:
 os.replace(temporary, path)
 PYEOF
       fi
-      LISTED="\$(hypertask --token "\$TOKEN" --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
-      NEWID="\$(LISTED="\$LISTED" AGENT_NAME="\$AGENT_NAME" AGENT_ID="\$AGENT_ID" python3 -c '
+      NEWID="\$POSTED_ID"
+      if [ -z "\$NEWID" ]; then
+        LISTED="\$(hypertask --token "\$TOKEN" --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
+        NEWID="\$(LISTED="\$LISTED" AGENT_NAME="\$AGENT_NAME" AGENT_ID="\$AGENT_ID" python3 -c '
 import json, os
 
 def author_of(c):
@@ -902,6 +950,7 @@ if mine:
     best = max(mine, key=lambda c: c.get("id") or 0)
     print(best.get("id") or "")
 ')"
+      fi
       if [ -n "\$NEWID" ]; then
         mkdir -p "\$(dirname "\$POSTED")" 2>/dev/null || true
         printf '%s %s\n' "\$REF" "\$NEWID" >> "\$POSTED" 2>/dev/null || true

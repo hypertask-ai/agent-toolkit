@@ -29,6 +29,16 @@ printf '{}\n' > "$TMP/codex-auth.json"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 url="${!#}"
+if [[ " $* " = *' -X POST '* ]] && [[ "$url" = *'/mcp/comments' ]]; then
+  args=("$@")
+  data=""
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    [ "${args[$i]}" != "--data" ] || data="${args[$((i + 1))]:-}"
+  done
+  DATA="$data" python3 -c 'import json,os; print(json.loads(os.environ["DATA"])["text"])' >> "$MOCK_BOARD_LOG"
+  printf '%s\n200' '{"success":true,"comment":{"id":91}}'
+  exit 0
+fi
 case "$url" in
   *'/mcp/tasks?'*) cat "$MOCK_TASKS"; printf '\n200' ;;
   *'/mcp/comments?'*) cat "$MOCK_COMMENTS"; printf '\n200' ;;

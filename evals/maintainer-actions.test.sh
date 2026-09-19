@@ -163,6 +163,16 @@ EOF
 cat > "$BIN/curl" <<'EOF'
 #!/usr/bin/env bash
 url="${!#}"
+if [[ " $* " = *' -X POST '* ]] && [[ "$url" = *'/mcp/comments' ]]; then
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "--data" ]; then
+      [ -z "${REPLY_POST_LOG:-}" ] || printf '%s\n' "${args[$((i + 1))]:-}" >> "$REPLY_POST_LOG"
+    fi
+  done
+  printf '%s\n200' '{"success":true,"comment":{"id":91}}'
+  exit 0
+fi
 case "$url" in
   *'/mcp/tasks?project_id=1&'*)
     printf '%s\n200' '{"tasks":[{"id":"task-2","ticketNumber":"ONE-2","section":"Inbox","title":"Build","description":"","assignees":[],"commentCount":0},{"id":"task-3","ticketNumber":"ONE-3","section":"Inbox","title":"Failed build","description":"","assignees":[],"commentCount":0},{"id":"task-4","ticketNumber":"ONE-4","section":"Inbox","title":"Advisor","description":"","assignees":[],"commentCount":0}]}' ;;
@@ -195,6 +205,7 @@ chmod +x "$BIN"/*
 : > "$TMP/board-native.log"
 : > "$TMP/systemctl.log"
 : > "$TMP/model-runs.log"
+: > "$TMP/reply-posts.log"
 
 run_template() {
   HOME="$HOME_DIR" XDG_STATE_HOME="$STATE_DIR" AGENT_CONFIG_DIR="$CONF_DIR" \
@@ -316,7 +327,8 @@ run_poll() {
     COMPANY_SKILLS_DIR="$COMPANY" PATH="$BIN:/usr/bin:/bin" BOARD_NATIVE_LOG="$TMP/board-native.log" \
     SYSTEMD_RUN_LOG="$TMP/systemd-run.log" INSTRUCTION_PID_FILE="$TMP/instruction.pid" \
     ADVISOR_POST_FILE="$TMP/advisor-post" SYSTEMCTL_LOG="$TMP/systemctl.log" \
-    GH_LOG="$TMP/gh.log" MODEL_RUN_LOG="$TMP/model-runs.log" MODEL_DELAY="${MODEL_DELAY:-6}" \
+    GH_LOG="$TMP/gh.log" MODEL_RUN_LOG="$TMP/model-runs.log" REPLY_POST_LOG="$TMP/reply-posts.log" \
+    MODEL_DELAY="${MODEL_DELAY:-6}" \
     REPLY_HAX_BIN="$BIN/reply-hax" REPLY_BWRAP_BIN="$BIN/bwrap-stub" \
     REPLY_TIMEOUT_BIN="$BIN/timeout-stub" REPLY_CODEX_AUTH="$HOME_DIR/.codex/auth.json" \
     "$ROOT/scripts/agent-board-poll" "$@" maintainer
@@ -351,10 +363,10 @@ run_poll >"$TMP/first-poll.out" 2>"$TMP/first-poll.err"
 run_poll >"$TMP/second-poll.out" 2>"$TMP/second-poll.err"
 run_poll >"$TMP/third-poll.out" 2>"$TMP/third-poll.err"
 if grep -q '^reply-only$' "$TMP/model-runs.log" \
-   && grep -q ' comment add OWNER-9 ' "$TMP/board-native.log"; then
+   && python3 -c 'import json,sys; row=json.load(open(sys.argv[1])); assert row["ticket_number"] == "OWNER-9" and row["reply_to_comment_id"] == 90' "$TMP/reply-posts.log"; then
   ok reply-only-bypasses-inflight-work "owner question ran while build records were in flight"
 else
-  bad reply-only-bypasses-inflight-work "models=$(cat "$TMP/model-runs.log") board=$(cat "$TMP/board-native.log")"
+  bad reply-only-bypasses-inflight-work "models=$(cat "$TMP/model-runs.log") reply=$(cat "$TMP/reply-posts.log") board=$(cat "$TMP/board-native.log")"
 fi
 
 done_count="$(grep -c ' comment add ONE-2 ' "$TMP/board-native.log" || true)"

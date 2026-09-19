@@ -77,7 +77,19 @@ fi
 printf 'unexpected fake Hypertask call\n' >&2
 exit 2
 EOF
-chmod +x "$TMP/bin/hypertask"
+cat > "$TMP/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+data=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --data) data="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s' "$data" > "$API_POST_CAPTURE"
+printf '%s\n%s' '{"success":true,"comment":{"id":71}}' "${API_POST_STATUS:-200}"
+EOF
+chmod +x "$TMP/bin/hypertask" "$TMP/bin/curl"
 
 # shellcheck source=/dev/null
 . "$ROOT/adapters/hypertask/adapter.sh"
@@ -87,8 +99,10 @@ export PATH="$TMP/bin:$PATH" HOME="$TMP/home" XDG_STATE_HOME="$TMP/state"
 export AI_CALLS="$TMP/ai-calls" TASK_ARGS="$TMP/task-args"
 export TASK_TITLE="$TMP/task-title" TASK_DESCRIPTION="$TMP/task-description"
 export IMPROVE_CALLS="$TMP/improve-calls" COMMENT_TEXT="$TMP/comment-text"
+export API_POST_CAPTURE="$TMP/api-post"
 : > "$AI_CALLS"
 : > "$IMPROVE_CALLS"
+: > "$API_POST_CAPTURE"
 
 WRITER_JSON='{"success":true,"title":"Clear rewritten title","html":"<p>Clear rewritten description.</p>"}' \
   "$TMP/htbot" tasks create --project 5500 --title 'Original title' \
@@ -128,13 +142,50 @@ fi
 original='<p><strong>Decision: The original release is ready.</strong></p><p>Next: approve it.</p>'
 rewritten='<p><strong>Decision: The clearer release is ready.</strong></p><p>Next: approve it.</p>'
 : > "$IMPROVE_CALLS"
+: > "$API_POST_CAPTURE"
 IMPROVED_COMMENT="$rewritten" "$TMP/htbot" comment add TEST-1 --text "$original" >/dev/null
 if [ "$(cat "$COMMENT_TEXT")" = "$rewritten" ] \
    && [ "$(cat "$IMPROVE_CALLS")" = improve-readability ] \
+   && [ ! -s "$API_POST_CAPTURE" ] \
    && printf '%s' "$(cat "$COMMENT_TEXT")" | grep -q '^<p><strong>Decision:'; then
-  ok comment-rewrite-applied '--improve with a separate improve command rewrites while preserving the leading marker'
+  ok comment-rewrite-applied 'an unstamped ticket-run status uses the normal CLI writer path'
 else
-  bad comment-rewrite-applied "comment=$(cat "$COMMENT_TEXT") calls=$(cat "$IMPROVE_CALLS")"
+  bad comment-rewrite-applied "comment=$(cat "$COMMENT_TEXT") calls=$(cat "$IMPROVE_CALLS") api=$(cat "$API_POST_CAPTURE")"
+fi
+
+: > "$AI_CALLS"
+: > "$COMMENT_TEXT"
+: > "$API_POST_CAPTURE"
+stamped_original='<p><strong>Answer: The original answer is ready.</strong></p><p>Next: read it.</p>'
+stamped_rewrite='<p><strong>Answer: The rewritten answer is ready.</strong></p><p>Next: read it.</p>'
+WRITER_JSON="{\"success\":true,\"html\":\"$stamped_rewrite\"}" AGENT_REPLY_TO_COMMENT_ID=240575 \
+  "$TMP/htbot" comment add TEST-1 --text "$stamped_original" >/dev/null
+if python3 - "$API_POST_CAPTURE" "$stamped_rewrite" <<'PYEOF'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row == {"ticket_number": "TEST-1", "text": sys.argv[2], "reply_to_comment_id": 240575}
+PYEOF
+then
+  if [ ! -s "$COMMENT_TEXT" ] \
+     && grep -q -- '--task TEST-1 --mode write-with-ai' "$AI_CALLS" \
+     && grep -qx 'TEST-1 71' "$TMP/state/agent-board-poll/writer-gate.posted-comments"; then
+    ok stamped-comment-api 'a stamped comment rewrites first, then posts the rewritten HTML with its reply id'
+  else
+    bad stamped-comment-api "cli=$(cat "$COMMENT_TEXT") ai=$(cat "$AI_CALLS")"
+  fi
+else
+  bad stamped-comment-api "payload=$(cat "$API_POST_CAPTURE")"
+fi
+
+: > "$COMMENT_TEXT"
+: > "$API_POST_CAPTURE"
+API_POST_STATUS=503 AGENT_REPLY_TO_COMMENT_ID=240576 \
+  "$TMP/htbot" comment add TEST-2 --raw --text "$original" >/dev/null 2>"$TMP/reply-api-failure.err"
+if [ "$(cat "$COMMENT_TEXT")" = "$original" ] \
+   && grep -q '^reply-stamped comment API failed on TEST-2 (HTTP 503); falling back to CLI without reply stamp$' "$TMP/reply-api-failure.err"; then
+  ok stamped-comment-fallback 'a failed stamped API post logs the failure and falls back to the unstamped CLI'
+else
+  bad stamped-comment-fallback "comment=$(cat "$COMMENT_TEXT") error=$(cat "$TMP/reply-api-failure.err")"
 fi
 
 : > "$IMPROVE_CALLS"

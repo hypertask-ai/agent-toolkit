@@ -1,0 +1,1 @@
+- AGTE-115 stamps reply-lane comments with the answered comment id so Hypertask can route them to the owner’s Important inbox, while preserving CLI fallback when the direct API is unavailable.
