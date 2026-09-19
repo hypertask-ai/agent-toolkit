@@ -2158,7 +2158,7 @@ pr, live = json.loads(os.environ["PR"]), json.loads(os.environ["LIVE"])
 print(json.dumps({"action":"wait", "state":live["state"], "definition":live["definition"],
                   "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
                   "title":pr["title"], "branch":pr["headRefName"], "since":pr["createdAt"],
-                  "merged_at":pr.get("mergedAt")}))
+                  "merged_at":pr.get("mergedAt"), "pickup_slot":False, "unfixable":False}))
 '
     return 0
   fi
@@ -2221,7 +2221,8 @@ now_value = os.environ.get("PR_GATE_NOW")
 now = (datetime.datetime.fromisoformat(now_value.replace("Z", "+00:00"))
        if now_value else datetime.datetime.now(datetime.timezone.utc))
 stale = (now - created).total_seconds() >= 2 * 60 * 60
-if state == "awaiting-merge" or stale:
+unfixable = stale and state in ("red", "checks-pending")
+if state == "awaiting-merge" or unfixable:
     action = "observe"
 failed_names = [check["name"] for check in feedback["failed"]]
 wait_reason = "red: " + ", ".join(failed_names) if state == "red" else state
@@ -2231,7 +2232,8 @@ print(json.dumps({"action":action, "state":state, "wait_reason":wait_reason,
                   "branch":view.get("headRefName") or pr["headRefName"],
                   "base":view.get("baseRefName") or "main", "since":pr["createdAt"],
                   "feedback":"\n\n".join(parts), "pending":feedback["pending"],
-                  "failed_checks":failed_names}))
+                  "failed_checks":failed_names, "pickup_slot":not unfixable,
+                  "unfixable":unfixable}))
 '
 }
 
