@@ -524,6 +524,16 @@ owner_ack_answered() {
   log "owner ack for $1: the answer posted, so the acknowledgement is skipped"
 }
 
+# owner_ack_discard <ref> <reason>: another agent owns this question, so this
+# agent owes the owner nothing at all.
+owner_ack_discard() {
+  local file
+  file="$(owner_ack_pending_file "$1")"
+  [ -f "$file" ] || return 0
+  rm -f "$file"
+  log "owner ack for $1 dropped: $2"
+}
+
 # owner_ack_flush <ref>: nothing was answered, so say something.
 owner_ack_flush() {
   local ref="$1" file board comment_id classification started waited
@@ -2219,6 +2229,7 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     answerer_reason="$(ANSWERER="$answerer" python3 -c 'import json,os; print(json.loads(os.environ["ANSWERER"]).get("reason") or "")')"
     if [ -n "$answered_by" ]; then
       is_reply_only="no"
+      owner_ack_discard "$ref" "$answered_by already answered question $comment_id"
       explain "answer $ref: $answered_by already commented after question $comment_id, so this agent will not post a second answer"
     elif { [ -n "$owner_id" ] && [ "$owner_id" = "$AGENT_ID" ]; } \
          || { [ -n "$owner_slug" ] && [ "$owner_slug" = "$SLUG" ]; }; then
@@ -2226,6 +2237,7 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     else
       is_reply_only="no"
       answerer_owner="${owner_slug:-${owner_id:-no configured agent}}"
+      owner_ack_discard "$ref" "$answerer_owner owns question $comment_id"
       explain "answer $ref: $answerer_owner owns question $comment_id by $answerer_reason; $SLUG continues only for another ticket reason"
     fi
   fi
