@@ -47,14 +47,20 @@ if [ "${1:-} ${2:-}" = "comment add" ]; then
   shift 2
   text=""
   improve=no
+  improve_command=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --text|--body) text="$2"; shift 2 ;;
-      --improve) improve="${2:-}"; shift 2 ;;
+      --improve) improve=yes; shift ;;
+      --improve-command) improve_command="${2:-}"; shift 2 ;;
       *) shift ;;
     esac
   done
-  printf '%s\n' "$improve" >> "$IMPROVE_CALLS"
+  if [ "$improve" = yes ]; then
+    printf '%s\n' "${improve_command:-improve-readability}" >> "$IMPROVE_CALLS"
+  else
+    printf '%s\n' no >> "$IMPROVE_CALLS"
+  fi
   if [ "$improve" != no ] && [ "${IMPROVE_UNSUPPORTED:-no}" = yes ]; then
     printf 'error: unknown option --improve\n' >&2
     exit 2
@@ -126,7 +132,7 @@ IMPROVED_COMMENT="$rewritten" "$TMP/htbot" comment add TEST-1 --text "$original"
 if [ "$(cat "$COMMENT_TEXT")" = "$rewritten" ] \
    && [ "$(cat "$IMPROVE_CALLS")" = improve-readability ] \
    && printf '%s' "$(cat "$COMMENT_TEXT")" | grep -q '^<p><strong>Decision:'; then
-  ok comment-rewrite-applied '--improve improve-readability rewrites while preserving the leading marker'
+  ok comment-rewrite-applied '--improve with a separate improve command rewrites while preserving the leading marker'
 else
   bad comment-rewrite-applied "comment=$(cat "$COMMENT_TEXT") calls=$(cat "$IMPROVE_CALLS")"
 fi
