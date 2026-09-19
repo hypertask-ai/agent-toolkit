@@ -358,19 +358,26 @@ our own message rather than "command not found" three layers down.
    or recorded run state. Stop normal pickup only when two open PRs occupy the
    agent's pickup slots, or merged work is still waiting to deploy.
 4. List the board's tickets in the watched columns.
-5. Keep the ones **assigned to this agent id**, or whose **newest comment
+5. Read each candidate's full ticket and comment thread. Classify the board
+   owner's newest comment as `hold`, `go`, `question`, or `feedback`, then post
+   one acknowledgement before any claim. A hold unassigns this agent, moves the
+   ticket to the configured review column, and blocks every work lane. A go
+   resumes normal work, a question uses the reply-only lane, and feedback uses
+   the normal ticket run. The `valentin` label and an owner assignment remain
+   separate holds on every board and lane.
+6. Keep the ones **assigned to this agent id**, or whose **newest comment
    @mentions it**.
-6. Drop anything already handled. The state key is `<task id>:<newest comment
+7. Drop anything already handled. The state key is `<task id>:<newest comment
    id>`, so a fresh reply on an old ticket counts as new work and a re-read of
    the same one does not.
-7. For each remaining ticket, up to `MAX_CONCURRENT_RUNS`, register a runtime
+8. For each remaining ticket, up to `MAX_CONCURRENT_RUNS`, register a runtime
    run on that ticket, then start **one short-lived process**. Claimed, started,
    PR opened, red check, fix pushed, retrying, blocked, and done progress is run
    activity. A 404 from the runs API switches to local-only activity in the run
    log without stopping work. The runner closes the run with its final status.
-8. The prompt tells the process to read the skills index first, gives it the
+9. The prompt tells the process to read the skills index first, gives it the
    ticket and latest comment, and limits ticket comments to the five kinds.
-9. Log to `~/.local/state/agent-board-poll/<slug>.log` and exit.
+10. Log to `~/.local/state/agent-board-poll/<slug>.log` and exit.
 
 ## One ticket until live
 

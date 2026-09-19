@@ -1717,6 +1717,33 @@ adapter_move_task() {
   return 1
 }
 
+# adapter_unassign_task <board-cli> <ref> <agent-id>
+adapter_unassign_task() {
+  local board_cli="$1" ref="$2" agent_id="$3" attempt task
+  task="$("$board_cli" --json task get "$ref" 2>/dev/null || true)"
+  if ! TASK="$task" AID="$agent_id" python3 -c '
+import json, os, sys
+raw = os.environ["TASK"]
+start, end = raw.find("{"), raw.rfind("}")
+try:
+    doc = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
+    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+except (IndexError, TypeError, ValueError):
+    raise SystemExit(1)
+for who in task.get("assignees") or []:
+    agent = who.get("agent") if isinstance(who, dict) else None
+    if isinstance(agent, dict) and str(agent.get("id") or "") == os.environ["AID"]:
+        raise SystemExit(0)
+raise SystemExit(1)
+'; then
+    return 0
+  fi
+  for attempt in 1 2; do
+    "$board_cli" task unassign "$ref" --assignee "$agent_id" && return 0
+  done
+  return 1
+}
+
 # adapter_assign_task <board-cli> <ref> <agent-id>
 adapter_assign_task() {
   local board_cli="$1" ref="$2" agent_id="$3" attempt task

@@ -12,6 +12,7 @@ Core treats model commands as opaque strings. It has no provider allow-list and 
 | `LADDER` | Optional `\|`-separated full commands. Once three attempts have failed, the next attempt selects command one; after four failures, the next selects command two, and so on. Empty or absent means no escalation. |
 | `RESEARCH_CLI` | Optional command for `agent-advisor` and supervisor research. Empty or absent means no research step. |
 | `TRIAGE_HARD_CLI` | Optional command for a ticket labelled `hard`. Empty or absent means `MODEL_CLI`. |
+| `OWNER_COMMENT_CLASSIFIER_CLI` | Optional command that classifies the board owner's newest comment before pickup. It defaults to `TRIAGE_MODEL_CLI` and must return exactly `hold`, `go`, `question`, or `feedback`. |
 | `CHAT_CLI` | Optional command for Agent Chat. Empty or absent means `MODEL_CLI`. |
 
 Each value is the complete non-interactive command, including its model, tool, permission, and print flags. The runner splits it into arguments without shell evaluation and appends the prompt as the final argument, which is the existing `MODEL_CLI` contract. Put `-p`, `--print`, or the harness's equivalent before that final prompt. Shell pipelines and a literal `|` cannot appear inside a command because `|` separates ladder entries.
