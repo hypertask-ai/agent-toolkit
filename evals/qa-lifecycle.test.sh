@@ -10,7 +10,10 @@ fail=0
 ok() { printf 'PASS %-36s %s\n' "$1" "$2"; pass=$((pass + 1)); }
 bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
 
-mkdir -p "$TMP/home" "$TMP/config" "$TMP/bin" "$TMP/repo" "$TMP/company" "$TMP/state"
+mkdir -p "$TMP/home" "$TMP/config" "$TMP/bin" "$TMP/repo" "$TMP/company" "$TMP/state" \
+  "$TMP/runtime" "$TMP/identity-shims"
+export XDG_RUNTIME_DIR="$TMP/runtime"
+export AGENT_IDENTITY_SHIM_DIR="$TMP/identity-shims"
 printf '# company skills\n' > "$TMP/company/INDEX.md"
 printf 'test\n' > "$TMP/company/VERSION"
 printf 'token\n' > "$TMP/token"
@@ -144,6 +147,12 @@ if grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
   ok qa-pass-fallback-move 'a Done verdict without a model move is moved to Done'
 else
   bad qa-pass-fallback-move "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
+fi
+if [ -x "$AGENT_IDENTITY_SHIM_DIR/qa-runner/hypertask" ] \
+   && [ ! -e "$XDG_RUNTIME_DIR/agent-identity-shims/qa-runner/hypertask" ]; then
+  ok qa-identity-shim-isolated 'the QA runner cannot collide with host identity shims'
+else
+  bad qa-identity-shim-isolated 'the QA eval wrote its identity shim outside the private directory'
 fi
 
 run_case Handoff '[]' '{"comments":[]}'
