@@ -11,8 +11,8 @@ until you do it.
 ## What the bot is made of
 
 - **Runner timer** — `agent-board-poll@<slug>.timer` runs a cheap delta tick
-  every 60 seconds in poll mode. Events mode uses the same runner hourly as a
-  safety net, while `agent-events.service` starts exact-ticket ticks immediately.
+  every 60 seconds in poll mode. Events mode uses the same runner every five
+  minutes as a safety net, while `agent-events.service` starts exact-ticket ticks immediately.
 - **Reconciler timer** — `agent-board-reconcile.timer` checks every five minutes.
   It moves tickets with linked merged pull requests to Done and restores tickets
   left in In Progress after a run stops without a pull request.
@@ -195,7 +195,7 @@ The host owner must provide the public HTTPS route. A Cloudflare tunnel or
 local-helper can forward it to `http://127.0.0.1:8793/webhook/hypertask`. Register
 one agent with `agent-template events register <slug> --url <public-url>`, or put
 `EVENTS_URL` in `~/.config/agent-template/config` before installation. If no URL
-is configured, the receiver still runs and the hourly timer remains the path.
+is configured, the receiver still runs and the five-minute timer remains the path.
 
 Agent creation and toolkit updates inspect every managed agent subscription. Only
 an events-wired agent's configured host or recorded manual registration is served.
@@ -209,7 +209,7 @@ retain the existing `<slug>.comment-cursor.<board>` files, stop ranking after 60
 seconds, and perform at most one full board scan per hour.
 
 A failed ticket run writes its normal host status and leaves the board trigger
-eligible for the hourly safety scan. Event delivery never bypasses the existing
+eligible for the five-minute safety scan. Event delivery never bypasses the existing
 claim, cooldown, pull request, identity, or comment rules.
 
 ## Fleet progress contract

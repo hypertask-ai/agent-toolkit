@@ -610,7 +610,7 @@ fi
 
 AGENT_CONFIG_DIR="$AGENT_CONF_DIR" "$BIN/agent-events" reconcile-all \
   || echo "WARNING: managed-agent webhook check failed; polling remains available" >&2
-"$BIN/agent-events" register-all || echo "WARNING: event webhook registration failed; hourly polls remain the path" >&2
+"$BIN/agent-events" register-all || echo "WARNING: event webhook registration failed; five-minute polls remain the path" >&2
 
 sync_company_skills
 feedback_update_host_notes "$(cat "$SRC/VERSION")" "$NO_HOST_NOTES"

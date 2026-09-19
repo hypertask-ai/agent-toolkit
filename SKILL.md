@@ -76,7 +76,7 @@ reports any active foreign webhook that remains.
 
 `agent-template events status` shows each events-wired agent's registered URL,
 last event time, and durable queue length. With no public URL, the receiver still
-runs and the hourly poll safety net remains the path. Ordinary poll ticks page
+runs and the five-minute poll safety net remains the path. Ordinary poll ticks page
 board lists in batches, rank only tickets whose `updatedAt` changed, retain the
 existing per-board comment cursor, cap ranking at 60 seconds, and do no more
 than one full safety scan per hour.
@@ -190,7 +190,7 @@ asks the owner what to choose.
 | Mode | What it needs | What you get | When to pick it |
 |---|---|---|---|
 | **poll** (default) | the board CLI and a model CLI on this machine, nothing else | a cheap 60-second delta tick plus the shared 3-second chat lane | hosts with no public HTTPS route |
-| **events** | poll requirements plus a host-owner-provided public HTTPS route | immediate exact-ticket runs plus an hourly poll safety net | hosts using a Cloudflare tunnel or local-helper |
+| **events** | poll requirements plus a host-owner-provided public HTTPS route | immediate exact-ticket runs plus a five-minute poll safety net | hosts using a Cloudflare tunnel or local-helper |
 | **fleet** | a long-lived worker runtime already installed on this machine, which the adapter checks for | webhooks, the shared chat lane, the runtime's own queue and retries | only where that runtime is already running |
 | **none** | nothing | an identity, a conf, a skills index; you trigger it from cron, CI or by hand | repo-only agents, and CLI identities |
 
