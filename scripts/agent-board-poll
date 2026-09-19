@@ -1897,15 +1897,13 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     fi
   fi
 
-  # Reserved owner tickets never enter QA work. The same guard also runs in
-  # the board wrapper so a model cannot bypass it with a direct move command.
-  if [ "$AGENT_KIND" = "qa" ]; then
-    qa_protection="$(qa_protection_reason "$row" "$board")"
-    if [ -n "$qa_protection" ]; then
-      explain "skip  $ref: QA move skipped because of $qa_protection"
-      log_once_per_day "$SLUG-$board-$ref-qa-protected" "QA move skipped for $ref: $qa_protection"
-      continue
-    fi
+  # Reserved owner tickets never enter agent work, on any lane. The same guard
+  # also runs in the board wrapper so a model cannot bypass it with a move.
+  qa_protection="$(qa_protection_reason "$row" "$board")"
+  if [ -n "$qa_protection" ]; then
+    explain "skip  $ref: owner hold ($qa_protection)"
+    log_once_per_day "$SLUG-$board-$ref-owner-protected" "pickup skipped for $ref: $qa_protection"
+    continue
   fi
 
   if [ "$is_reply_only" = "yes" ] && [ "$comment_id" != "0" ]; then
