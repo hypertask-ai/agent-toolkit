@@ -1297,8 +1297,8 @@ print(ref)
   update_file_eval_failure() {
     local marker project_json section_result section title description output
     mkdir -p "$UPDATE_STATE_DIR"
-    marker="$UPDATE_STATE_DIR/update-failure-${TARGET_VERSION//[^a-zA-Z0-9._-]/_}"
-    [ ! -f "$marker" ] || { echo "eval failure ticket already filed for $TARGET_VERSION"; return 0; }
+    marker="$UPDATE_FAILURE_MARKER"
+    [ ! -f "$marker" ] || { echo "eval failure ticket already filed for $TARGET_VERSION at ${TARGET_COMMIT:0:7}"; return 0; }
     [ -x "$UPDATE_BOARD_CLI" ] || return 1
     project_json="$("$UPDATE_BOARD_CLI" --json project show "$FEEDBACK_BOARD_ID" 2>/dev/null)" || return 1
     section_result="$(board_section_or_first "$project_json" "$FEEDBACK_BOARD_SECTION")" || return 1
@@ -1343,10 +1343,15 @@ print(ref)
   TARGET_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
   echo "channel $CHANNEL selected: $TARGET_VERSION ($(git -C "$REPO" rev-parse --short HEAD))"
 
-  UPDATE_SUCCESS_MARKER="$UPDATE_STATE_DIR/update-success-${TARGET_VERSION//[^a-zA-Z0-9._-]/_}"
+  UPDATE_KEY="${TARGET_VERSION//[^a-zA-Z0-9._-]/_}-${TARGET_COMMIT//[^a-zA-Z0-9._-]/_}"
+  UPDATE_SUCCESS_MARKER="$UPDATE_STATE_DIR/update-success-$UPDATE_KEY"
+  UPDATE_FAILURE_MARKER="$UPDATE_STATE_DIR/update-failure-$UPDATE_KEY"
   CURRENT_VERSION="$(cat "$INSTALLED_TEMPLATE/VERSION" 2>/dev/null || echo unknown)"
-  if [ "$TIMER_RUN" = "yes" ] && [ "$CURRENT_VERSION" = "$TARGET_VERSION" ]; then
-    echo "no VERSION change: toolkit $TARGET_VERSION is already installed"
+  INSTALL_STATE="${AGENT_TEMPLATE_INSTALL_STATE:-$UPDATE_STATE_DIR/install-state}"
+  CURRENT_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_STATE" 2>/dev/null | tail -n1 || true)"
+  if [ "$TIMER_RUN" = "yes" ] && [ "$CURRENT_VERSION" = "$TARGET_VERSION" ] \
+     && [ -n "$CURRENT_COMMIT" ] && [ "$CURRENT_COMMIT" = "$TARGET_COMMIT" ]; then
+    echo "toolkit $TARGET_VERSION at ${TARGET_COMMIT:0:7} is already installed"
     if [ -f "$UPDATE_SUCCESS_MARKER" ]; then
       exit 0
     fi

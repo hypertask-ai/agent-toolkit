@@ -1,0 +1,1 @@
+- AGTE-100 makes host updates compare exact toolkit commits, so PR gate fixes reach runners even when the version number is unchanged.

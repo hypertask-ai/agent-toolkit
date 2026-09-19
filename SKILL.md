@@ -37,13 +37,14 @@ promotion after its own update check and prints whether it promoted or refused.
 
 ## What update does before it swaps
 
-`agent-template update` selects the configured channel, compares the installed copy
-with its install manifest, copies host edits into `local-patches`, stages the target
-release, and runs the staged `evals/run-evals.sh`. Only then does `install.sh` rename
-the staged directories into place. A red timer run leaves the old version installed
-and files one toolkit bug for that version. A passing timer run restarts chat and
-enabled timers, then posts the installed version on Board health. `--force` is the
-explicit way to skip only the eval gate.
+`agent-template update` selects the configured channel and compares its exact commit
+with the installed commit, even when both use the same version number. It compares the
+installed copy with its install manifest, copies host edits into `local-patches`,
+stages the target release, and runs the staged `evals/run-evals.sh`. Only then does
+`install.sh` rename the staged directories into place. A red timer run leaves the
+old version installed and files one toolkit bug for that exact commit. A passing
+timer run restarts chat and enabled timers, then posts the installed version on Board
+health. `--force` is the explicit way to skip only the eval gate.
 
 ## Local patches
 

@@ -159,11 +159,13 @@ timer runs print `auto-update off, current X, stable Y` and do nothing else.
 
 ## What update does before it swaps
 
-The updater fetches and selects the channel, detects local changes against the
-installed manifest, stages the complete target template, and runs the staged eval
-suite. A red suite leaves the installed tree untouched, logs `update to X refused:
-N evals red`, and files one toolkit bug for that version. A passing timer update
-restarts chat and enabled timers, then records the installed version on Board health.
+The updater fetches and selects the channel, then compares its exact commit with the
+installed commit even when their version numbers match. It detects local changes
+against the installed manifest, stages the complete target template, and runs the
+staged eval suite. A red suite leaves the installed tree untouched, logs `update to X
+refused: N evals red`, and files one toolkit bug for that exact commit. A passing timer
+update restarts chat and enabled timers, then records the installed version on Board
+health.
 `--force` skips the eval gate. A normal install evaluates its source before its first
 copy as well. Use `agent-template update --keep-timers` when deployment must leave
 every runner timer in its current started or stopped state.
