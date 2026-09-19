@@ -1,0 +1,1 @@
+- AGTE-118 routes new pull request alarms to Review at High priority, notifies the board agent room and configured Telegram chat, exposes open alarms in Board health state, and closes cleared alarms in Done.

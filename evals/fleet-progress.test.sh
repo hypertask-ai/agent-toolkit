@@ -37,6 +37,8 @@ elif args[:2] == ["comment", "add"]:
     print(json.dumps({"comment": {"id": f"comment-{value}", "text": args[-1]}}))
 elif args[:2] == ["comment", "update"]:
     print(json.dumps({"comment": {"id": args[2], "text": args[-1]}}))
+elif args[:2] == ["task", "move"]:
+    print(json.dumps({"task": {"ticketNumber": args[2], "section": args[-1]}}))
 else:
     raise SystemExit(2)
 EOF
@@ -49,12 +51,31 @@ EOF
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env python3
 import json, os, pathlib, sys
-with pathlib.Path(os.environ["TELEGRAM_CURL_LOG"]).open("a", encoding="utf-8") as handle:
-    handle.write(json.dumps(sys.argv[1:]) + "\n")
+args = sys.argv[1:]
+joined = " ".join(args)
+if "/mcp/chat/rooms/pending" in joined:
+    print(json.dumps({"messages": [{"projectId": 5500, "roomId": "toolkit-room"}]}))
+elif "/mcp/chat/rooms/toolkit-room/messages" in joined:
+    with pathlib.Path(os.environ["CHAT_CURL_LOG"]).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(args) + "\n")
+    print('{"success":true}')
+elif "api.telegram.org" in joined:
+    log = os.environ.get("ALARM_TELEGRAM_CURL_LOG") or os.environ.get("TELEGRAM_CURL_LOG")
+    with pathlib.Path(log).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(args) + "\n")
+else:
+    raise SystemExit(2)
 EOF
 chmod +x "$TMP/bin/board" "$TMP/bin/notifier" "$TMP/bin/curl"
 : > "$TMP/board.log"
 : > "$TMP/notifier.log"
+: > "$TMP/chat-curl.log"
+: > "$TMP/alarm-telegram-curl.log"
+mkdir -p "$TMP/home/.config/agent-template"
+cat > "$TMP/home/.config/agent-template/config" <<'EOF'
+TELEGRAM_BOT_TOKEN="alarm-token"
+TELEGRAM_CHAT_ID="alarm-chat"
+EOF
 
 cat > "$CONF/product-bot.conf" <<EOF
 AGENT_SLUG="product-bot"
@@ -85,14 +106,16 @@ printf 'token\n' > "$TMP/token"
 supervise() {
   HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF" \
     BOARD_LOG="$TMP/board.log" BOARD_COUNTER="$TMP/board-counter" \
+    CHAT_CURL_LOG="$TMP/chat-curl.log" ALARM_TELEGRAM_CURL_LOG="$TMP/alarm-telegram-curl.log" \
     NOTIFIER_LOG="$TMP/notifier.log" FLEET_TELEGRAM_NOTIFIER="$TMP/bin/notifier" \
-    "$PROGRESS" supervise --state-dir "$STATE" --board-cli "$TMP/bin/board" \
-      --manager-cli "$ROOT/scripts/agent-template" --manager-slug product-bot \
+    PATH="$TMP/bin:$PATH" "$PROGRESS" supervise --state-dir "$STATE" --board-cli "$TMP/bin/board" \
+      --token-file "$TMP/token" --manager-cli "$ROOT/scripts/agent-template" --manager-slug product-bot \
       --toolkit-ticket AGTE-37 --now 2026-09-18T12:00:00Z
 }
 
 first="$(supervise)"
 if FIRST="$first" STATE="$STATE" BOARD_LOG="$TMP/board.log" NOTIFIER_LOG="$TMP/notifier.log" CONF="$CONF" \
+  CHAT_CURL_LOG="$TMP/chat-curl.log" ALARM_TELEGRAM_CURL_LOG="$TMP/alarm-telegram-curl.log" \
   python3 - <<'PYEOF'
 import json, os
 from pathlib import Path
@@ -106,17 +129,36 @@ wait = next(row for row in entries.values() if row["rule"] == "wait-over-two-hou
 assert wait["runner"] == "dev-1" and wait["manual_at"] == "2026-09-18T12:00:00Z"
 assert wait["owner_notified_at"] == "2026-09-18T12:00:00Z"
 assert wait["bug_ticket"] == "AGTE-99" and wait["bug_filed_at"] == "2026-09-18T12:00:00Z"
+assert wait["alarm_open_since"] == "2026-09-18T12:00:00Z"
+assert wait["alarm_chat_notified_at"] == "2026-09-18T12:00:00Z"
+assert wait["alarm_telegram_notified_at"] == "2026-09-18T12:00:00Z"
 assert "PR 633" in wait["reason"] and "30 hours" in wait["reason"]
 assert all(row.get("comment_id") and row.get("notified_at") for row in entries.values())
 board = [json.loads(line) for line in open(os.environ["BOARD_LOG"])]
 assert len([row for row in board if row[:2] == ["task", "create"]]) == 1
 create = next(row for row in board if row[:2] == ["task", "create"])
 assert create[create.index("--project") + 1] == "5500"
+assert create[create.index("--section") + 1] == "Review"
+assert create[create.index("--priority") + 1] == "high"
 assert "PR #633" in create[create.index("--title") + 1]
 assert len([row for row in board if row[:2] == ["comment", "add"]]) == 4
+chat = [json.loads(line) for line in open(os.environ["CHAT_CURL_LOG"])]
+telegram = [json.loads(line) for line in open(os.environ["ALARM_TELEGRAM_CURL_LOG"])]
+assert len(chat) == len(telegram) == 1
+chat_body = json.loads(chat[0][chat[0].index("--data-binary") + 1])
+telegram_line = telegram[0][telegram[0].index("--data-urlencode") + 1].removeprefix("text=")
+assert chat_body["ticketNumber"] == "AGTE-99"
+assert chat_body["text"] == telegram_line
+assert chat_body["text"].endswith("https://app.hypertask.ai/detail/project-5500/99")
+health = json.load(open(Path(os.environ["STATE"]) / "board-health.json"))
+assert health["alarms"] == [{
+    "open_since": "2026-09-18T12:00:00Z", "runner": "dev-1",
+    "summary": "Bug: PR #633 stayed checks-pending for two hours",
+    "ticket": "AGTE-99", "url": "https://app.hypertask.ai/detail/project-5500/99",
+}]
 assert not [row for row in board if row[:2] == ["comment", "update"]]
 notifications = Path(os.environ["NOTIFIER_LOG"]).read_text().splitlines()
-assert len(notifications) == 5
+assert len(notifications) == 4
 assert sum(line.startswith("[fleet manual]") for line in notifications) == 1
 assert all("\n" not in line for line in notifications)
 assert 'CLAIM_UNASSIGNED="no"' in (Path(os.environ["CONF"]) / "dev-1.conf").read_text()
@@ -174,7 +216,7 @@ PYEOF
 supervise >/dev/null
 adds="$(python3 -c 'import json,sys; print(sum(json.loads(line)[:2] == ["comment","add"] for line in open(sys.argv[1])))' "$TMP/board.log")"
 updates="$(python3 -c 'import json,sys; print(sum(json.loads(line)[:2] == ["comment","update"] for line in open(sys.argv[1])))' "$TMP/board.log")"
-if [ "$adds" -eq 4 ] && [ "$updates" -eq 1 ] && [ "$(wc -l < "$TMP/notifier.log")" -eq 5 ]; then
+if [ "$adds" -eq 4 ] && [ "$updates" -eq 1 ] && [ "$(wc -l < "$TMP/notifier.log")" -eq 4 ]; then
   ok edit-in-place 'a changed reason updates its stored comment without another notification'
 else
   bad edit-in-place "adds=$adds updates=$updates notifications=$(wc -l < "$TMP/notifier.log")"
@@ -200,9 +242,10 @@ EOF
 : > "$TMP/red-board.log"
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF" \
   BOARD_LOG="$TMP/red-board.log" BOARD_COUNTER="$TMP/red-board-counter" \
+  CHAT_CURL_LOG="$TMP/chat-curl.log" ALARM_TELEGRAM_CURL_LOG="$TMP/alarm-telegram-curl.log" \
   NOTIFIER_LOG="$TMP/notifier.log" FLEET_TELEGRAM_NOTIFIER="$TMP/bin/notifier" \
-  "$PROGRESS" supervise --state-dir "$RED_STATE" --board-cli "$TMP/bin/board" \
-    --manager-cli "$ROOT/scripts/agent-template" --manager-slug product-bot \
+  PATH="$TMP/bin:$PATH" "$PROGRESS" supervise --state-dir "$RED_STATE" --board-cli "$TMP/bin/board" \
+    --token-file "$TMP/token" --manager-cli "$ROOT/scripts/agent-template" --manager-slug product-bot \
     --toolkit-ticket AGTE-37 --now 2026-09-18T12:00:00Z >/dev/null
 if python3 - "$TMP/red-board.log" <<'PYEOF'
 import json, sys
@@ -215,6 +258,43 @@ then
   ok red-pr-names-failing-check 'the filed red-PR bug includes the exact failing check name'
 else
   bad red-pr-names-failing-check 'the filed red-PR bug omitted its failing check name'
+fi
+
+python3 - "$RED_STATE/dev-red.progress.json" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+row = json.load(open(path))
+row["wait"] = {"state": None, "since": None, "ticket": None, "reason": None, "pr": None}
+temporary = path + ".new"
+json.dump(row, open(temporary, "w"), indent=2)
+os.replace(temporary, path)
+PYEOF
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF" \
+  BOARD_LOG="$TMP/red-board.log" BOARD_COUNTER="$TMP/red-board-counter" \
+  CHAT_CURL_LOG="$TMP/chat-curl.log" ALARM_TELEGRAM_CURL_LOG="$TMP/alarm-telegram-curl.log" \
+  NOTIFIER_LOG="$TMP/notifier.log" FLEET_TELEGRAM_NOTIFIER="$TMP/bin/notifier" \
+  PATH="$TMP/bin:$PATH" "$PROGRESS" supervise --state-dir "$RED_STATE" --board-cli "$TMP/bin/board" \
+    --token-file "$TMP/token" --manager-cli "$ROOT/scripts/agent-template" --manager-slug product-bot \
+    --toolkit-ticket AGTE-37 --now 2026-09-18T12:01:00Z >/dev/null
+if python3 - "$TMP/red-board.log" "$RED_STATE" <<'PYEOF'
+import json, sys
+from pathlib import Path
+rows = [json.loads(line) for line in open(sys.argv[1])]
+cleared = [row for row in rows if row[:3] == ["comment", "add", "AGTE-99"]]
+assert len(cleared) == 1 and "cleared at 12:01 UTC" in cleared[0][-1]
+moves = [row for row in rows if row[:3] == ["task", "move", "AGTE-99"]]
+assert len(moves) == 1 and moves[0][-2:] == ["--section", "Done"]
+state = json.load(open(Path(sys.argv[2]) / "fleet-stalls.json"))
+alarm = next(iter(state["stalls"].values()))
+assert alarm["active"] is False
+assert alarm["cleared_commented_at"] == alarm["moved_done_at"] == "2026-09-18T12:01:00Z"
+health = json.load(open(Path(sys.argv[2]) / "board-health.json"))
+assert health["alarms"] == []
+PYEOF
+then
+  ok alarm-clears-to-done 'a cleared PR alarm gets one timestamped comment and moves to Done'
+else
+  bad alarm-clears-to-done 'the cleared alarm did not close exactly once'
 fi
 
 CONTRACT="$TMP/contract"
@@ -270,7 +350,7 @@ HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF" \
   BOARD_LOG="$TMP/board.log" BOARD_COUNTER="$TMP/board-counter" \
   TELEGRAM_CURL_LOG="$TMP/telegram-curl.log" FLEET_TELEGRAM_ENV="$TMP/telegram.env" \
   PATH="$TMP/bin:$PATH" "$PROGRESS" supervise --state-dir "$TELEGRAM_STATE" \
-    --board-cli "$TMP/bin/board" --manager-cli "$ROOT/scripts/agent-template" \
+    --board-cli "$TMP/bin/board" --token-file "$TMP/token" --manager-cli "$ROOT/scripts/agent-template" \
     --manager-slug product-bot --toolkit-ticket AGTE-37 --now 2026-09-18T12:00:00Z >/dev/null
 if python3 - "$TMP/telegram-curl.log" <<'PYEOF'
 import json, sys
