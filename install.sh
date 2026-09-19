@@ -608,6 +608,8 @@ else
   echo "WARNING: no systemd --user session here: skipped refreshing agent-board-poll@.service/.timer and agent-template-update.timer" >&2
 fi
 
+AGENT_CONFIG_DIR="$AGENT_CONF_DIR" "$BIN/agent-events" reconcile-all \
+  || echo "WARNING: managed-agent webhook check failed; polling remains available" >&2
 "$BIN/agent-events" register-all || echo "WARNING: event webhook registration failed; hourly polls remain the path" >&2
 
 sync_company_skills

@@ -108,7 +108,8 @@ run_update() {
     AGENT_TEMPLATE_HOST_CONFIG="$HOST_CONFIG" AGENT_TEMPLATE_REPO="$FAKE_REPO" \
     AGENT_SYSTEMD_DIR="$TMP/units" XDG_STATE_HOME="$TMP/state" \
     PATH="$TMP/bin:/usr/bin:/bin" GIT_LOG="$TMP/git.log" SYSTEMCTL_LOG="$TMP/systemctl.log" \
-    UPDATE_BOARD_LOG="$TMP/update-board.log" AGENT_TEMPLATE_UPDATE_BOARD_CLI="$TMP/bin/update-board" \
+    UPDATE_BOARD_LOG="$TMP/update-board.log" WEBHOOK_LOG="$TMP/webhook.log" \
+    AGENT_TEMPLATE_UPDATE_BOARD_CLI="$TMP/bin/update-board" \
     AGENT_TEMPLATE_UPDATE_HEALTH_BOARD=15 INSTALL_MARKER="$TMP/installed" \
     "$ROOT/scripts/agent-template" update "$@"
 }
@@ -177,19 +178,27 @@ else
   bad timer-update-restarts-and-reports "status=$status output=$(cat "$TMP/timer-green.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
 fi
 
-# An unchanged VERSION does not run evals, install, restarts, or another post.
+# An unchanged VERSION still reconciles webhooks without running evals, install, restarts, or another post.
 printf 'test-version\n' > "$SUCCESS_INSTALLED/VERSION"
+mkdir -p "$SUCCESS_INSTALLED/scripts"
+cat > "$SUCCESS_INSTALLED/scripts/agent-events" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$WEBHOOK_LOG"
+EOF
+chmod +x "$SUCCESS_INSTALLED/scripts/agent-events"
 rm -f "$TMP/installed"
 : > "$TMP/systemctl.log"
 : > "$TMP/update-board.log"
+: > "$TMP/webhook.log"
 set +e
 AGENT_TEMPLATE_INSTALL_DIR="$SUCCESS_INSTALLED" EVAL_MODE=red run_update --timer >"$TMP/timer-same.out" 2>"$TMP/timer-same.err"
 status=$?
 set -e
 if [ "$status" -eq 0 ] && [ ! -e "$TMP/installed" ] \
    && grep -q '^no VERSION change: toolkit test-version is already installed$' "$TMP/timer-same.out" \
+   && [ "$(cat "$TMP/webhook.log")" = "reconcile-all" ] \
    && [ ! -s "$TMP/systemctl.log" ] && [ ! -s "$TMP/update-board.log" ]; then
-  ok unchanged-version-noop "a five-minute check does nothing when VERSION is unchanged"
+  ok unchanged-version-noop "an unchanged five-minute check still reconciles managed webhooks"
 else
   bad unchanged-version-noop "status=$status output=$(cat "$TMP/timer-same.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
 fi

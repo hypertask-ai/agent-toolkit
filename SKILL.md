@@ -68,6 +68,11 @@ local-helper. Register it with `agent-template events register <slug> --url
 register every events-wired agent. Signing secrets remain in 0600 files under
 `~/.config/agent-template/webhooks/` and are never printed by the toolkit.
 
+Every real agent creation and toolkit update checks all managed agents. Only an
+events-wired agent's configured host or recorded manual registration is served.
+The toolkit deactivates every other active webhook and logs it once. Board health
+reports any active foreign webhook that remains.
+
 `agent-template events status` shows each events-wired agent's registered URL,
 last event time, and durable queue length. With no public URL, the receiver still
 runs and the hourly poll safety net remains the path. Ordinary poll ticks page
@@ -423,12 +428,12 @@ acknowledged, answered, and when an answer estimate was given and due. Product
 Bot publishes one daily `Reply contract` result on each board's standing
 `Board health` ticket and files one Bug ticket per new miss.
 
-The same health pass posts only new pile-ups on that standing ticket. It flags
+The same health pass posts only new violations on that standing ticket. It flags
 columns over eight tickets, tickets over 24 hours in Inbox or a review lane,
-green or red allowlisted pull requests over two hours, runner errors, and down
-poll timers. A `Question:` or `Decision:` first line keeps these comments valid
-in quiet mode. The supervisor score from
-`~/.local/state/ht-supervisor/health.json` is always first, and a new pile-up
+green or red allowlisted pull requests over two hours, runner errors, down poll
+timers, and active foreign webhooks. A `Question:` or `Decision:` first line keeps
+these comments valid in quiet mode. The supervisor score from
+`~/.local/state/ht-supervisor/health.json` is always first, and a new violation
 may mention the board owner at most once in 24 hours.
 
 No work process survives the tick. The board remains the work state, while the
