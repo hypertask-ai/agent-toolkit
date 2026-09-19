@@ -147,6 +147,27 @@ with tempfile.TemporaryDirectory() as temporary:
 
 with tempfile.TemporaryDirectory() as temporary:
     temporary = Path(temporary)
+    config, chat_state, board_state = temporary / "conf", temporary / "chat", temporary / "board"
+    config.mkdir()
+    board_state.mkdir()
+    token = temporary / "token"
+    token.write_text("secret-token")
+    board_cli = temporary / "refusing-board-cli"
+    board_cli.write_text("#!/usr/bin/env bash\necho 'daily comment cap reached' >&2\nexit 0\n")
+    board_cli.chmod(board_cli.stat().st_mode | stat.S_IEXEC)
+    write_conf(config, "refuser", token, board_cli)
+    (board_state / "refuser.lock").write_text(
+        '{"ticket":"TEST-9","board_id":15,"started_at":"2026-09-18T09:50:00+00:00"}\n'
+    )
+    daemon = ChatDaemon(config, chat_state, board_state_dir=board_state)
+    daemon.ack_once(FakeApi)
+    log = (chat_state / "refuser.log").read_text()
+    assert "could not post an acknowledgement on TEST-9: daily comment cap reached" in log, log
+    print("PASS ticket-ack-post-failure-logs-cli-stderr")
+
+
+with tempfile.TemporaryDirectory() as temporary:
+    temporary = Path(temporary)
     board_state = temporary / "board"
     board_state.mkdir()
     (board_state / "queue.log").write_text(

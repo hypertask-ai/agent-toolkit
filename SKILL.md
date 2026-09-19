@@ -206,7 +206,8 @@ provides a public HTTPS route.
 
 `agent-chat.service` is one always-on process per host. Its chat loop finds
 each conf with `CHAT="on"` every three seconds and asks for its newest
-unanswered private message and room turns on every `BOARD_ID`. A room turn
+unanswered private message and all pending room turns for that agent. Each
+turn's room id selects the shared transcript and reply destination. A room turn
 wakes only the agent named in its text or target metadata; this includes a bot
 named by Product Bot, the room's chief of staff. Unaddressed agents record the
 turn as seen and stay silent. A separate loop publishes runtime state every 30
@@ -216,7 +217,7 @@ runs concurrently with the others and with ticket work.
 Room replies read the shared transcript. The fourth bot-to-bot turn in one
 topic is a deterministic `Handoff:` back to its related ticket. Each posted
 turn carries that ticket to the room endpoint, which writes the turn as a run
-note atomically. `ROOM_DAILY_TURN_BUDGET` caps replies per board and UTC day
+note atomically. `ROOM_DAILY_TURN_BUDGET` caps replies per room and UTC day
 across the host; it defaults to 20, while 0 disables room replies.
 
 Private chat reads conversation history, the company skills index first, then

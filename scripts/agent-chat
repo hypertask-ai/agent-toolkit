@@ -274,9 +274,9 @@ class JsonState:
 
 
 class RoomBudgetState(JsonState):
-    def claim(self, board_id: int, limit: int, now: datetime | None = None) -> bool:
+    def claim(self, room_id: str, limit: int, now: datetime | None = None) -> bool:
         day = (now or datetime.now(timezone.utc)).date().isoformat()
-        key = str(board_id)
+        key = room_id
         with self.lock:
             row = self.value.get(key)
             count = int(row.get("count", 0)) if isinstance(row, dict) and row.get("day") == day else 0
@@ -286,8 +286,8 @@ class RoomBudgetState(JsonState):
             self.save()
             return True
 
-    def release(self, board_id: int) -> None:
-        key = str(board_id)
+    def release(self, room_id: str) -> None:
+        key = room_id
         day = datetime.now(timezone.utc).date().isoformat()
         with self.lock:
             row = self.value.get(key)
@@ -490,27 +490,29 @@ class AgentApi:
         quoted = urllib.parse.urlencode({"ticket_number": reference})
         return self.request("GET", f"/mcp/tasks?{quoted}")
 
-    def room_pending(self, board_id: int) -> list[dict[str, Any]]:
-        payload = self.request("GET", f"/mcp/chat/rooms/{board_id}/pending")
+    def room_pending(self) -> list[dict[str, Any]]:
+        payload = self.request("GET", "/mcp/chat/rooms/pending")
         rows = payload.get("messages")
         return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
-    def room_history(self, board_id: int) -> list[dict[str, Any]]:
-        payload = self.request("GET", f"/mcp/chat/rooms/{board_id}/messages")
+    def room_history(self, room_id: str) -> list[dict[str, Any]]:
+        quoted = urllib.parse.quote(room_id, safe="")
+        payload = self.request("GET", f"/mcp/chat/rooms/{quoted}/messages")
         rows = payload.get("messages")
         return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
     def room_reply(
         self,
-        board_id: int,
+        room_id: str,
         message_id: str,
         text: str,
         ticket: str,
         topic_id: str,
     ) -> None:
+        quoted = urllib.parse.quote(room_id, safe="")
         self.request(
             "POST",
-            f"/mcp/chat/rooms/{board_id}/messages",
+            f"/mcp/chat/rooms/{quoted}/messages",
             {
                 "text": text[:8000],
                 "replyToMessageId": message_id,
@@ -682,20 +684,31 @@ def _posted_comment_lines(board_state_dir: Path, slug: str) -> list[str]:
         return []
 
 
-def board_comment_add(agent: Agent, ticket: str, text: str, board_state_dir: Path) -> str | None:
+def board_comment_add(
+    agent: Agent,
+    ticket: str,
+    text: str,
+    board_state_dir: Path,
+    errors: list[str] | None = None,
+) -> str | None:
     # The wrapper exits 0 without posting on a refusal (owner-mention budget,
     # daily comment cap), so a clean exit alone does not mean a comment
     # landed. Only trust the posted-comments file, and only if it grew.
     before = len(_posted_comment_lines(board_state_dir, agent.slug))
     try:
-        subprocess.run(
+        result = subprocess.run(
             [str(agent.board_cli), "comment", "add", ticket, "--text", text],
             capture_output=True, text=True, timeout=30, check=True,
         )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        if errors is not None:
+            stderr = str(getattr(error, "stderr", "") or "").strip()
+            errors.append(stderr or str(error))
         return None
     lines = _posted_comment_lines(board_state_dir, agent.slug)
     if len(lines) <= before:
+        if errors is not None:
+            errors.append(result.stderr.strip() or "board CLI did not record a posted comment")
         return None
     for line in reversed(lines):
         parts = line.split()
@@ -704,13 +717,21 @@ def board_comment_add(agent: Agent, ticket: str, text: str, board_state_dir: Pat
     return None
 
 
-def board_comment_update(agent: Agent, comment_id: str, text: str) -> bool:
+def board_comment_update(
+    agent: Agent,
+    comment_id: str,
+    text: str,
+    errors: list[str] | None = None,
+) -> bool:
     try:
         subprocess.run(
             [str(agent.board_cli), "comment", "update", str(comment_id), "--text", text],
             capture_output=True, text=True, timeout=30, check=True,
         )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        if errors is not None:
+            stderr = str(getattr(error, "stderr", "") or "").strip()
+            errors.append(stderr or str(error))
         return False
     return True
 
@@ -1118,19 +1139,19 @@ class ChatDaemon:
         self.log(agent, f"handled message {message_id}; reply={json.dumps(reply, ensure_ascii=False)}")
 
     @staticmethod
-    def room_key(agent: Agent, board_id: int, message_id: str) -> str:
-        return f"room:{board_id}:{agent.slug}:{message_id}"
+    def room_key(agent: Agent, room_id: str, message_id: str) -> str:
+        return f"room:{room_id}:{agent.slug}:{message_id}"
 
     def handle_room(
         self,
         agent: Agent,
-        board_id: int,
         message: dict[str, Any],
         api: AgentApi | None = None,
     ) -> None:
         message_id = str(message.get("id") or message.get("messageId") or "")
-        key = self.room_key(agent, board_id, message_id)
-        if not message_id or self.state.contains(key):
+        room_id = str(message.get("roomId") or "")
+        key = self.room_key(agent, room_id, message_id)
+        if not message_id or not room_id or self.state.contains(key):
             return
         client = api or AgentApi(agent)
         if not room_message_addressed_to(agent, message):
@@ -1139,42 +1160,42 @@ class ChatDaemon:
         ticket = room_ticket(message)
         if not ticket:
             self.state.mark(agent, key, "")
-            self.log(agent, f"room {board_id} message {message_id} has no related ticket")
+            self.log(agent, f"room {room_id} message {message_id} has no related ticket")
             return
-        if not self.room_budget.claim(board_id, agent.room_daily_turn_budget):
+        if not self.room_budget.claim(room_id, agent.room_daily_turn_budget):
             self.state.mark(agent, key, "")
-            self.log(agent, f"room {board_id} daily turn budget reached")
+            self.log(agent, f"room {room_id} daily turn budget reached")
             return
         try:
-            history = client.room_history(board_id)
+            history = client.room_history(room_id)
             if self.stop.is_set():
-                self.room_budget.release(board_id)
+                self.room_budget.release(room_id)
                 return
             if room_turn_limit_reached(message, history):
                 reply = f"Handoff: Continue {ticket} on its ticket; this topic has used the room's three bot-to-bot turns."
             else:
                 reply = run_provider(agent, room_prompt_for(agent, message, history), stop=self.stop)
                 if self.stop.is_set():
-                    self.room_budget.release(board_id)
+                    self.room_budget.release(room_id)
                     return
                 reply = finalize_chat_reply(reply, room_message_text(message), lambda reference: client.ticket(reference))
             if self.stop.is_set():
-                self.room_budget.release(board_id)
+                self.room_budget.release(room_id)
                 return
-            client.room_reply(board_id, message_id, reply, ticket, room_topic(message))
+            client.room_reply(room_id, message_id, reply, ticket, room_topic(message))
         except ApiError as error:
             if error.status == 409:
                 self.state.mark(agent, key, "already terminal")
                 return
-            self.room_budget.release(board_id)
-            self.log(agent, f"room {board_id} message {message_id} error: {error}")
+            self.room_budget.release(room_id)
+            self.log(agent, f"room {room_id} message {message_id} error: {error}")
             return
         except Exception as error:
-            self.room_budget.release(board_id)
-            self.log(agent, f"room {board_id} message {message_id} error: {type(error).__name__}: {error}")
+            self.room_budget.release(room_id)
+            self.log(agent, f"room {room_id} message {message_id} error: {type(error).__name__}: {error}")
             return
         self.state.mark(agent, key, reply)
-        self.log(agent, f"handled room {board_id} message {message_id}; reply={json.dumps(reply, ensure_ascii=False)}")
+        self.log(agent, f"handled room {room_id} message {message_id}; reply={json.dumps(reply, ensure_ascii=False)}")
 
     def submit(self, agent: Agent, message: dict[str, Any]) -> None:
         message_id = str(message.get("id") or message.get("messageId") or "")
@@ -1187,16 +1208,17 @@ class ChatDaemon:
         future = self.executor.submit(self.handle, agent, message)
         future.add_done_callback(lambda _future: self._finished(message_id))
 
-    def submit_room(self, agent: Agent, board_id: int, message: dict[str, Any]) -> None:
+    def submit_room(self, agent: Agent, message: dict[str, Any]) -> None:
         message_id = str(message.get("id") or message.get("messageId") or "")
-        key = self.room_key(agent, board_id, message_id)
-        if not message_id or self.state.contains(key):
+        room_id = str(message.get("roomId") or "")
+        key = self.room_key(agent, room_id, message_id)
+        if not message_id or not room_id or self.state.contains(key):
             return
         with self.inflight_lock:
             if key in self.inflight:
                 return
             self.inflight.add(key)
-        future = self.executor.submit(self.handle_room, agent, board_id, message)
+        future = self.executor.submit(self.handle_room, agent, message)
         future.add_done_callback(lambda _future: self._finished(key))
 
     def _finished(self, message_id: str) -> None:
@@ -1294,9 +1316,13 @@ class ChatDaemon:
                 return
         queue = eligible_count(self.board_state_dir, agent.slug)
         estimate = estimate_wait_minutes(self.board_state_dir, agent.slug, queue, locked.get("started_at"))
-        ack_id = board_comment_add(agent, locked_ref, ack_text(queue, estimate), self.board_state_dir)
+        errors: list[str] = []
+        ack_id = board_comment_add(
+            agent, locked_ref, ack_text(queue, estimate), self.board_state_dir, errors,
+        )
         if not ack_id:
-            self.log(agent, f"ack lane could not post an acknowledgement on {locked_ref}")
+            detail = f": {errors[-1]}" if errors else ""
+            self.log(agent, f"ack lane could not post an acknowledgement on {locked_ref}{detail}")
             return
         acked_at = datetime.now(timezone.utc).isoformat()
         if contract_id:
@@ -1342,8 +1368,10 @@ class ChatDaemon:
             self.log(agent, f"ack lane provider error for {ticket}: {type(error).__name__}: {error}")
             return
         answer = finalize_chat_reply(answer, question_text, lambda reference: api.ticket(reference))
-        if not board_comment_update(agent, str(ack_id), answer):
-            self.log(agent, f"ack lane could not edit the acknowledgement on {ticket}")
+        errors: list[str] = []
+        if not board_comment_update(agent, str(ack_id), answer, errors):
+            detail = f": {errors[-1]}" if errors else ""
+            self.log(agent, f"ack lane could not edit the acknowledgement on {ticket}{detail}")
             return
         contract_id = str(entry.get("contract_event_id") or "")
         if contract_id:
@@ -1371,14 +1399,13 @@ class ChatDaemon:
                     self.submit(agent, message)
             except Exception as error:
                 self.log(agent, f"private poll error: {type(error).__name__}: {error}")
-            for board_id in agent.board_ids:
-                if self.stop.is_set():
-                    break
-                try:
-                    for message in client.room_pending(board_id):
-                        self.submit_room(agent, board_id, message)
-                except Exception as error:
-                    self.log(agent, f"room {board_id} poll error: {type(error).__name__}: {error}")
+            if self.stop.is_set():
+                break
+            try:
+                for message in client.room_pending():
+                    self.submit_room(agent, message)
+            except Exception as error:
+                self.log(agent, f"room poll error: {type(error).__name__}: {error}")
 
     def serve(self, interval: float) -> None:
         while not self.stop.is_set():
