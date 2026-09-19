@@ -52,12 +52,34 @@ new_stray
 if run_guard 2> "$TMP/rewrite.err" no \
    && grep -qF "exec \"$TMP/bin/test-board\"" "$TMP/bin/htbot" \
    && [ -x "$TMP/bin/htbot" ] \
-   && compgen -G "$TMP/bin/htbot.bak-*" > /dev/null \
+   && [ "$(find "$TMP/bin" -maxdepth 1 -name 'htbot.bak-*' | wc -l)" -eq 1 ] \
    && grep -qF 'hypertask --token' "$TMP/bin"/htbot.bak-* \
    && grep -qF 'rewrote' "$TMP/rewrite.err"; then
-  ok token-wrapper-rewritten "a stray board wrapper is rewritten to exec BOARD_CLI, with a backup"
+  ok token-wrapper-rewritten "a stray board wrapper is rewritten to exec BOARD_CLI, with one backup"
 else
   bad token-wrapper-rewritten "$(cat "$TMP/rewrite.err" 2>/dev/null)"
+fi
+
+# ---- backups are not scanned and backed up again ----
+if run_guard 2> "$TMP/repeat.err" no \
+   && [ "$(find "$TMP/bin" -maxdepth 1 -name 'htbot.bak-*' | wc -l)" -eq 1 ] \
+   && grep -qF 'hypertask --token' "$TMP/bin"/htbot.bak-* \
+   && ! compgen -G "$TMP/bin/htbot.bak-*.bak-*" > /dev/null; then
+  ok token-wrapper-backup-skipped "a wrapper backup is never treated as another wrapper"
+else
+  bad token-wrapper-backup-skipped "$(cat "$TMP/repeat.err" 2>/dev/null)"
+fi
+
+# ---- old backup chains are reduced to one copy ----
+BACKUP="$(find "$TMP/bin" -maxdepth 1 -name 'htbot.bak-*' -print -quit)"
+cp -a "$BACKUP" "$BACKUP.bak-20000101T000000Z"
+cp -a "$BACKUP" "$BACKUP.bak-20000101T000000Z.bak-20000101T000001Z"
+if run_guard 2> "$TMP/prune.err" no \
+   && [ "$(find "$TMP/bin" -maxdepth 1 -name 'htbot.bak-*' | wc -l)" -eq 1 ] \
+   && grep -qF 'hypertask --token' "$TMP/bin"/htbot.bak-*; then
+  ok token-wrapper-backup-pruned "an existing backup chain is reduced to one wrapper copy"
+else
+  bad token-wrapper-backup-pruned "$(cat "$TMP/prune.err" 2>/dev/null)"
 fi
 
 # ---- the managed BOARD_CLI itself is never touched ----

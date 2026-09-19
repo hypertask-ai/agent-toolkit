@@ -1,0 +1,1 @@
+- AGTE-127 keeps one backup for each rewritten board wrapper, removes older backup chains, and never scans backup files as wrappers.
