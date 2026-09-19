@@ -826,7 +826,7 @@ else:
     done
     FALLBACK_ARGS=("\${POST_ARGS[@]}")
     if [ "\$USE_IMPROVE" = yes ]; then
-      POST_ARGS+=(--improve improve-readability)
+      POST_ARGS+=(--improve)
       IMPROVE_ERR="\$(mktemp "\${TMPDIR:-/tmp}/agent-comment-improve.XXXXXX")"
       if OUT="\$(hypertask --token "\$TOKEN" "\${POST_ARGS[@]}" 2>"\$IMPROVE_ERR")"; then
         RC=0
