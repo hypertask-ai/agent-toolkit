@@ -28,6 +28,13 @@ once already."
 3. If a rule directly conflicts with the ticket's own instructions, follow
    the ticket and say so in your plan; do not silently drop the rule.
 
+## Ticket rewrites
+
+Always use the approved Task Writer format for ticket rewrites: a title under
+80 characters that names the change, followed by a bold outcome sentence,
+"What went wrong," "What changes" as a numbered list, and "Done when." Keep
+all links and meaning.
+
 ## When a human corrects you
 
 Whether they edit your comment, fail QA, reject your pull request, or say
