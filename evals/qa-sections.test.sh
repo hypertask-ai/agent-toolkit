@@ -11,7 +11,8 @@ ok() { printf 'PASS %-36s %s\n' "$1" "$2"; pass=$((pass + 1)); }
 bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
 
 mkdir -p "$TMP/home" "$TMP/config" "$TMP/bin" "$TMP/repo-default" \
-  "$TMP/repo-explicit" "$TMP/repo-runner" "$TMP/state" "$TMP/company"
+  "$TMP/repo-explicit" "$TMP/repo-runner" "$TMP/repo-dev-mission" \
+  "$TMP/repo-qa-mission" "$TMP/state" "$TMP/company"
 printf '# QA skills\n' > "$TMP/INDEX.md"
 printf '# company skills\n' > "$TMP/company/INDEX.md"
 printf 'test\n' > "$TMP/company/VERSION"
@@ -53,6 +54,27 @@ if grep -q '^WATCH_SECTIONS="AI Review,QA"$' "$TMP/config/qa-1.conf" \
   ok qa-create-sections "new QA confs include QA with default and explicit sections"
 else
   bad qa-create-sections "default=$(sed -n 's/^WATCH_SECTIONS=//p' "$TMP/config/qa-1.conf") explicit=$(sed -n 's/^WATCH_SECTIONS=//p' "$TMP/config/qa-2.conf")"
+fi
+
+create_default_mission() {
+  local kind="$1" name="$2" repo="$3" pr_repo="$4"
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" AGENT_BIN_DIR="$TMP/bin" \
+    AGENT_SYSTEMD_DIR="$TMP/units" COMPANY_SKILLS_INDEX="$TMP/company/INDEX.md" \
+    PATH="$TMP/bin:$PATH" "$ROOT/scripts/create-agent.sh" --name "$name" \
+      --kind "$kind" --board none --wiring none --repo "$repo" \
+      --pr-repo "$pr_repo" --skills-repo "$TMP" --yes >/dev/null
+}
+create_default_mission dev 'Dev Mission' "$TMP/repo-dev-mission" example/dev-mission
+create_default_mission qa 'QA Mission' "$TMP/repo-qa-mission" example/qa-mission
+
+skill_order="$TMP/company/INDEX.md, then $TMP/INDEX.md (the company pack first, then your own)"
+if grep -Fq "Step one, before anything else: read $skill_order, in that order" "$TMP/config/dev-mission.conf" \
+   && grep -Fq "You verify, you never fix. Read $skill_order, in that order" "$TMP/config/qa-mission.conf" \
+   && ! grep -Fq "literal absolute path $TMP/company/INDEX.md,$TMP/INDEX.md" "$TMP/config/dev-mission.conf" \
+   && ! grep -Fq "literal absolute path $TMP/company/INDEX.md,$TMP/INDEX.md" "$TMP/config/qa-mission.conf"; then
+  ok create-mission-skill-order "generated missions read shared conventions before board-specific skills"
+else
+  bad create-mission-skill-order "dev=$(grep '^AGENT_MISSION=' "$TMP/config/dev-mission.conf") qa=$(grep '^AGENT_MISSION=' "$TMP/config/qa-mission.conf")"
 fi
 
 printf 'token\n' > "$TMP/token"
