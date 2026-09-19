@@ -199,6 +199,7 @@ if [ -z "$SKILLS_INDEX" ]; then
 fi
 SKILLS_INDEX_PRIMARY="$(core_skill_index_at "$SKILLS_INDEX" first)"
 SKILLS_INDEX_LAST="$(core_skill_index_at "$SKILLS_INDEX" last)"
+SKILLS_INDEX_INSTRUCTION="$(core_skill_index_sentence "$SKILLS_INDEX")"
 for one in $(core_skill_indexes "$SKILLS_INDEX"); do
   core_require_abs "$one" "--skills-index"
   [ -f "$one" ] || warn "$one does not exist yet: create it before the first run"
@@ -242,9 +243,9 @@ if [ -n "$MISSION_FILE" ]; then
   [ -f "$MISSION_FILE" ] || die "--mission-file $MISSION_FILE does not exist" "pass a file that is there"
   MISSION="$(cat "$MISSION_FILE")"
 elif [ "$KIND" = "qa" ]; then
-  MISSION="You are $DISPLAY_NAME. You verify, you never fix. Read the literal absolute path $SKILLS_INDEX first, then only the skills it points you to, and follow them exactly. Record the skill you used in the run log, not a ticket comment. Corrections go into the skill file, not into chat, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. A session looking after you reads MAINTAINER.md next to this conf."
+  MISSION="You are $DISPLAY_NAME. You verify, you never fix. Read $SKILLS_INDEX_INSTRUCTION, in that order, then only the skills they point you to, and follow them exactly. Record the skill you used in the run log, not a ticket comment. Corrections go into the skill file, not into chat, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. A session looking after you reads MAINTAINER.md next to this conf."
 else
-  MISSION="You are $DISPLAY_NAME. Step one, before anything else: open the file at the literal absolute path $SKILLS_INDEX and record the skill whose trigger matches this task in the run log, not a ticket comment. Then follow that skill exactly, including its scripts. If no skill matches, say so and stop. Corrections go into the skill file, never into chat memory, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. Unsure which: would it still be true for a different customer? Yes is a rule, no is a fact. A session looking after you reads MAINTAINER.md next to this conf."
+  MISSION="You are $DISPLAY_NAME. Step one, before anything else: read $SKILLS_INDEX_INSTRUCTION, in that order, and record the skill whose trigger matches this task in the run log, not a ticket comment. Then follow that skill exactly, including its scripts. If no skill matches, say so and stop. Corrections go into the skill file, never into chat memory, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. Unsure which: would it still be true for a different customer? Yes is a rule, no is a fact. A session looking after you reads MAINTAINER.md next to this conf."
 fi
 
 # ---------- existing identity ----------
