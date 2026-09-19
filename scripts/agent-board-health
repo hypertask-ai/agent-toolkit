@@ -122,7 +122,16 @@ class Health:
             raise RuntimeError(f"project {board} could not be read")
         doc = json_document(result.stdout)
         project = doc.get("project")
-        return project if isinstance(project, dict) else doc
+        project = project if isinstance(project, dict) else doc
+        # "project show" also lists deleted columns; "section list" holds only live ones.
+        live = self.board_command("--json", "section", "list", "--project", board)
+        if live.returncode == 0:
+            live_doc = json_document(live.stdout)
+            sections = live_doc.get("sections") if isinstance(live_doc, dict) else live_doc
+            if isinstance(sections, list) and sections:
+                project = dict(project)
+                project["sections"] = sections
+        return project
 
     @staticmethod
     def task_ref(task: dict[str, Any]) -> str:
@@ -159,12 +168,15 @@ class Health:
             for section in sections:
                 if section.casefold() == wanted:
                     return section
+        # Only a column that is live on the board may be used; "defaultSections"
+        # is the workspace template (Todo/Doing/Done) and often does not exist.
         for key in ("intakeSection", "intake_section", "defaultSection", "default_section"):
-            if name(project.get(key)):
+            if name(project.get(key)) in sections:
                 return name(project.get(key))
         defaults = project.get("defaultSections") or project.get("default_sections") or []
-        if defaults:
-            return name(defaults[0])
+        for candidate in defaults:
+            if name(candidate) in sections:
+                return name(candidate)
         if sections:
             return sections[0]
         raise RuntimeError("board has no intake section")
