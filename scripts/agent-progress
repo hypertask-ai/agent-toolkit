@@ -395,7 +395,7 @@ def make_findings(row: dict[str, Any], current: dt.datetime) -> list[dict[str, A
             "ticket": wait.get("ticket"), "reason": reason, "html_reason": html_reason,
             "pr_bug": bool(pr_number and (wait_state in {"checks-pending", "awaiting-merge"} or red)),
             "pr_number": pr_number, "pr_url": pr.get("url"),
-            "pr_state": "red" if red else wait_reason or wait_state,
+            "pr_state": "red" if red else wait_state,
             "failing_checks": failing_checks,
         })
 
@@ -506,9 +506,13 @@ def board_write(board_cli: str, action: str, target: str, body: str, state_dir: 
     return True, comment_id
 
 
+def pr_bug_title(finding: dict[str, Any]) -> str:
+    return f"Bug: PR #{finding.get('pr_number')} stayed {finding.get('pr_state') or 'unmerged'} for two hours"
+
+
 def file_pr_bug(board_cli: str, finding: dict[str, Any]) -> str | None:
     number = finding.get("pr_number")
-    title = f"Bug: PR #{number} stayed {finding.get('pr_state') or 'unmerged'} for two hours"
+    title = pr_bug_title(finding)
     link = finding_link(f"PR {number}", finding.get("pr_url"))
     source = html.escape(str(finding.get("ticket") or "unknown"))
     failing_checks = str(finding.get("failing_checks") or "")
@@ -522,8 +526,8 @@ def file_pr_bug(board_cli: str, finding: dict[str, Any]) -> str | None:
         f"<p>First observed: {html.escape(str(finding['since']))}.</p>"
         f"{check_detail}"
     )
-    base = [board_cli, "task", "create", "--project", "5500", "--section", "Backlog",
-            "--title", title, "--description", description]
+    base = [board_cli, "task", "create", "--project", "5500", "--section", "Review",
+            "--priority", "high", "--title", title, "--description", description]
     commands = [[*base, "--labels", "bug", "--json"], [*base, "--json"]]
     for index, command in enumerate(commands):
         try:
@@ -550,6 +554,141 @@ def file_pr_bug(board_cli: str, finding: dict[str, Any]) -> str | None:
         print("fleet progress: PR bug filing returned no ticket reference", file=sys.stderr)
         return None
     return None
+
+
+def ticket_url(board: str, ref: str) -> str:
+    return f"https://app.hypertask.ai/detail/project-{board}/{ref.rsplit('-', 1)[-1]}"
+
+
+def move_ticket(board_cli: str, ref: str, section: str) -> bool:
+    try:
+        result = subprocess.run(
+            [board_cli, "task", "move", ref, "--section", section],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"fleet progress: alarm move failed: {error}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(f"fleet progress: alarm move failed: {result.stderr.strip()[:300]}", file=sys.stderr)
+        return False
+    return True
+
+
+def chat_notify(line: str, ticket: str, board: str, token_file: str) -> bool:
+    try:
+        token = Path(token_file).read_text(encoding="utf-8").strip()
+    except OSError as error:
+        print(f"fleet progress: chat notify failed: {error}", file=sys.stderr)
+        return False
+    api = os.environ.get("BOARD_API_URL", "https://app.hypertask.ai/api").rstrip("/")
+    headers = ["-H", f"Authorization: Bearer {token}"]
+    try:
+        pending = subprocess.run(
+            ["curl", "-sf", "--max-time", "15", *headers,
+             f"{api}/mcp/chat/rooms/pending"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+        payload = json.loads(pending.stdout) if pending.returncode == 0 else {}
+    except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+        print(f"fleet progress: chat notify failed: {error}", file=sys.stderr)
+        return False
+    messages = payload.get("messages") if isinstance(payload, dict) else []
+    room_id = ""
+    for message in messages if isinstance(messages, list) else []:
+        if not isinstance(message, dict):
+            continue
+        message_board = str(message.get("projectId") or message.get("boardId") or "")
+        message_ticket = str(message.get("ticketNumber") or "")
+        if message_board and message_board != board:
+            continue
+        if not message_board and board == "5500" and not message_ticket.startswith("AGTE-"):
+            continue
+        room = message.get("room") if isinstance(message.get("room"), dict) else {}
+        room_id = str(message.get("roomId") or room.get("id") or "")
+        if room_id:
+            break
+    if not room_id:
+        print(f"fleet progress: chat notify failed: no agent room found for board {board}", file=sys.stderr)
+        return False
+    body = json.dumps({"text": line, "ticketNumber": ticket})
+    try:
+        result = subprocess.run(
+            ["curl", "-sf", "--max-time", "15", *headers,
+             "-H", "Content-Type: application/json", "--data-binary", body,
+             f"{api}/mcp/chat/rooms/{room_id}/messages"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"fleet progress: chat notify failed: {error}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print("fleet progress: chat notify failed through the board agent room", file=sys.stderr)
+        return False
+    return True
+
+
+def host_config_value(path: Path, wanted: str) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line)
+        if not match or match.group(1) != wanted:
+            continue
+        try:
+            values = shlex.split(match.group(2), posix=True)
+        except ValueError:
+            return ""
+        return values[0] if values else ""
+    return ""
+
+
+def alarm_telegram_notify(line: str) -> bool:
+    config = Path(os.environ.get(
+        "AGENT_TEMPLATE_HOST_CONFIG", str(Path.home() / ".config/agent-template/config")
+    ))
+    token = host_config_value(config, "TELEGRAM_BOT_TOKEN")
+    chat_id = host_config_value(config, "TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return True
+    try:
+        result = subprocess.run(
+            ["curl", "-sf", "--max-time", "15",
+             f"https://api.telegram.org/bot{token}/sendMessage",
+             "-d", f"chat_id={chat_id}", "--data-urlencode", f"text={line}"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"fleet progress: alarm Telegram notify failed: {error}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print("fleet progress: alarm Telegram notify failed", file=sys.stderr)
+        return False
+    return True
+
+
+def update_health_alarms(path: Path, entries: dict[str, Any], at: str) -> None:
+    alarms = []
+    for entry in entries.values():
+        if not isinstance(entry, dict) or not entry.get("active") or not entry.get("bug_ticket"):
+            continue
+        alarms.append({
+            "ticket": entry["bug_ticket"],
+            "url": entry.get("bug_url"),
+            "summary": entry.get("alarm_title"),
+            "open_since": entry.get("alarm_open_since"),
+            "runner": entry.get("runner"),
+        })
+    alarms.sort(key=lambda item: str(item.get("open_since") or ""))
+    with locked(path):
+        health = load_json(path, {})
+        if not isinstance(health, dict):
+            health = {}
+        health["alarms"] = alarms
+        health["alarms_updated_at"] = at
+        atomic_json(path, health)
 
 
 def notify(line: str) -> bool:
@@ -641,16 +780,37 @@ def command_supervise(args: argparse.Namespace) -> int:
             state["manual_runners"] = manual_runners
         active_keys = {finding["key"] for finding in findings}
         for key, entry in list(entries.items()):
-            if key not in active_keys and isinstance(entry, dict) and entry.get("active"):
+            if key in active_keys or not isinstance(entry, dict):
+                continue
+            if entry.get("active"):
                 entry["active"] = False
                 entry["resolved_at"] = at
+            alarm_ticket = str(entry.get("bug_ticket") or "")
+            if not alarm_ticket:
+                continue
+            if not entry.get("cleared_commented_at"):
+                cleared = current.strftime("%H:%M")
+                body = (
+                    f"<p><strong>Decision: cleared at {cleared} UTC.</strong></p>"
+                    "<p>Next: No further action is needed.</p>"
+                )
+                ok, _ = board_write(args.board_cli, "add", alarm_ticket, body, state_dir)
+                if ok:
+                    entry["cleared_commented_at"] = at
+            if entry.get("cleared_commented_at") and not entry.get("moved_done_at"):
+                if move_ticket(args.board_cli, alarm_ticket, "Done"):
+                    entry["moved_done_at"] = at
 
         for finding in findings:
             key = finding["key"]
             entry = entries.setdefault(key, {})
             if entry and not entry.get("active"):
-                entry.pop("notified_at", None)
-                entry.pop("comment_body", None)
+                for field in (
+                    "notified_at", "comment_body", "bug_ticket", "bug_url", "bug_filed_at",
+                    "alarm_title", "alarm_line", "alarm_open_since", "alarm_chat_notified_at",
+                    "alarm_telegram_notified_at", "cleared_commented_at", "moved_done_at",
+                ):
+                    entry.pop(field, None)
                 entry["reopened_at"] = at
             entry.update({
                 "active": True, "runner": finding["runner"], "rule": finding["rule"],
@@ -661,8 +821,24 @@ def command_supervise(args: argparse.Namespace) -> int:
             if finding.get("pr_bug") and not entry.get("bug_ticket"):
                 bug_ticket = file_pr_bug(args.board_cli, finding)
                 if bug_ticket:
-                    entry["bug_ticket"] = bug_ticket
-                    entry["bug_filed_at"] = at
+                    url = ticket_url("5500", bug_ticket)
+                    title = pr_bug_title(finding)
+                    entry.update({
+                        "bug_ticket": bug_ticket,
+                        "bug_url": url,
+                        "bug_filed_at": at,
+                        "alarm_title": title,
+                        "alarm_line": f"{title}. {url}",
+                        "alarm_open_since": at,
+                    })
+            alarm_line = str(entry.get("alarm_line") or "")
+            alarm_ticket = str(entry.get("bug_ticket") or "")
+            if alarm_line and alarm_ticket and not entry.get("alarm_chat_notified_at"):
+                if chat_notify(alarm_line, alarm_ticket, "5500", args.token_file):
+                    entry["alarm_chat_notified_at"] = at
+            if alarm_line and not entry.get("alarm_telegram_notified_at"):
+                if alarm_telegram_notify(alarm_line):
+                    entry["alarm_telegram_notified_at"] = at
             age = (current - (parse_time(finding["since"]) or current)).total_seconds()
             runner_manual = manual_runners.setdefault(finding["runner"], {})
             if age >= MANUAL_SECONDS and not runner_manual.get("manual_at"):
@@ -682,7 +858,10 @@ def command_supervise(args: argparse.Namespace) -> int:
                 if ok:
                     entry["comment_body"] = body
                     entry["commented_at"] = at
-            if not entry.get("notified_at") and notify(f"[fleet stall] {finding['reason']}"):
+            if finding.get("pr_bug"):
+                if entry.get("alarm_telegram_notified_at"):
+                    entry["notified_at"] = entry["alarm_telegram_notified_at"]
+            elif not entry.get("notified_at") and notify(f"[fleet stall] {finding['reason']}"):
                 entry["notified_at"] = at
             if runner_manual.get("manual_at") and not runner_manual.get("owner_notified_at"):
                 line = f"[fleet manual] {finding['runner']} switched to manual after six hours without progress."
@@ -693,6 +872,7 @@ def command_supervise(args: argparse.Namespace) -> int:
         state["updated_at"] = at
         atomic_json(state_path, state)
 
+    update_health_alarms(state_dir / "board-health.json", entries, at)
     by_runner: dict[str, list[dict[str, Any]]] = {}
     for finding in findings:
         by_runner.setdefault(finding["runner"], []).append(finding)
@@ -744,6 +924,7 @@ def parser() -> argparse.ArgumentParser:
     supervise = commands.add_parser("supervise")
     supervise.add_argument("--state-dir", required=True)
     supervise.add_argument("--board-cli", required=True)
+    supervise.add_argument("--token-file", required=True)
     supervise.add_argument("--manager-cli", required=True)
     supervise.add_argument("--manager-slug", required=True)
     supervise.add_argument("--toolkit-ticket", required=True)

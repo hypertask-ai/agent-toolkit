@@ -408,8 +408,11 @@ When two PRs fill the pickup slots, an open red PR gets another fix run with
 exact failed check names, failed-run logs, and verbatim `CONCERNS` or
 changes-requested review text. Pending checks consume the tick at that limit and
 log `waiting on PR #<n>: checks pending`. At two hours, either state creates one
-deduplicated toolkit bug, appears on Board health, and releases its pickup slot.
-A red bug includes every failed check name. A green open PR uses one slot but
+deduplicated toolkit bug in Review at High priority, notifies the toolkit agent
+room and configured Telegram chat, appears on Board health, and releases its
+pickup slot. The alarm stays in the health JSON until the PR clears; then it gets
+one timestamped cleared comment and moves to Done. A red bug includes every
+failed check name. A green open PR uses one slot but
 never blocks pickup by itself. A merged but undeployed PR still consumes the
 tick.
 
