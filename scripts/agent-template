@@ -49,7 +49,9 @@
 #      or fast-forwards the shared company skills pack to
 #      ~/projects/company-skills, and runs the eval suite; either failing
 #      stops here, non-zero, and nothing below runs
-#   2c. print where the company pack landed and what commit it is on, so a
+#   2c. enable and start every concrete systemd timer and service written by
+#       install.sh, then print one line per installed unit with its active state
+#   2d. print where the company pack landed and what commit it is on, so a
 #       daily run says out loud whether every bot on this host is reading
 #       the current shared rules
 #   2b. print every CHANGELOG.md line marked ACTION: (something this
@@ -1328,7 +1330,7 @@ PYEOF
   echo "== 2. stage and evaluate $TARGET_VERSION =="
   STAGED_TEMPLATE="$(mktemp -d "${TMPDIR:-/tmp}/agent-template-stage.XXXXXX")"
   EVAL_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/agent-template-evals.XXXXXX")"
-  trap 'rm -f "$AGENT_TEMPLATE_UPDATE_REEXEC" "${EVAL_OUTPUT:-}"; rm -rf "${STAGED_TEMPLATE:-}"' EXIT
+  trap 'rm -f "$AGENT_TEMPLATE_UPDATE_REEXEC" "${EVAL_OUTPUT:-}" "${INSTALLED_UNITS_MANIFEST:-}"; rm -rf "${STAGED_TEMPLATE:-}"' EXIT
   cp -a "$TEMPLATE_DIR/." "$STAGED_TEMPLATE/"
   if [ "$FORCE" = "yes" ]; then
     echo "eval gate skipped (--force)"
@@ -1355,12 +1357,66 @@ PYEOF
   # installed copy.
   INSTALL_ARGS=()
   [ "$NO_HOST_NOTES" = "yes" ] && INSTALL_ARGS+=(--no-host-notes)
+  INSTALLED_UNITS_MANIFEST="$(mktemp "${TMPDIR:-/tmp}/agent-template-units.XXXXXX")"
   SKIP_TEMPLATE_EVALS=yes AGENT_TEMPLATE_INSTALL_COMMIT="$TARGET_COMMIT" \
+    AGENT_TEMPLATE_INSTALLED_UNITS_FILE="$INSTALLED_UNITS_MANIFEST" \
     bash "$STAGED_TEMPLATE/install.sh" "${INSTALL_ARGS[@]}" \
     || die "install.sh failed (see its output above)" \
         "fix the failing step and re-run agent-template update; no conf was touched and no timer was restarted"
 
-  echo "== 2c. reapply local patches =="
+  echo "== 2c. installed systemd units =="
+  INSTALLED_UNITS=()
+  mapfile -t INSTALLED_UNITS < <(sort -u "$INSTALLED_UNITS_MANIFEST")
+  rm -f "$INSTALLED_UNITS_MANIFEST"
+  INSTALLED_UNITS_MANIFEST=""
+  if [ "${#INSTALLED_UNITS[@]}" -eq 0 ]; then
+    echo "  no systemd units installed"
+  else
+    systemctl --user daemon-reload \
+      || die "systemd could not reload the installed units" \
+          "restore the user systemd session, then re-run agent-template update"
+    for unit in "${INSTALLED_UNITS[@]}"; do
+      case "$unit" in
+        *.timer|*.service) ;;
+        *) die "install.sh reported an invalid systemd unit '$unit'" \
+             "fix install.sh, then re-run agent-template update" ;;
+      esac
+      [ "$(basename "$unit")" = "$unit" ] \
+        || die "install.sh reported an invalid systemd unit '$unit'" \
+            "fix install.sh, then re-run agent-template update"
+      case "$unit" in
+        *@.*)
+          # A template has no runnable instance until create-agent names a slug.
+          ;;
+        agent-template-update.service)
+          # Starting this service from a manual update would recursively launch
+          # another update. Its timer is activated below instead.
+          systemctl --user enable "$unit" >/dev/null 2>&1 || true
+          ;;
+        *.timer)
+          systemctl --user enable --now "$unit" >/dev/null \
+            || die "systemd could not enable and start $unit" \
+                "fix $unit, then re-run agent-template update"
+          ;;
+        *.service)
+          if ! systemctl --user enable "$unit" >/dev/null 2>&1; then
+            enabled_state="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
+            [ "$enabled_state" = "static" ] \
+              || die "systemd could not enable $unit" \
+                  "fix $unit, then re-run agent-template update"
+          fi
+          systemctl --user start "$unit" >/dev/null \
+            || die "systemd could not start $unit" \
+                "fix $unit, then re-run agent-template update"
+          ;;
+      esac
+      unit_state="$(systemctl --user is-active "$unit" 2>/dev/null || true)"
+      [ -n "$unit_state" ] || unit_state="unknown"
+      echo "  $unit: $unit_state"
+    done
+  fi
+
+  echo "== 2d. reapply local patches =="
   reapplied=no
   if [ -d "$LOCAL_PATCH_DIR" ]; then
     while IFS= read -r -d '' patch_file; do
