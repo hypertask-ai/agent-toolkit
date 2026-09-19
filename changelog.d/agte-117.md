@@ -1,0 +1,1 @@
+- AGTE-117 stops silent or overlong model runs, restores and unassigns their tickets with one failure comment, preserves runs waiting on their own pull request, and rechecks ownership immediately before every claim.

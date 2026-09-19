@@ -63,6 +63,8 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `RETRY_LIMIT` | Total failed attempts allowed per window. By default this is three plus the number of `LADDER` commands. |
 | `RETRY_WINDOW_SECONDS` | Failure window, default 21600. |
 | `RUN_COOLDOWN_SECONDS` | Minimum seconds between runs of one ticket without a new external comment, default 1800. |
+| `RUN_STALL_SECONDS` | Maximum seconds a model process may produce no output before the watchdog stops it, default 1200. Runs waiting on their own PR checks are exempt. |
+| `RUN_MAX_SECONDS` | Maximum model process lifetime before the watchdog stops it, default 5400. Runs waiting on their own PR checks are exempt. |
 | `TRIAGE` | Whether to score difficulty before pickup. |
 | `TRIAGE_MODEL_CLI` | Optional tie-break scoring command, default `MODEL_CLI`. |
 | `ADVISOR_MAX` | Research calls per run, default 2 when `RESEARCH_CLI` exists. |

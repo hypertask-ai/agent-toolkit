@@ -1744,6 +1744,28 @@ raise SystemExit(1)
   return 1
 }
 
+# adapter_claimed_by_other <token-file> <board> <ref> <agent-id>
+# Re-read immediately before claim. Prints the first conflicting agent name;
+# empty output means the ticket is still safe for this agent to start.
+adapter_claimed_by_other() {
+  local token_file="$1" board="$2" ref="$3" agent_id="$4" task
+  task="$(_ht_get "$token_file" "/mcp/tasks?ticket_number=${ref}")" || return 1
+  TASK="$task" BOARD="$board" REF="$ref" AID="$agent_id" python3 -c '
+import json, os
+rows = json.loads(os.environ["TASK"]).get("tasks") or []
+task = next((row for row in rows
+             if str(row.get("ticketNumber") or "").casefold() == os.environ["REF"].casefold()
+             and str(row.get("projectId") or os.environ["BOARD"]) == os.environ["BOARD"]), None)
+if task is None:
+    raise SystemExit(1)
+for who in task.get("assignees") or []:
+    agent = who.get("agent") if isinstance(who, dict) else None
+    if isinstance(agent, dict) and agent.get("id") and str(agent["id"]) != os.environ["AID"]:
+        print(str(agent.get("displayName") or agent.get("name") or agent["id"]))
+        break
+'
+}
+
 # adapter_assign_task <board-cli> <ref> <agent-id>
 adapter_assign_task() {
   local board_cli="$1" ref="$2" agent_id="$3" attempt task

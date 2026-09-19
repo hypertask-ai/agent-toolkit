@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# Watchdog and last-moment claim checks use local command stubs only.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/home" "$TMP/config" "$TMP/bin" "$TMP/repo" "$TMP/company" "$TMP/state"
+printf '# skills\n' > "$TMP/company/INDEX.md"
+printf 'test\n' > "$TMP/company/VERSION"
+printf 'token\n' > "$TMP/token"
+
+cat > "$TMP/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+url="${!#}"
+case "$url" in
+  *'/mcp/tasks?ticket_number='*)
+    if [ "${MOCK_CLAIM_AT_GET:-no}" = yes ]; then
+      python3 - "$MOCK_TASKS" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+task = doc["tasks"][0]
+task["section"] = "In Progress"
+task["assignees"] = [{"agent": {"id": "agent-other", "displayName": "Dev 1"}}]
+print(json.dumps(doc))
+PYEOF
+    else
+      cat "$MOCK_TASKS"
+    fi
+    printf '\n200'
+    ;;
+  *'/mcp/tasks?'*) cat "$MOCK_TASKS"; printf '\n200' ;;
+  *'/mcp/comments?'*) printf '%s\n200' '{"comments":[]}' ;;
+  *) printf '{}\n404' ;;
+esac
+EOF
+cat > "$TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '[]\n'
+EOF
+cat > "$TMP/bin/model" <<'EOF'
+#!/usr/bin/env bash
+case "${MOCK_MODEL_MODE:-stall}" in
+  stall)
+    trap 'touch "$MOCK_MODEL_TERM"; exit 143' TERM
+    while :; do sleep 10; done
+    ;;
+  waiting)
+    sleep 3
+    touch "$MOCK_MODEL_DONE"
+    ;;
+  max)
+    trap 'touch "$MOCK_MODEL_TERM"; exit 143' TERM
+    while :; do printf 'working\n'; sleep 0.2; done
+    ;;
+esac
+EOF
+cat > "$TMP/bin/hypertask" <<'EOF'
+#!/usr/bin/env bash
+args=" $* "
+case "$args" in
+  *' task get '*)
+    if [ "${MOCK_CLAIM_AT_GET:-no}" = yes ]; then
+      python3 - "$MOCK_TASKS" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+task = doc["tasks"][0]
+task["section"] = "In Progress"
+task["assignees"] = [{"agent": {"id": "agent-other", "displayName": "Dev 1"}}]
+print(json.dumps(doc))
+PYEOF
+    else
+      cat "$MOCK_TASKS"
+    fi
+    ;;
+  *' comment list '*) printf '{"comments":[]}\n' ;;
+  *' task assign '*)
+    printf 'assign TEST-1 agent-dev\n' >> "$MOCK_BOARD_LOG"
+    python3 - "$MOCK_TASKS" <<'PYEOF'
+import json, sys
+path=sys.argv[1]; doc=json.load(open(path)); doc["tasks"][0]["assignees"]=[{"agent":{"id":"agent-dev","displayName":"Dev 2"}}]; json.dump(doc,open(path,"w"))
+PYEOF
+    ;;
+  *' task unassign '*)
+    printf 'unassign TEST-1 agent-dev\n' >> "$MOCK_BOARD_LOG"
+    python3 - "$MOCK_TASKS" <<'PYEOF'
+import json, sys
+path=sys.argv[1]; doc=json.load(open(path)); doc["tasks"][0]["assignees"]=[]; json.dump(doc,open(path,"w"))
+PYEOF
+    ;;
+  *' task move '*)
+    argv=("$@"); section=""
+    for ((i=0;i<${#argv[@]};i++)); do [ "${argv[$i]}" != --section ] || section="${argv[$((i+1))]}"; done
+    printf 'move TEST-1 %s\n' "$section" >> "$MOCK_BOARD_LOG"
+    SECTION="$section" python3 - "$MOCK_TASKS" <<'PYEOF'
+import json, os, sys
+path=sys.argv[1]; doc=json.load(open(path)); doc["tasks"][0]["section"]=os.environ["SECTION"]; json.dump(doc,open(path,"w"))
+PYEOF
+    ;;
+  *' comment add '*) printf 'comment %s\n' "$*" >> "$MOCK_BOARD_LOG" ;;
+  *' project show '*) printf '{"project":{"ownerId":6}}\n' ;;
+  *) printf '{}\n' ;;
+esac
+EOF
+chmod +x "$TMP/bin/"*
+
+cat > "$TMP/config/dev.conf" <<EOF
+AGENT_ID="agent-dev"
+AGENT_NAME="Dev 2"
+AGENT_KIND="dev"
+AGENT_REPO="$TMP/repo"
+AGENT_SLUG="dev"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$TMP/board"
+WATCH_SECTIONS="Backlog"
+MODEL_CLI="$TMP/bin/model"
+PR_REPO="example/repo"
+PR_BRANCH_PREFIX="agent/dev-"
+TRIAGE="no"
+CLAIM_UNASSIGNED="yes"
+RUN_STALL_SECONDS="1"
+RUN_MAX_SECONDS="30"
+FLEET_PROGRESS_SUPERVISOR="off"
+EOF
+
+reset_case() {
+  rm -rf "$TMP/state"; mkdir -p "$TMP/state"
+  : > "$TMP/board.log"
+  rm -f "$TMP/model-term" "$TMP/model-done"
+  cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"Backlog","title":"Change it","description":"Open a PR","assignees":[],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+}
+run_tick() {
+  env HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+    COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_TASKS="$TMP/tasks.json" \
+    MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_TERM="$TMP/model-term" \
+    MOCK_MODEL_DONE="$TMP/model-done" "$@" "$ROOT/scripts/agent-board-poll" --once --explain dev
+}
+
+reset_case
+run_tick MOCK_MODEL_MODE=stall >"$TMP/stall.out" 2>&1
+record="$TMP/state/agent-board-poll/run-records/dev-TEST-1.json"
+if [ -f "$TMP/model-term" ] \
+   && [ "$(grep -c '^comment .*watchdog: no output for 1 min' "$TMP/board.log")" -eq 1 ] \
+   && grep -qxF 'unassign TEST-1 agent-dev' "$TMP/board.log" \
+   && grep -qxF 'move TEST-1 Backlog' "$TMP/board.log" \
+   && RECORD="$record" python3 -c 'import json,os,sys; r=json.load(open(os.environ["RECORD"])); sys.exit(0 if r["status"]=="FAILED" and r["reason"]=="watchdog: no output for 1 min" and r.get("last_output_at") else 1)'; then
+  printf 'PASS %-36s %s\n' stalled-run-watchdog 'silent model is terminated, recorded, commented once, unassigned, and restored'
+else
+  echo "FAIL stalled-run-watchdog log=$(cat "$TMP/board.log") record=$(cat "$record" 2>/dev/null) output=$(cat "$TMP/stall.out")"; exit 1
+fi
+
+sed -i 's/RUN_STALL_SECONDS="1"/RUN_STALL_SECONDS="10"/; s/RUN_MAX_SECONDS="30"/RUN_MAX_SECONDS="2"/' "$TMP/config/dev.conf"
+reset_case
+run_tick MOCK_MODEL_MODE=max >"$TMP/max.out" 2>&1
+record="$TMP/state/agent-board-poll/run-records/dev-TEST-1.json"
+if [ -f "$TMP/model-term" ] \
+   && [ "$(grep -c '^comment .*watchdog: over max run time' "$TMP/board.log")" -eq 1 ] \
+   && RECORD="$record" python3 -c 'import json,os,sys; r=json.load(open(os.environ["RECORD"])); sys.exit(0 if r["status"]=="FAILED" and r["reason"]=="watchdog: over max run time" else 1)'; then
+  printf 'PASS %-36s %s\n' maximum-run-watchdog 'output-producing model is terminated at the absolute run limit'
+else
+  echo "FAIL maximum-run-watchdog log=$(cat "$TMP/board.log") record=$(cat "$record" 2>/dev/null) output=$(cat "$TMP/max.out")"; exit 1
+fi
+sed -i 's/RUN_STALL_SECONDS="10"/RUN_STALL_SECONDS="1"/; s/RUN_MAX_SECONDS="2"/RUN_MAX_SECONDS="30"/' "$TMP/config/dev.conf"
+
+reset_case
+mkdir -p "$TMP/state/agent-board-poll"
+printf '%s\n' '{"wait":{"state":"awaiting-merge","ticket":"TEST-1"}}' > "$TMP/state/agent-board-poll/dev.progress.json"
+run_tick MOCK_MODEL_MODE=waiting >"$TMP/waiting.out" 2>&1
+record="$TMP/state/agent-board-poll/run-records/dev-TEST-1.json"
+if [ -f "$TMP/model-done" ] && [ ! -f "$TMP/model-term" ] \
+   && RECORD="$record" python3 -c 'import json,os,sys; r=json.load(open(os.environ["RECORD"])); sys.exit(0 if r.get("waiting_on_pr") is True and r.get("wait_state")=="awaiting-merge" and r.get("last_output_at") else 1)'; then
+  printf 'PASS %-36s %s\n' awaiting-merge-watchdog-exempt 'PR wait survives the silence threshold and publishes waiting state'
+else
+  echo "FAIL awaiting-merge-watchdog-exempt record=$(cat "$record" 2>/dev/null) output=$(cat "$TMP/waiting.out")"; exit 1
+fi
+
+reset_case
+run_tick MOCK_CLAIM_AT_GET=yes MOCK_MODEL_MODE=waiting >"$TMP/claim.out" 2>&1
+if grep -qF 'skip  TEST-1: claimed by Dev 1 since ranking' "$TMP/claim.out" \
+   && ! grep -Eq '^(assign|move|comment) ' "$TMP/board.log" \
+   && [ ! -f "$TMP/model-done" ]; then
+  printf 'PASS %-36s %s\n' claim-rechecked-at-start 'a foreign claim after ranking is explained and left untouched'
+else
+  echo "FAIL claim-rechecked-at-start log=$(cat "$TMP/board.log") output=$(cat "$TMP/claim.out")"; exit 1
+fi

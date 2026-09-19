@@ -137,6 +137,13 @@ LADDER_COUNT="$(core_ladder_count "$LADDER")"
 RETRY_LIMIT="${RETRY_LIMIT:-$((LADDER_AFTER_FAILURES + LADDER_COUNT))}"
 RETRY_WINDOW_SECONDS="${RETRY_WINDOW_SECONDS:-21600}"
 RUN_COOLDOWN_SECONDS="${RUN_COOLDOWN_SECONDS:-1800}"
+RUN_STALL_SECONDS="${RUN_STALL_SECONDS:-1200}"
+RUN_MAX_SECONDS="${RUN_MAX_SECONDS:-5400}"
+for value in RUN_STALL_SECONDS RUN_MAX_SECONDS; do
+  eval "seconds=\${$value}"
+  [[ "$seconds" =~ ^[1-9][0-9]*$ ]] || die "$value must be a positive number of seconds, got '$seconds'" \
+    "set $value to a positive integer in $CONF"
+done
 # How hard is this ticket, decided before the run starts, so a hard one gets a
 # stronger model and is made to plan first instead of being discovered halfway
 # through on the cheap model. Only an agent that BUILDS is scored: a QA agent
@@ -383,7 +390,8 @@ BLOCKED="$STATE_DIR/$SLUG.blocked"
 # when an old or manually chosen branch name does not identify the agent.
 OPENED_PRS="$STATE_DIR/$SLUG.opened-prs"
 RUN_RECORD_DIR="$STATE_DIR/run-records"
-mkdir -p "$RUN_RECORD_DIR"
+RUN_OUTPUT_DIR="$STATE_DIR/run-output"
+mkdir -p "$RUN_RECORD_DIR" "$RUN_OUTPUT_DIR"
 PR_LIVE_CACHE="$STATE_DIR/pr-live-cache"
 # Failed attempts are append-only: "task timestamp command-rung failed". The
 # rung is diagnostic only; ladder selection depends on the total failure count.
@@ -771,28 +779,159 @@ move_ticket_or_report() {
 
 write_run_record() {
   local path="$1" status="$2" origin="$3" ref="$4" task_id="$5" board="$6" started_at="$7"
+  local output_file="${8:-}" reason="${9:-}"
   RECORD_STATUS="$status" RECORD_ORIGIN="$origin" RECORD_REF="$ref" RECORD_TASK="$task_id" \
     RECORD_BOARD="$board" RECORD_STARTED="$started_at" RECORD_PID="$$" RECORD_SLUG="$SLUG" \
-    RECORD_AGENT="$AGENT_ID" RECORD_IN_PROGRESS="$IN_PROGRESS_SECTION" \
-    RECORD_REVIEW="$REVIEW_SECTION" RECORD_BLOCKED="$QA_BLOCKED_SECTION" \
+    RECORD_AGENT="$AGENT_ID" RECORD_IN_PROGRESS="$IN_PROGRESS_SECTION" RECORD_OUTPUT="$output_file" \
+    RECORD_REVIEW="$REVIEW_SECTION" RECORD_BLOCKED="$QA_BLOCKED_SECTION" RECORD_REASON="$reason" \
     python3 - "$path" <<'PYEOF'
 import json, os, sys
 path = sys.argv[1]
-row = {
+status = os.environ["RECORD_STATUS"]
+row = {}
+if status != "running":
+    try:
+        row = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+row.update({
     "slug": os.environ["RECORD_SLUG"], "agent_id": os.environ["RECORD_AGENT"],
-    "pid": int(os.environ["RECORD_PID"]), "status": os.environ["RECORD_STATUS"],
+    "pid": int(os.environ["RECORD_PID"]), "status": status,
     "ref": os.environ["RECORD_REF"], "task_id": os.environ["RECORD_TASK"],
     "board": os.environ["RECORD_BOARD"], "origin_section": os.environ["RECORD_ORIGIN"],
     "in_progress_section": os.environ["RECORD_IN_PROGRESS"],
     "review_section": os.environ["RECORD_REVIEW"], "blocked_section": os.environ["RECORD_BLOCKED"],
     "started_at": os.environ["RECORD_STARTED"],
-}
+    "last_output_at": row.get("last_output_at") or os.environ["RECORD_STARTED"],
+    "waiting_on_pr": bool(row.get("waiting_on_pr")),
+    "wait_state": row.get("wait_state"),
+})
+if os.environ["RECORD_OUTPUT"]:
+    row["output_file"] = os.environ["RECORD_OUTPUT"]
+if os.environ["RECORD_REASON"]:
+    row["reason"] = os.environ["RECORD_REASON"]
+elif status == "running":
+    row.pop("reason", None)
 temporary = path + ".new"
 with open(temporary, "w", encoding="utf-8") as handle:
     json.dump(row, handle, sort_keys=True)
     handle.write("\n")
 os.replace(temporary, path)
 PYEOF
+}
+
+update_run_record_activity() {
+  local path="$1" output_file="$2" error_file="$3" model_pid="$4" wait_state="$5"
+  RECORD_OUTPUT="$output_file" RECORD_ERROR="$error_file" RECORD_MODEL_PID="$model_pid" \
+    RECORD_WAIT_STATE="$wait_state" python3 - "$path" <<'PYEOF'
+import datetime, json, os, sys
+path = sys.argv[1]
+try:
+    row = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit
+mtimes = []
+for name in (os.environ["RECORD_OUTPUT"], os.environ["RECORD_ERROR"]):
+    try:
+        mtimes.append(os.path.getmtime(name))
+    except OSError:
+        pass
+if mtimes:
+    row["last_output_at"] = datetime.datetime.fromtimestamp(
+        max(mtimes), datetime.timezone.utc).isoformat()
+row["model_pid"] = int(os.environ["RECORD_MODEL_PID"])
+state = os.environ["RECORD_WAIT_STATE"]
+row["waiting_on_pr"] = state in {"checks-pending", "awaiting-merge"}
+row["wait_state"] = state or None
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+}
+
+run_waiting_state() {
+  local ref="$1" gates state
+  if declare -F adapter_pr_gate >/dev/null 2>&1; then
+    gates="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
+      "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" "$OPENED_PRS" 2>>"$LOG" || true)"
+    state="$(printf '%s\n' "$gates" | REF="$ref" python3 -c '
+import json, os, sys
+for line in sys.stdin:
+    try:
+        row = json.loads(line)
+    except ValueError:
+        continue
+    state = str(row.get("state") or "")
+    if str(row.get("ticket") or "").casefold() == os.environ["REF"].casefold() and state in {"checks-pending", "awaiting-merge"}:
+        print(state)
+        break')"
+    if [ -n "$state" ]; then printf '%s\n' "$state"; return 0; fi
+  fi
+  python3 - "$STATE_DIR/$SLUG.progress.json" "$ref" <<'PYEOF'
+import json, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit
+wait = row.get("wait") if isinstance(row.get("wait"), dict) else {}
+state = str(wait.get("state") or "")
+if str(wait.get("ticket") or "").casefold() == sys.argv[2].casefold() and state in {"checks-pending", "awaiting-merge"}:
+    print(state)
+PYEOF
+}
+
+terminate_model_process() {
+  local wait_pid="$1" process_group="$2" deadline
+  kill -TERM -- "-$process_group" 2>/dev/null || kill -TERM "$wait_pid" 2>/dev/null || true
+  deadline=$(( $(date +%s) + 30 ))
+  while kill -0 -- "-$process_group" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep 1
+  done
+  if kill -0 -- "-$process_group" 2>/dev/null; then
+    kill -KILL -- "-$process_group" 2>/dev/null || kill -KILL "$wait_pid" 2>/dev/null || true
+  fi
+}
+
+watch_model_process() {
+  local wait_pid="$1" process_group="$2" record="$3" output_file="$4" error_file="$5" ref="$6"
+  local poll_seconds now output_epoch silent_seconds run_seconds wait_state process_state monitor_rc rc
+  WATCHDOG_REASON=""
+  poll_seconds="$RUN_STALL_SECONDS"
+  [ "$RUN_MAX_SECONDS" -ge "$poll_seconds" ] || poll_seconds="$RUN_MAX_SECONDS"
+  [ "$poll_seconds" -le 30 ] || poll_seconds=30
+  while kill -0 "$wait_pid" 2>/dev/null; do
+    process_state="$(ps -o stat= -p "$wait_pid" 2>/dev/null | tr -d ' ')"
+    [[ "$process_state" != Z* ]] || break
+    now="$(date +%s)"
+    output_epoch="$(stat -c %Y "$output_file" "$error_file" 2>/dev/null | sort -nr | head -1)"
+    output_epoch="${output_epoch:-$now}"
+    silent_seconds=$((now - output_epoch))
+    run_seconds=$((now - run_started_epoch))
+    wait_state=""
+    if [ "$run_seconds" -ge "$RUN_MAX_SECONDS" ] || [ "$silent_seconds" -ge "$RUN_STALL_SECONDS" ]; then
+      wait_state="$(run_waiting_state "$ref")"
+    fi
+    update_run_record_activity "$record" "$output_file" "$error_file" "$process_group" "$wait_state"
+    if [ -z "$wait_state" ] && [ "$run_seconds" -ge "$RUN_MAX_SECONDS" ]; then
+      WATCHDOG_REASON="watchdog: over max run time"
+    elif [ -z "$wait_state" ] && [ "$silent_seconds" -ge "$RUN_STALL_SECONDS" ]; then
+      WATCHDOG_REASON="watchdog: no output for $(( (silent_seconds + 59) / 60 )) min"
+    fi
+    if [ -n "$WATCHDOG_REASON" ]; then
+      terminate_model_process "$wait_pid" "$process_group"
+      break
+    fi
+    timeout "$poll_seconds" tail --pid="$wait_pid" -f -s 0.1 /dev/null 2>/dev/null
+    monitor_rc=$?
+    [ "$monitor_rc" -eq 124 ] || break
+  done
+  wait "$wait_pid"
+  rc=$?
+  update_run_record_activity "$record" "$output_file" "$error_file" "$process_group" "${wait_state:-}"
+  [ -z "$WATCHDOG_REASON" ] || return 124
+  return "$rc"
 }
 
 run_verdict_marker() {
@@ -2798,31 +2937,51 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
   fi
 
   ERRFILE="$STATE_DIR/$SLUG.stderr"
+  RUN_OUTPUT="$RUN_OUTPUT_DIR/$SLUG-$ref.log"
   # Cleared before every run: the wrapper appends to it as this run posts
   # comments and moves, and only this run's own writes belong to the lifecycle
   # enforcement below once it finishes.
   : > "$POSTED"
   : > "$MOVED"
+  : > "$ERRFILE"
+  : > "$RUN_OUTPUT"
   run_started_epoch="$(date +%s)"
   run_started_at="$(date -Is)"
-  record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
   run_record="$RUN_RECORD_DIR/$SLUG-$ref.json"
   origin_section="$(row_field "$row" section)"
   if [ "$is_pr_fix" = "yes" ]; then
     origin_section="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$LOG" || true)"
   fi
   [ -n "$origin_section" ] || origin_section="$IN_PROGRESS_SECTION"
+  if [ "$AGENT_KIND" = "dev" ] && [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] \
+     && declare -F adapter_claimed_by_other >/dev/null 2>&1; then
+    set +e
+    claimant="$(adapter_claimed_by_other "$TOKEN_FILE" "$board" "$ref" "$AGENT_ID" 2>>"$LOG")"
+    claim_check_rc=$?
+    set -e
+    if [ "$claim_check_rc" -ne 0 ]; then
+      explain "skip  $ref: could not re-read the ticket immediately before claim"
+      [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+      continue
+    fi
+    if [ -n "$claimant" ]; then
+      explain "skip  $ref: claimed by $claimant since ranking"
+      [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+      continue
+    fi
+  fi
+  record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
   if [ "$is_reply_only" = "no" ]; then
-    write_run_record "$run_record" running "$origin_section" "$ref" "$task_id" "$board" "$run_started_at"
+    write_run_record "$run_record" running "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
     if ! adapter_assign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
       report_board_health "$board" "Run start could not assign $ref to $SLUG after two attempts."
-      write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at"
+      write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
       write_failure_status "$ref" assignment "could not assign the ticket before model invocation"
       [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
       continue
     fi
     if ! move_ticket_or_report "$ref" "$IN_PROGRESS_SECTION" "$board" "run start"; then
-      write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at"
+      write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
       write_failure_status "$ref" move "could not move the ticket to $IN_PROGRESS_SECTION before model invocation"
       [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
       continue
@@ -2906,6 +3065,7 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
     OPEN_PRS_BEFORE="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
   fi
   set +e
+  WATCHDOG_REASON=""
   # Reply runs have one fixed model and no board capability. The model writes a
   # draft to a file; core validates and posts it only after the sandbox exits.
   if [ "$is_reply_only" = "yes" ]; then
@@ -3045,23 +3205,53 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
                   "slug": os.environ["SLUG"], "adapter": os.environ["ADAPTER"]}))' > "$ADVISOR_CONTEXT"
     printf '0\n' > "$ADVISOR_COUNTER"
 
+    MODEL_PID_FILE="$RUN_OUTPUT_DIR/$SLUG-$ref.pid"
+    rm -f "$MODEL_PID_FILE"
     (
       if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
-      PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}" \
-      AGENT_NAME="$AGENT_NAME" AGENT_ID="$AGENT_ID" AGENT_BOARD_CLI="$BOARD_CLI" \
-      AGENT_QA_MOVE="$([ "$AGENT_KIND" = "qa" ] && printf yes || printf no)" \
-      GRAFT="$GRAFT" GRAFT_MCP_COMMAND="$GRAFT_MCP_COMMAND" GRAFT_MCP_CONFIG="$GRAFT_MCP_CONFIG" \
-      AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base" \
-      AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL" \
-      AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL" \
-      AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER" \
-      AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI" \
-        "${MODEL_ARGV[@]}" "$PROMPT"
-    ) >> "$LOG" 2>"$ERRFILE"
+      export PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}"
+      export AGENT_NAME AGENT_ID AGENT_BOARD_CLI="$BOARD_CLI"
+      export AGENT_QA_MOVE="$([ "$AGENT_KIND" = "qa" ] && printf yes || printf no)"
+      export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
+      export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
+      export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
+      export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
+      export AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER"
+      export AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI"
+      exec setsid --wait bash -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' \
+        bash "$MODEL_PID_FILE" "${MODEL_ARGV[@]}" "$PROMPT"
+    ) >"$RUN_OUTPUT" 2>"$ERRFILE" &
+    model_wait_pid=$!
+    for _ in $(seq 1 100); do
+      [ ! -s "$MODEL_PID_FILE" ] || break
+      kill -0 "$model_wait_pid" 2>/dev/null || break
+      sleep 0.05
+    done
+    if [ -s "$MODEL_PID_FILE" ]; then
+      read -r model_process_group < "$MODEL_PID_FILE"
+    else
+      model_process_group="$model_wait_pid"
+    fi
+    watch_model_process "$model_wait_pid" "$model_process_group" "$run_record" \
+      "$RUN_OUTPUT" "$ERRFILE" "$ref"
     rc=$?
+    rm -f "$MODEL_PID_FILE"
   fi
   set -e
+  if [ -n "$WATCHDOG_REASON" ]; then printf '%s\n' "$WATCHDOG_REASON" >> "$ERRFILE"; fi
+  cat "$RUN_OUTPUT" >> "$LOG" 2>/dev/null || true
   cat "$ERRFILE" >> "$LOG" 2>/dev/null || true
+  if [ -n "$WATCHDOG_REASON" ]; then
+    if ! adapter_unassign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
+      report_board_health "$board" "Watchdog could not unassign $ref from $SLUG."
+    fi
+    move_ticket_or_report "$ref" "$origin_section" "$board" "watchdog" || true
+    watchdog_comment="<p><strong>Decision: $WATCHDOG_REASON.</strong></p><p>Next: The ticket is back in $origin_section and unassigned.</p>"
+    post_ticket_comment "$ref" text "$watchdog_comment" \
+      || report_board_health "$board" "Watchdog stopped $ref, but its failure comment could not be posted."
+    write_run_record "$run_record" FAILED "$origin_section" "$ref" "$task_id" "$board" \
+      "$run_started_at" "$RUN_OUTPUT" "$WATCHDOG_REASON"
+  else
   if [ "$AGENT_KIND" = "qa" ] && [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
     qa_posted_ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
     if [ -z "$qa_posted_ids" ]; then
@@ -3148,7 +3338,8 @@ if rows:
         fi
       fi
     fi
-    write_run_record "$run_record" "$run_record_status" "$origin_section" "$ref" "$task_id" "$board" "$run_started_at"
+    write_run_record "$run_record" "$run_record_status" "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
+  fi
   fi
   # The seen-key and run-done bookkeeping happen first, before any optional
   # post-run step: push_skill_commits below touches a second git repo (the

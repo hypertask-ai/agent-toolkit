@@ -323,6 +323,11 @@ with tempfile.TemporaryDirectory() as temporary:
         '{"ticket":"HTPR-7000","title":"Live work","board_id":15,'
         '"started_at":"2026-09-16T10:00:00+00:00"}\n'
     )
+    (board_state / "run-records").mkdir()
+    (board_state / "run-records" / "runner-HTPR-7000.json").write_text(
+        '{"last_output_at":"2026-09-16T10:15:00+00:00","waiting_on_pr":true,'
+        '"wait_state":"checks-pending"}\n'
+    )
     FakeHeartbeatApi.calls = []
     FakeHeartbeatApi.failing = set()
     daemon = ChatDaemon(config, chat_state, board_state_dir=board_state)
@@ -341,11 +346,15 @@ with tempfile.TemporaryDirectory() as temporary:
     assert payload["queue"] == [{
         "ticket": "HTPR-7000",
         "board_id": 15,
-        "state": "running",
-        "reason": "other",
+        "state": "waiting",
+        "reason": "waiting_on_pr (checks-pending)",
         "started_at": "2026-09-16T10:00:00+00:00",
+        "last_output_at": "2026-09-16T10:15:00+00:00",
+        "waiting_on_pr": True,
+        "wait_state": "checks-pending",
     }]
-    print("PASS runtime-heartbeat-running-ticket")
+    assert payload["last_progress_at"] == "2026-09-16T10:15:00+00:00"
+    print("PASS runtime-heartbeat-pr-wait-state")
 
 with tempfile.TemporaryDirectory() as temporary:
     temporary = Path(temporary)
