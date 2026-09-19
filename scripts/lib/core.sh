@@ -430,6 +430,11 @@ core_workdir_create() {
 }
 
 # ---------- shared poll units ----------
+core_record_installed_unit() {
+  [ -n "${AGENT_TEMPLATE_INSTALLED_UNITS_FILE:-}" ] || return 0
+  printf '%s\n' "$1" >> "$AGENT_TEMPLATE_INSTALLED_UNITS_FILE"
+}
+
 # core_write_poll_units <systemd-user-dir> <bin-dir> : the agent-board-poll@
 # service+timer pair, written once and shared by every slug (%i is the slug).
 # The single source of truth for both install.sh (refresh on every host) and
@@ -474,6 +479,8 @@ Unit=agent-board-poll@%i.service
 [Install]
 WantedBy=timers.target
 EOF
+  core_record_installed_unit "$(basename "$service")"
+  core_record_installed_unit "$(basename "$timer")"
 }
 
 core_write_reconcile_units() {
@@ -503,6 +510,8 @@ Unit=agent-board-reconcile.service
 [Install]
 WantedBy=timers.target
 EOF
+  core_record_installed_unit agent-board-reconcile.service
+  core_record_installed_unit agent-board-reconcile.timer
 }
 
 # Events mode keeps the same poll service as a safety net, but runs its timer

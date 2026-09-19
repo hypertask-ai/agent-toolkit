@@ -22,6 +22,10 @@ printf '%s\n' '- ACTION: set `BOARD_ID="15,5156,5500"` in `~/.config/hypertask-a
 cat > "$TEMPLATE/install.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'installed\n' > "$INSTALL_MARKER"
+mkdir -p "$AGENT_SYSTEMD_DIR"
+printf '[Timer]\nOnBootSec=1m\n[Install]\nWantedBy=timers.target\n' > "$AGENT_SYSTEMD_DIR/fresh-update.timer"
+printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n' > "$AGENT_SYSTEMD_DIR/fresh-update.service"
+printf '%s\n' fresh-update.timer fresh-update.service >> "$AGENT_TEMPLATE_INSTALLED_UNITS_FILE"
 EOF
 cat > "$TEMPLATE/scripts/sync-project.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -59,6 +63,8 @@ cat > "$TMP/bin/systemctl" <<'EOF'
 printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
 case "$*" in
   '--user is-enabled agent-board-poll@worker.timer') exit 0 ;;
+  '--user daemon-reload'|'--user enable fresh-update.service'|'--user start fresh-update.service'|'--user enable --now fresh-update.timer') exit 0 ;;
+  '--user is-active fresh-update.service'|'--user is-active fresh-update.timer') echo active; exit 0 ;;
   *) exit 1 ;;
 esac
 EOF
@@ -123,6 +129,17 @@ if [ "$status" -eq 0 ] \
   ok stable-host-stays-on-tag "stable update checks out stable, prints the host action, and never follows main"
 else
   bad stable-host-stays-on-tag "status=$status output=$(cat "$TMP/stable.out") git=$(cat "$TMP/git.log")"
+fi
+
+# Every concrete timer and service written by install is activated and reported once.
+if grep -q '^--user enable --now fresh-update.timer$' "$TMP/systemctl.log" \
+   && grep -q '^--user enable fresh-update.service$' "$TMP/systemctl.log" \
+   && grep -q '^--user start fresh-update.service$' "$TMP/systemctl.log" \
+   && [ "$(grep -c '^  fresh-update.timer: active$' "$TMP/stable.out")" -eq 1 ] \
+   && [ "$(grep -c '^  fresh-update.service: active$' "$TMP/stable.out")" -eq 1 ]; then
+  ok installed-units-active "fresh timer and service are active and each has one state line after update"
+else
+  bad installed-units-active "output=$(cat "$TMP/stable.out") systemctl=$(cat "$TMP/systemctl.log")"
 fi
 
 # A red staged suite refuses without invoking install and exits successfully.

@@ -518,6 +518,10 @@ Unit=agent-template-update.service
 [Install]
 WantedBy=timers.target
 EOF
+  for unit in agent-status.service agent-status.timer agent-chat.service \
+    agent-events.service agent-template-update.service agent-template-update.timer; do
+    core_record_installed_unit "$unit"
+  done
 
   # Only the maintainer checkout processes the shared feedback board. The old
   # weekly timer is disabled everywhere so bot hosts never start a second copy.
@@ -562,6 +566,8 @@ Unit=agent-template-feedback.service
 [Install]
 WantedBy=timers.target
 EOF
+    core_record_installed_unit agent-template-feedback.service
+    core_record_installed_unit agent-template-feedback.timer
   else
     systemctl --user disable --now agent-template-feedback.timer >/dev/null 2>&1 || true
     rm -f "$SYSTEMD_USER_DIR/agent-template-feedback.service" \
