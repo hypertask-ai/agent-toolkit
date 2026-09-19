@@ -54,6 +54,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `WATCH_SECTIONS` | Comma-separated watched columns. QA agents include `QA` by default and on template update. |
 | `IN_PROGRESS_SECTION` | Destination while a model run is live, default `In Progress`. |
 | `REVIEW_SECTION` | Destination after the run opens a pull request, default `AI Review`. |
+| `DONE_SECTION` | Destination when the reconciler finds a linked merged pull request, default `Done`. |
 | `QA_FAIL_SECTION` | QA failure destination. Defaults to the board's first intake column. Failed QA also clears every assignee. |
 | `QA_BLOCKED_SECTION` | Blocked or cannot-test destination, default `Agent Blocked (Infra)`. |
 | `QA_TURNAROUND_HOURS` | Hours a ticket may remain in QA without an agent verdict before it becomes eligible again, default `4`. |

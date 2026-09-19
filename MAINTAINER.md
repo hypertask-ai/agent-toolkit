@@ -13,6 +13,9 @@ until you do it.
 - **Runner timer** — `agent-board-poll@<slug>.timer` runs a cheap delta tick
   every 60 seconds in poll mode. Events mode uses the same runner hourly as a
   safety net, while `agent-events.service` starts exact-ticket ticks immediately.
+- **Reconciler timer** — `agent-board-reconcile.timer` checks every five minutes.
+  It moves tickets with linked merged pull requests to Done and restores tickets
+  left in In Progress after a run stops without a pull request.
 - **Update timer** — `agent-template-update.timer` checks every five minutes.
   It fetches the configured release and stops when `VERSION` has not changed.
   A changed version must pass its staged evals before installation. A passing
@@ -576,7 +579,7 @@ paste-it-yourself fallback appears only when no bot token is configured.
 - `agent-template update --dry-run` — see what this host would pull in,
   convert, and clean up without changing anything.
 - `agent-template update` — do it for real; safe to run any time, and
-  identical to what the daily timer runs. It enables and starts each concrete
+  identical to what the five-minute timer runs. It enables and starts each concrete
   timer or service installed by the update, then prints one state line per unit.
 - `ht-supervisor --dry-run` — see what the supervisor would do.
 - `ht-supervisor --now` — run every supervisor check once, ignoring its
