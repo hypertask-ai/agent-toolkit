@@ -1,0 +1,1 @@
+- AGTE-114 gives the owner one comment per message: the question acknowledgement waits for the answer and is dropped when the answer posts, and a comment that proposes a standing rule is filed on the toolkit board by the runner and named in that same reply.

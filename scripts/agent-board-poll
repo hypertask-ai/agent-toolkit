@@ -367,6 +367,14 @@ RUNS="$STATE_DIR/$SLUG.ticket-runs"
 # The newest owner comment this agent classified on each ticket. Keeping the
 # current result also makes a hold apply to synthetic PR-fix candidates.
 OWNER_CLASSIFICATIONS="$STATE_DIR/$SLUG.owner-classifications"
+# AGTE-114: the owner gets one comment per message. A question goes to the
+# reply lane, so the answer itself is that comment: the acknowledgement is
+# deferred and posted only when the reply lane produced nothing within this
+# many seconds.
+OWNER_ACK_WAIT_SECONDS="${OWNER_ACK_WAIT_SECONDS:-120}"
+# The toolkit feedback filer. Overridable so evals can watch the call without
+# writing to the real feedback board.
+AGENT_TEMPLATE_CLI="${AGENT_TEMPLATE_CLI:-$CORE_ROOT/scripts/agent-template}"
 LOCK="$STATE_DIR/$SLUG.lock"
 # The agents feed can read this one-line JSON reason directly. It remains while
 # a pull request blocks pickup and disappears only after every owed PR is LIVE.
@@ -493,6 +501,124 @@ owner_classification_ack() {
     question) printf '<p><strong>Decision: I read your comment as a question.</strong></p><p>Next: I will answer without claiming the ticket.</p>' ;;
     feedback) printf '<p><strong>Decision: I read your comment as feedback.</strong></p><p>Next: I will use it in the ticket run.</p>' ;;
   esac
+}
+
+# --- AGTE-114: one comment per owner message -------------------------------
+# The owner complained that a question drew two comments: an acknowledgement
+# that read as cryptic, then the answer. The acknowledgement is now deferred:
+# the reply lane clears it the moment it posts anything, and it is posted only
+# if the reply lane finished with nothing to say.
+owner_ack_pending_file() { printf '%s/%s-%s.owner-ack' "$STATE_DIR" "$SLUG" "$1"; }
+
+# defer_owner_ack <ref> <board> <comment-id> <classification>
+defer_owner_ack() {
+  printf '%s\t%s\t%s\t%s\n' "$2" "$3" "$4" "$(date +%s)" > "$(owner_ack_pending_file "$1")"
+}
+
+# owner_ack_answered <ref>: the answer landed, so the acknowledgement is noise.
+owner_ack_answered() {
+  local file
+  file="$(owner_ack_pending_file "$1")"
+  [ -f "$file" ] || return 0
+  rm -f "$file"
+  log "owner ack for $1: the answer posted, so the acknowledgement is skipped"
+}
+
+# owner_ack_flush <ref>: nothing was answered, so say something.
+owner_ack_flush() {
+  local ref="$1" file board comment_id classification started waited
+  file="$(owner_ack_pending_file "$ref")"
+  [ -f "$file" ] || return 0
+  IFS=$'\t' read -r board comment_id classification started < "$file"
+  rm -f "$file"
+  waited=$(( $(date +%s) - ${started:-0} ))
+  if post_ticket_comment "$ref" text "$(owner_classification_ack "${classification:-question}")"; then
+    log "owner ack for $ref: no answer after ${waited}s, acknowledgement posted"
+  else
+    report_board_health "$board" "Owner acknowledgement for $ref could not be posted after the reply lane produced nothing."
+  fi
+}
+
+# owner_rule_proposal <text>: prints the proposal sentence when the owner is
+# proposing a standing rule for the agents, empty otherwise. Deterministic on
+# purpose: a rule the owner states must be filed whether or not a model
+# remembers to.
+owner_rule_proposal() {
+  TEXT="$1" python3 -c '
+import os, re
+text = " ".join(os.environ["TEXT"].split())
+patterns = [
+    r"can we agree that\b",
+    r"\bfrom now on\b",
+    r"\bgoing forward\b",
+    r"\bevery ticket (?:that |which |must|needs|should|has)\b",
+    r"\ball (?:tickets|agents|devs|bots) (?:must|should|need)\b",
+    r"\bthe agents? (?:should|must|need to)\b",
+    r"\bevery (?:dev|agent|bot) (?:must|should|needs to)\b",
+]
+for pattern in patterns:
+    match = re.search(pattern, text, re.I)
+    if not match:
+        continue
+    start = max(text.rfind(".", 0, match.start()) + 1, 0)
+    end = text.find(".", match.end())
+    sentence = text[start:end + 1 if end != -1 else len(text)].strip()
+    print(sentence or text[:300])
+    break'
+}
+
+# file_owner_rule_proposal <ref> <url> <comment-id> <proposal>
+# Files the rule on the toolkit board through the existing feedback mechanism
+# and prints "<REF> <URL>". Filing once per owner comment: the reply lane
+# retries, and a retry must not create a second toolkit ticket.
+file_owner_rule_proposal() {
+  local ref="$1" url="$2" comment_id="$3" proposal="$4" marker out filed_ref filed_url
+  marker="$STATE_DIR/$SLUG-$ref-$comment_id.rule-filed"
+  if [ -s "$marker" ]; then cat "$marker"; return 0; fi
+  [ -x "$AGENT_TEMPLATE_CLI" ] || { log "rule proposal on $ref could not be filed: no feedback CLI at $AGENT_TEMPLATE_CLI"; return 1; }
+  out="$(AGENT_NAME="$AGENT_NAME" AGENT_SLUG="$SLUG" AGENT_BOARD_CLI="$BOARD_CLI" \
+    "$AGENT_TEMPLATE_CLI" feedback --adapter hypertask --kind bug \
+    --what "Owner rule from $ref: $proposal" \
+    --got "The owner stated this rule on $url and no agent rule recorded it." \
+    --expected "Every agent follows this rule from now on: $proposal" 2>&1)" || true
+  printf '%s\n' "$out" >> "$LOG"
+  filed_url="$(printf '%s\n' "$out" | grep -oE 'https://app\.hypertask\.ai/detail/project-[0-9]+/[0-9]+' | head -1 || true)"
+  filed_ref="$(printf '%s\n' "$out" | grep -oE '\b[A-Z]{2,8}-[0-9]+\b' | head -1 || true)"
+  [ -n "$filed_url" ] || return 1
+  [ -n "$filed_ref" ] || filed_ref="the toolkit ticket"
+  printf '%s %s' "$filed_ref" "$filed_url" > "$marker"
+  cat "$marker"
+}
+
+# rule_filing_note <filed-ref> <filed-url>: the sentence the runner adds to the
+# reply so the owner always knows whether the rule was filed.
+rule_filing_note() {
+  if [ -n "$2" ]; then
+    printf '<p>Filed as <a href="%s">%s</a> so every agent follows this rule from now on.</p>' "$2" "$1"
+  else
+    printf '<p>I could not file this rule on the toolkit board, so it is not recorded yet.</p>'
+  fi
+}
+
+# insert_rule_filing_note <reply-file> <note-html>: puts the note before the
+# reply's last block, so the reply still ends the way the shape check requires.
+insert_rule_filing_note() {
+  NOTE="$2" python3 - "$1" <<'PYEOF'
+import os, re, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    text = handle.read()
+note = os.environ["NOTE"]
+if note.strip() and note.strip() not in text:
+    blocks = list(re.finditer(r"<(p|ul|ol|blockquote)\b", text, re.I))
+    if len(blocks) >= 2:
+        at = blocks[-1].start()
+        text = text[:at] + note + text[at:]
+    else:
+        text = text.rstrip() + note
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(text)
+PYEOF
 }
 
 # ticket_run_state <ticket-ref>: newest "<epoch> <comment-id>" row, if any.
@@ -1745,6 +1871,21 @@ print(json.dumps({"id":"pr-%s" % p["number"], "ref":p["ticket"], "section":"Pull
   CANDIDATES="$(printf '%s\n%s\n' "$CANDIDATES" "$pr_row")"
 fi
 
+# AGTE-114: an acknowledgement deferred on an earlier tick that never got its
+# answer is owed to the owner now. Anything younger than the wait window still
+# has this tick to answer.
+if [ "$DRY_RUN" != "yes" ]; then
+  for pending_ack in "$STATE_DIR/$SLUG-"*.owner-ack; do
+    [ -f "$pending_ack" ] || continue
+    pending_ref="$(basename "$pending_ack" .owner-ack)"
+    pending_ref="${pending_ref#$SLUG-}"
+    pending_started="$(cut -f4 < "$pending_ack")"
+    if [ "$(( $(date +%s) - ${pending_started:-0} ))" -ge "$OWNER_ACK_WAIT_SECONDS" ]; then
+      owner_ack_flush "$pending_ref"
+    fi
+  done
+fi
+
 started=0
 picked=0
 RANKING_STARTED="$(date +%s)"
@@ -1912,7 +2053,15 @@ for item in sorted(comments, key=key, reverse=True):
   fi
 
   if [ "$owner_ack_needed" = "yes" ]; then
-    if post_ticket_comment "$ref" text "$(owner_classification_ack "$owner_classification")"; then
+    if [ "$owner_classification" = "question" ]; then
+      # AGTE-114: a question is answered in this same tick by the reply lane.
+      # The classification is recorded now, so the next tick does not classify
+      # it again, but the acknowledgement waits: it is posted only if the reply
+      # lane finishes with nothing posted.
+      record_owner_classification "$board" "$ref" "$owner_comment_id" "$owner_classification"
+      defer_owner_ack "$ref" "$board" "$owner_comment_id" "$owner_classification"
+      log "owner ack for $ref deferred up to ${OWNER_ACK_WAIT_SECONDS}s: the answer is the comment"
+    elif post_ticket_comment "$ref" text "$(owner_classification_ack "$owner_classification")"; then
       record_owner_classification "$board" "$ref" "$owner_comment_id" "$owner_classification"
     else
       log "pickup blocked for $ref: classification acknowledgement for owner comment $owner_comment_id could not be posted"
@@ -2470,6 +2619,24 @@ Keep fixing this PR until it merges and is live."
         "restore Valentin's terminal rule source, then retry this reply"
     done
     shared_rules="$(cat "$VALENTIN_RULES_RECORD" 2>/dev/null || printf '(no prior ticket rules recorded yet)')"
+    # AGTE-114: an owner comment that proposes a working rule for the agents is
+    # filed on the toolkit board by the runner, before the model writes a word,
+    # and the reply always says what happened. The model is never trusted to
+    # remember to file it, and never allowed to file silently.
+    RULE_PROPOSAL="$(owner_rule_proposal "$comment_text")"
+    RULE_FILED_REF=""
+    RULE_FILED_URL=""
+    RULE_NOTE=""
+    if [ -n "$RULE_PROPOSAL" ]; then
+      if filed_rule="$(file_owner_rule_proposal "$ref" "$url" "$comment_id" "$RULE_PROPOSAL")" \
+         && [ -n "$filed_rule" ]; then
+        read -r RULE_FILED_REF RULE_FILED_URL <<< "$filed_rule"
+        log "owner rule proposal on $ref filed as $RULE_FILED_REF $RULE_FILED_URL"
+      else
+        log "owner rule proposal on $ref could not be filed on the toolkit board"
+      fi
+      RULE_NOTE="$(rule_filing_note "$RULE_FILED_REF" "$RULE_FILED_URL")"
+    fi
     PROMPT="You are $AGENT_NAME in a read-only reply run for $ref.
 
 Ticket $url: $title
@@ -2511,6 +2678,17 @@ $(cat "$TERMINAL_UNSLOP_SKILL")
 
 I-HAVE-ADHD SKILL, VERBATIM:
 $(cat "$TERMINAL_ADHD_SKILL")"
+    if [ -n "$RULE_PROPOSAL" ]; then
+      PROMPT="$PROMPT
+
+OWNER RULE PROPOSAL, THIS COMMENT PROPOSES A STANDING RULE:
+$RULE_PROPOSAL
+
+Answer it in exactly this shape, and stay at or below 55 words because the runner adds one more sentence after yours:
+1. Say yes or no to the rule in one sentence, bolded, as the first sentence.
+2. Say in one sentence what the rule means for this ticket right now, using only what the thread shows.
+Do not mention filing, the toolkit board, or any ticket number for the rule. The runner adds that sentence itself."
+    fi
   fi
 
   # A hard ticket gets two things the default path does not: a stronger model,
@@ -2789,9 +2967,11 @@ $(cat "$ORIGINAL_REPLY_FILE")"
           < "$FALLBACK_REPLY_FILE" > "$LINKED_FALLBACK_FILE" 2>> "$ERRFILE"; then
           cp "$FALLBACK_REPLY_FILE" "$LINKED_FALLBACK_FILE"
         fi
+        [ -z "$RULE_NOTE" ] || insert_rule_filing_note "$LINKED_FALLBACK_FILE" "$RULE_NOTE"
         if (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; \
           post_ticket_comment "$ref" raw-file "$LINKED_FALLBACK_FILE"); then
           reply_posted=yes
+          owner_ack_answered "$ref"
           rc=0
         else
           printf 'failed-check fallback could not be posted\n' >> "$ERRFILE"
@@ -2800,11 +2980,14 @@ $(cat "$ORIGINAL_REPLY_FILE")"
       fi
     fi
     if [ "$rc" -eq 0 ] && [ "$reply_posted" = "no" ]; then
+      [ -z "$RULE_NOTE" ] || insert_rule_filing_note "$REPLY_FILE" "$RULE_NOTE"
       cat "$REPLY_FILE" >> "$LOG"
       printf '\n' >> "$LOG"
       if ! (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; post_ticket_comment "$ref" file "$REPLY_FILE"); then
         printf 'validated reply could not be posted\n' >> "$ERRFILE"
         rc=74
+      else
+        owner_ack_answered "$ref"
       fi
     fi
     if [ "$rc" -ne 0 ]; then
@@ -2812,10 +2995,14 @@ $(cat "$ORIGINAL_REPLY_FILE")"
       if (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; \
           post_ticket_comment "$ref" raw-file "$ERROR_FALLBACK_FILE"); then
         printf 'posted reply failure fallback\n' >> "$ERRFILE"
+        owner_ack_answered "$ref"
       else
         printf 'reply failure fallback could not be posted\n' >> "$ERRFILE"
       fi
     fi
+    # Nothing reached the owner: the deferred acknowledgement is now the only
+    # comment this owner message gets.
+    owner_ack_flush "$ref"
   else
     # One short-lived process per ticket. Resolve once immediately before
     # launch. PR debt bypasses the attempt-backed ladder.
