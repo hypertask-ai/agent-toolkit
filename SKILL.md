@@ -25,23 +25,25 @@ the other way round.
 
 Host release settings live in `~/.config/agent-template/config`. `CHANNEL=stable`
 is the default and makes `agent-template update` fetch and check out the repository's
-`stable` tag. Maintainer hosts set `CHANNEL=latest` and `MAINTAINER=yes`, so updates
-select `origin/main`. `AUTO_UPDATE=off` makes the 06:30 timer report the current and
-stable versions without fetching or changing files; a manual update still works.
+`stable` tag. Maintainer hosts set `CHANNEL=latest` and `MAINTAINER=yes`, so the
+five-minute update check selects `origin/main`. `AUTO_UPDATE=off` makes timer runs
+report the current and stable versions without fetching or changing files; a manual
+update still works.
 
 Only a maintainer host can run `agent-template promote`. Promotion moves `stable` to
 the exact installed commit only after that version has run for 24 hours and its
-installed eval suite is green at promotion time. The daily maintainer timer tries
-promotion after its own update and prints whether it promoted or refused.
+installed eval suite is green at promotion time. The maintainer timer tries
+promotion after its own update check and prints whether it promoted or refused.
 
 ## What update does before it swaps
 
 `agent-template update` selects the configured channel, compares the installed copy
 with its install manifest, copies host edits into `local-patches`, stages the target
 release, and runs the staged `evals/run-evals.sh`. Only then does `install.sh` rename
-the staged directories into place. A red suite prints `update to X refused: N evals
-red`, logs that line, exits successfully, and leaves the old version installed.
-`--force` is the explicit way to skip only the eval gate.
+the staged directories into place. A red timer run leaves the old version installed
+and files one toolkit bug for that version. A passing timer run restarts chat and
+enabled timers, then posts the installed version on Board health. `--force` is the
+explicit way to skip only the eval gate.
 
 ## Local patches
 

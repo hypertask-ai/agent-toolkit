@@ -13,11 +13,12 @@ until you do it.
 - **Runner timer** — `agent-board-poll@<slug>.timer` runs a cheap delta tick
   every 60 seconds in poll mode. Events mode uses the same runner hourly as a
   safety net, while `agent-events.service` starts exact-ticket ticks immediately.
-- **Update timer** — `agent-template-update.timer`, daily at 06:30 local,
-  runs `agent-template update`: pulls the template repo, reinstalls, brings
-  any old-schema conf on this host forward, and clears out systemd drop-ins
-  the template has since made redundant. This is what keeps a bot host in
-  sync without someone explaining the fix to it by hand.
+- **Update timer** — `agent-template-update.timer` checks every five minutes.
+  It fetches the configured release and stops when `VERSION` has not changed.
+  A changed version must pass its staged evals before installation. A passing
+  update restarts chat and enabled timers, then posts one line on Board health.
+  A failing update keeps the installed version and files one deduplicated bug
+  on the toolkit board.
 - **Supervisor timer** — watches the fleet, not one bot: restarts a dead
   timer, flags a stuck run, escalates what a bot cannot fix itself. It lives in
   the company pack as the `supervise-board` skill; `~/.local/bin/ht-supervisor`
@@ -150,21 +151,22 @@ completed work from `build list`, not from memory.
 
 The host config is `~/.config/agent-template/config`. Ordinary hosts default to
 `CHANNEL=stable`; their update checks out the `stable` tag and never follows main.
-This maintainer host uses `CHANNEL=latest` and `MAINTAINER=yes`. Only that setting
-allows `agent-template promote`, which moves `stable` to the installed commit after
-24 hours of running and a fresh green eval run. The 06:30 maintainer timer runs
-promotion after update. Set `AUTO_UPDATE=off` to make timer runs print `auto-update
-off, current X, stable Y` and do nothing else.
+This maintainer host uses `CHANNEL=latest` and `MAINTAINER=yes`, so each five-minute
+check reads `main`. Only that setting allows `agent-template promote`, which moves
+`stable` to the installed commit after 24 hours of running and a fresh green eval
+run. The timer runs promotion after each update check. Set `AUTO_UPDATE=off` to make
+timer runs print `auto-update off, current X, stable Y` and do nothing else.
 
 ## What update does before it swaps
 
 The updater fetches and selects the channel, detects local changes against the
 installed manifest, stages the complete target template, and runs the staged eval
 suite. A red suite leaves the installed tree untouched, logs `update to X refused:
-N evals red`, and exits zero so the timer is not reported as crashed. `--force`
-skips the eval gate. A normal install evaluates its source before its first copy as
-well. Use `agent-template update --keep-timers` when deployment must leave every
-runner timer in its current started or stopped state.
+N evals red`, and files one toolkit bug for that version. A passing timer update
+restarts chat and enabled timers, then records the installed version on Board health.
+`--force` skips the eval gate. A normal install evaluates its source before its first
+copy as well. Use `agent-template update --keep-timers` when deployment must leave
+every runner timer in its current started or stopped state.
 
 ## Local patches
 

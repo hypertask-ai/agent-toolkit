@@ -25,7 +25,7 @@ printf 'installed\n' > "$INSTALL_MARKER"
 mkdir -p "$AGENT_SYSTEMD_DIR"
 printf '[Timer]\nOnBootSec=1m\n[Install]\nWantedBy=timers.target\n' > "$AGENT_SYSTEMD_DIR/fresh-update.timer"
 printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n' > "$AGENT_SYSTEMD_DIR/fresh-update.service"
-printf '%s\n' fresh-update.timer fresh-update.service >> "$AGENT_TEMPLATE_INSTALLED_UNITS_FILE"
+printf '%s\n' fresh-update.timer fresh-update.service agent-chat.service >> "$AGENT_TEMPLATE_INSTALLED_UNITS_FILE"
 EOF
 cat > "$TEMPLATE/scripts/sync-project.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -54,6 +54,7 @@ printf '%s\n' "$*" >> "$GIT_LOG"
 case "$*" in
   *"rev-parse --short HEAD"*) echo deadbee ;;
   *"rev-parse HEAD"*) echo deadbeefdeadbeefdeadbeefdeadbeefdeadbeef ;;
+  *"refs/tags/stable^{commit}"*) [ -z "${STABLE_REF:-}" ] || echo "$STABLE_REF" ;;
   *"show stable:VERSION"*) echo stable-version ;;
 esac
 exit 0
@@ -62,14 +63,26 @@ cat > "$TMP/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
 case "$*" in
-  '--user is-enabled agent-board-poll@worker.timer') exit 0 ;;
-  '--user daemon-reload'|'--user enable fresh-update.service'|'--user start fresh-update.service'|'--user enable --now fresh-update.timer') exit 0 ;;
-  '--user is-active fresh-update.service'|'--user is-active fresh-update.timer') echo active; exit 0 ;;
+  '--user list-unit-files agent-board-poll@*.timer --state=enabled --no-legend --plain') echo 'agent-board-poll@worker.timer enabled'; exit 0 ;;
+  '--user is-enabled agent-board-poll@worker.timer'|'--user is-enabled fresh-update.timer') exit 0 ;;
+  '--user daemon-reload'|'--user enable fresh-update.service'|'--user start fresh-update.service'|'--user enable --now fresh-update.timer'|'--user enable agent-chat.service'|'--user start agent-chat.service'|'--user restart agent-chat.service'|'--user restart fresh-update.timer'|'--user restart agent-board-poll@worker.timer') exit 0 ;;
+  '--user is-active fresh-update.service'|'--user is-active fresh-update.timer'|'--user is-active agent-chat.service') echo active; exit 0 ;;
   *) exit 1 ;;
 esac
 EOF
+cat > "$TMP/bin/update-board" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$UPDATE_BOARD_LOG"
+case "$*" in
+  '--json project show '*) printf '%s\n' '{"sections":[{"title":"Backlog"},{"title":"Bugs"}]}' ;;
+  'task list --project 15 --limit 100 --json') printf '%s\n' '{"tasks":[{"ticketNumber":"HEALTH-1","title":"Board health"}]}' ;;
+  'comment add HEALTH-1 '*) printf '%s\n' '{"success":true}' ;;
+  'task create --raw --project 5500 '*) printf '%s\n' '{"task":{"ticketNumber":"AGTE-999","projectId":5500,"uniqueIndex":999}}' ;;
+  *) printf 'unexpected board command: %s\n' "$*" >&2; exit 1 ;;
+esac
+EOF
 chmod +x "$TEMPLATE/install.sh" "$TEMPLATE/scripts/sync-project.sh" \
-  "$TEMPLATE/evals/run-evals.sh" "$TMP/bin/git" "$TMP/bin/systemctl"
+  "$TEMPLATE/evals/run-evals.sh" "$TMP/bin/git" "$TMP/bin/systemctl" "$TMP/bin/update-board"
 
 cat > "$CONF_DIR/old-worker.conf" <<'EOF'
 HT_AGENT_ID="agent-1"
@@ -91,11 +104,13 @@ WATCH_SECTIONS="AI Review"
 EOF
 
 run_update() {
-  HOME="$HOME_DIR" AGENT_CONFIG_DIR="$CONF_DIR" AGENT_TEMPLATE_CONFIG_DIR="$CONF_DIR" \
+  HOME="$HOME_DIR" AGENT_SLUG="" AGENT_CONFIG_DIR="$CONF_DIR" AGENT_TEMPLATE_CONFIG_DIR="$CONF_DIR" \
     AGENT_TEMPLATE_HOST_CONFIG="$HOST_CONFIG" AGENT_TEMPLATE_REPO="$FAKE_REPO" \
     AGENT_SYSTEMD_DIR="$TMP/units" XDG_STATE_HOME="$TMP/state" \
-    PATH="$TMP/bin:$PATH" GIT_LOG="$TMP/git.log" SYSTEMCTL_LOG="$TMP/systemctl.log" \
-    INSTALL_MARKER="$TMP/installed" "$ROOT/scripts/agent-template" update "$@"
+    PATH="$TMP/bin:/usr/bin:/bin" GIT_LOG="$TMP/git.log" SYSTEMCTL_LOG="$TMP/systemctl.log" \
+    UPDATE_BOARD_LOG="$TMP/update-board.log" AGENT_TEMPLATE_UPDATE_BOARD_CLI="$TMP/bin/update-board" \
+    AGENT_TEMPLATE_UPDATE_HEALTH_BOARD=15 INSTALL_MARKER="$TMP/installed" \
+    "$ROOT/scripts/agent-template" update "$@"
 }
 
 OLD_CORE="$TMP/old-installed"
@@ -142,18 +157,69 @@ else
   bad installed-units-active "output=$(cat "$TMP/stable.out") systemctl=$(cat "$TMP/systemctl.log")"
 fi
 
-# A red staged suite refuses without invoking install and exits successfully.
-rm -f "$TMP/installed"
-: > "$TMP/git.log"
+# A passing timer update restarts chat and enabled timers, then posts Board health.
+SUCCESS_INSTALLED="$TMP/success-installed"
+mkdir -p "$SUCCESS_INSTALLED"
+printf 'old-version\n' > "$SUCCESS_INSTALLED/VERSION"
+: > "$TMP/systemctl.log"
+: > "$TMP/update-board.log"
 set +e
-EVAL_MODE=red run_update >"$TMP/red.out" 2>"$TMP/red.err"
+AGENT_TEMPLATE_INSTALL_DIR="$SUCCESS_INSTALLED" run_update --timer >"$TMP/timer-green.out" 2>"$TMP/timer-green.err"
+status=$?
+set -e
+if [ "$status" -eq 0 ] \
+   && grep -q '^--user restart agent-chat.service$' "$TMP/systemctl.log" \
+   && grep -q '^--user restart fresh-update.timer$' "$TMP/systemctl.log" \
+   && grep -q '^--user restart agent-board-poll@worker.timer$' "$TMP/systemctl.log" \
+   && grep -q '^comment add HEALTH-1 .*Toolkit test-version passed evals and is now installed' "$TMP/update-board.log"; then
+  ok timer-update-restarts-and-reports "green timer update restarts chat and timers, then posts Board health"
+else
+  bad timer-update-restarts-and-reports "status=$status output=$(cat "$TMP/timer-green.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
+fi
+
+# An unchanged VERSION does not run evals, install, restarts, or another post.
+printf 'test-version\n' > "$SUCCESS_INSTALLED/VERSION"
+rm -f "$TMP/installed"
+: > "$TMP/systemctl.log"
+: > "$TMP/update-board.log"
+set +e
+AGENT_TEMPLATE_INSTALL_DIR="$SUCCESS_INSTALLED" EVAL_MODE=red run_update --timer >"$TMP/timer-same.out" 2>"$TMP/timer-same.err"
 status=$?
 set -e
 if [ "$status" -eq 0 ] && [ ! -e "$TMP/installed" ] \
-   && grep -q '^update to test-version refused: 1 evals red$' "$TMP/red.out"; then
-  ok red-evals-refuse-swap "red staged evals leave the installed release alone"
+   && grep -q '^no VERSION change: toolkit test-version is already installed$' "$TMP/timer-same.out" \
+   && [ ! -s "$TMP/systemctl.log" ] && [ ! -s "$TMP/update-board.log" ]; then
+  ok unchanged-version-noop "a five-minute check does nothing when VERSION is unchanged"
 else
-  bad red-evals-refuse-swap "status=$status installed=$([ -e "$TMP/installed" ] && echo yes || echo no) output=$(cat "$TMP/red.out")"
+  bad unchanged-version-noop "status=$status output=$(cat "$TMP/timer-same.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
+fi
+
+# A red staged suite refuses without invoking install and files one board ticket.
+rm -f "$TMP/installed"
+: > "$TMP/git.log"
+: > "$TMP/update-board.log"
+set +e
+EVAL_MODE=red run_update --timer >"$TMP/red.out" 2>"$TMP/red.err"
+status=$?
+set -e
+if [ "$status" -eq 0 ] && [ ! -e "$TMP/installed" ] \
+   && grep -q '^update to test-version refused: 1 evals red$' "$TMP/red.out" \
+   && [ "$(grep -c '^task create --raw --project 5500 ' "$TMP/update-board.log")" -eq 1 ]; then
+  ok red-evals-refuse-swap "red staged evals keep the installed release and file one toolkit bug"
+else
+  bad red-evals-refuse-swap "status=$status installed=$([ -e "$TMP/installed" ] && echo yes || echo no) output=$(cat "$TMP/red.out") board=$(cat "$TMP/update-board.log")"
+fi
+
+set +e
+EVAL_MODE=red run_update --timer >"$TMP/red-repeat.out" 2>"$TMP/red-repeat.err"
+repeat_status=$?
+set -e
+if [ "$repeat_status" -eq 0 ] \
+   && [ "$(grep -c '^task create --raw --project 5500 ' "$TMP/update-board.log")" -eq 1 ] \
+   && grep -q '^eval failure ticket already filed for test-version$' "$TMP/red-repeat.out"; then
+  ok red-evals-ticket-deduplicated "the five-minute retry does not file another bug for the same version"
+else
+  bad red-evals-ticket-deduplicated "status=$repeat_status output=$(cat "$TMP/red-repeat.out") board=$(cat "$TMP/update-board.log")"
 fi
 
 # A changed installed file is archived, installed, and reapplied automatically.
@@ -209,7 +275,7 @@ set -e
 if [ "$status" -eq 0 ] \
    && grep -q 'kept timer states unchanged (--keep-timers)' "$TMP/keep-timers.out" \
    && grep -q '^--user daemon-reload$' "$TMP/systemctl.log" \
-   && ! grep -q '^--user restart ' "$TMP/systemctl.log"; then
+   && ! grep -q '^--user restart .*\.timer$' "$TMP/systemctl.log"; then
   ok keep-timers-preserves-state "changed units reload without starting a stopped timer"
 else
   bad keep-timers-preserves-state "status=$status output=$(cat "$TMP/keep-timers.out") systemctl=$(cat "$TMP/systemctl.log")"
@@ -231,6 +297,29 @@ if [ "$status" -eq 0 ] && grep -q 'promote refused: installed test-version has r
   ok promote-refuses-under-24h "stable tag is untouched during the observation window"
 else
   bad promote-refuses-under-24h "status=$status output=$(cat "$TMP/promote.out") git=$(cat "$TMP/git.log")"
+fi
+
+: > "$TMP/git.log"
+set +e
+HOME="$HOME_DIR" AGENT_TEMPLATE_HOST_CONFIG="$HOST_CONFIG" AGENT_TEMPLATE_REPO="$FAKE_REPO" \
+  AGENT_TEMPLATE_INSTALL_STATE="$TMP/state/install-state" PATH="$TMP/bin:$PATH" GIT_LOG="$TMP/git.log" \
+  STABLE_REF=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
+  "$ROOT/scripts/agent-template" promote >"$TMP/promote-stable.out" 2>"$TMP/promote-stable.err"
+status=$?
+set -e
+if [ "$status" -eq 0 ] \
+   && grep -q '^promote skipped: stable already points to test-version ' "$TMP/promote-stable.out" \
+   && ! grep -q 'tag -f stable' "$TMP/git.log"; then
+  ok promote-skips-current-stable "five-minute checks do not reevaluate an already promoted release"
+else
+  bad promote-skips-current-stable "status=$status output=$(cat "$TMP/promote-stable.out") git=$(cat "$TMP/git.log")"
+fi
+
+if grep -q '^OnUnitActiveSec=5m$' "$ROOT/install.sh" \
+   && ! grep -q '^OnCalendar=.*06:30' "$ROOT/install.sh"; then
+  ok five-minute-update-timer "install writes a five-minute toolkit update schedule"
+else
+  bad five-minute-update-timer "install.sh does not contain the expected five-minute timer"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
