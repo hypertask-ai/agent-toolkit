@@ -44,6 +44,8 @@ const feed=JSON.parse(fs.readFileSync(`${root}/state/agent-feed.json`));
 assert.equal(feed.kpi.liveTickets.today.agents,2);
 assert.equal(feed.kpi.firstPass.rate,50);
 assert.ok(feed.kpi.costPerLiveTicket.cursor>0);
+assert.equal(feed.agents.find(agent=>agent.slug==='tk-dev-1').lastRun.provider,'cursor');
+assert.equal(feed.agents.find(agent=>agent.slug==='tk-dev-1').lastRun.rung,'Grok');
 assert.equal(feed.agents.length,3);
 const feedDev=feed.agents.find(agent=>agent.slug==='tk-dev-1');
 assert.equal(feedDev.lastRun.lastOutputAt,'2026-09-18T10:15:00Z');

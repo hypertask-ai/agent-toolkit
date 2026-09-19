@@ -24,8 +24,9 @@ TICKET = re.compile(r"^[A-Z][A-Z0-9]{0,15}-([1-9][0-9]*)$")
 IDENTITY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,239}$")
 STAMP = re.compile(r"^(\S+) (.*)$")
 RUN_START = re.compile(r"\brun start ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*)\b")
-RUN_END = re.compile(r"\brun (done|FAILED) ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*)\b(?: exit=(-?\d+))?")
+RUN_END = re.compile(r"\brun (done|FAILED|WAITING) ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*)\b(?: exit=(-?\d+))?")
 MODEL_ROUTE = re.compile(r"\bmodel route for ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*): [^(]*(?:\((.*)\))?$")
+PROVIDER_ROUTE = re.compile(r"\bprovider route for ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*): ([a-z][a-z0-9_-]*) \((.*)\)$")
 QA_OUTCOME = re.compile(r"\bQA outcome ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*) verdict=(Done|Handoff)\b", re.I)
 QA_MOVE_OUTCOME = re.compile(r"\bQA (?:run fallback|backfill comment \S+) moved ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*) .* verdict (Done|Handoff)\b", re.I)
 
@@ -143,6 +144,13 @@ def parse_log(path: Path, default_model: str, now: float) -> tuple[str, list[dic
         if route and starts[route.group(1)]:
             command = route.group(2) or text
             starts[route.group(1)][-1]["model"] = model_name(command)
+            starts[route.group(1)][-1]["provider"] = provider_of(model_name(command), command)
+            continue
+        provider_route = PROVIDER_ROUTE.search(text)
+        if provider_route and starts[provider_route.group(1)]:
+            row = starts[provider_route.group(1)][-1]
+            row["provider"] = provider_route.group(2)
+            row["model"] = model_name(provider_route.group(3))
             continue
         end = RUN_END.search(text)
         if end:
@@ -150,7 +158,10 @@ def parse_log(path: Path, default_model: str, now: float) -> tuple[str, list[dic
             row = next((candidate for candidate in reversed(candidates) if candidate["ended_at"] is None), None)
             if row:
                 row["ended_at"] = at
-                row["result"] = "succeeded" if end.group(1) == "done" and (end.group(3) in (None, "0")) else "failed"
+                if end.group(1) == "WAITING":
+                    row["result"] = "waiting"
+                else:
+                    row["result"] = "succeeded" if end.group(1) == "done" and (end.group(3) in (None, "0")) else "failed"
             phase = "idle"
         outcome = QA_OUTCOME.search(text) or QA_MOVE_OUTCOME.search(text)
         if outcome:
@@ -278,7 +289,7 @@ def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) ->
         model = model_name(command)
         log_phase, runs, outcomes, log_at = parse_log(state_dir / f"{slug}.log", model, now)
         for row in runs:
-            row["provider"] = provider_of(row["model"], command)
+            row.setdefault("provider", provider_of(row["model"], command))
         all_runs.extend(runs)
         all_outcomes.extend(outcomes)
         lock = read_json(state_dir / f"{slug}.lock")
@@ -320,7 +331,8 @@ def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) ->
                          "exitCode": 0 if last_run["result"] == "succeeded" else None,
                          "lastOutputAt": iso(last_output_at) if last_output_at else None,
                          "waitingOnPr": waiting_on_pr, "waitState": wait_state,
-                         "rung": {"cursor": "Grok", "claude": "Claude", "codex": "Codex"}.get(provider_of(last_run["model"], command), "Unknown")}
+                         "provider": last_run["provider"],
+                         "rung": {"cursor": "Grok", "claude": "Claude", "codex": "Codex"}.get(last_run["provider"], "Unknown")}
                         if last_run else None),
             "ticketsPickedToday": len({row["ticket"] for row in runs if dt.datetime.fromtimestamp(row["started_at"], dt.timezone.utc).date() == dt.datetime.fromtimestamp(now, dt.timezone.utc).date()}),
             "failedAttemptsToday": sum(row["result"] == "failed" and dt.datetime.fromtimestamp(row["started_at"], dt.timezone.utc).date() == dt.datetime.fromtimestamp(now, dt.timezone.utc).date() for row in runs),

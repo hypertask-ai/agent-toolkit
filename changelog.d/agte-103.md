@@ -1,0 +1,2 @@
+- AGTE-103 retries subscription quota failures on each agent's next configured provider without closing the run. Codex-first agents migrate to Codex then Cursor, while non-quota failures keep the existing failure path.
+- Run telemetry records the provider that served the run. When every available provider is out of quota, the ticket states the earliest reported reset and retries after it without consuming a normal attempt.

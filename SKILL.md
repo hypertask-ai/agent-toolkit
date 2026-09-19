@@ -532,13 +532,19 @@ more than once.
 
 ## The conf decides the provider
 
-The conf is the only command policy. Core treats every command as opaque: it
-has no provider allow-list and no built-in ladder.
+The conf owns full provider commands, subscription order, and model choice.
 
-- `MODEL_CLI` is normal ticket work and rung 1.
+- `MODEL_CLI` is normal ticket work and rung 1 when no provider order exists.
+- `PROVIDER_ORDER` optionally lists providers in spend order, such as
+  `codex,cursor`.
+- `PROVIDER_<NAME>_CLI` supplies each ordered provider's full command. The
+  runner skips a command when its executable is not installed.
+- Subscription quota errors retry the same run on the next provider. Other
+  failures do not. If all providers are out, the ticket gets the earliest
+  reported reset and becomes eligible after it without spending a normal attempt.
 - `LADDER` is an optional `|`-separated list of full commands. After three
-  failed attempts, each later attempt takes the next command. Empty or absent
-  means no escalation.
+  non-quota failed attempts, each later attempt takes the next command. Empty
+  or absent means no escalation.
 - `RESEARCH_CLI` is optional for `agent-advisor` and supervisor research.
   Empty or absent means no research step.
 - `TRIAGE_HARD_CLI` is optional for tickets labelled `hard`; absent means
@@ -558,10 +564,13 @@ A pi-only conf needs no other policy:
 MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash"
 ```
 
-A Cursor-first conf can explicitly choose the former ladder:
+A Codex-first conf can fall back to Cursor within the same run:
 
 ```sh
-MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
+MODEL_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+PROVIDER_ORDER="codex,cursor"
+PROVIDER_CODEX_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+PROVIDER_CURSOR_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
 LADDER="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
 RESEARCH_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session --raw -p"
 TRIAGE_HARD_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
@@ -586,8 +595,10 @@ See `CONF.md` for the complete schema.
 | `QA_FAIL_SECTION` | optional failed-QA destination; defaults to the board's first intake column |
 | `QA_BLOCKED_SECTION` | optional cannot-test destination; defaults to `HT Manager Review` when present |
 | `SKILLS_INDEX` | the indexes the agent reads first, comma separated, **company pack first, bot pack last** |
-| `MODEL_CLI` | required full command for normal ticket work |
-| `LADDER` | optional `\|`-separated escalation commands, one per failure after three |
+| `MODEL_CLI` | required full command for normal ticket work when no provider order exists |
+| `PROVIDER_ORDER` | optional comma-separated subscription order |
+| `PROVIDER_<NAME>_CLI` | full command and model choice for each ordered provider |
+| `LADDER` | optional `\|`-separated escalation commands, one per non-quota failure after three |
 | `RESEARCH_CLI` | optional advisor and research command; absent disables research |
 | `TRIAGE_HARD_CLI` | optional hard-ticket command; absent uses `MODEL_CLI` |
 | `CHAT_CLI` | optional chat command; absent uses `MODEL_CLI` |

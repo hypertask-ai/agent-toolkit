@@ -4,18 +4,22 @@ Each agent has a 0600 `<config dir>/<slug>.conf`. It is declarative `KEY=value` 
 
 ## The conf decides the provider
 
-Core treats model commands as opaque strings. It has no provider allow-list and no built-in escalation ladder.
+The conf owns each provider's full command and its subscription fallback order. The runner only switches commands when the current provider reports exhausted quota. Other failures keep the normal attempt and ladder behavior.
 
 | Key | Meaning |
 |---|---|
-| `MODEL_CLI` | Required command for normal ticket work and rung 1. |
-| `LADDER` | Optional `\|`-separated full commands. Once three attempts have failed, the next attempt selects command one; after four failures, the next selects command two, and so on. Empty or absent means no escalation. |
+| `MODEL_CLI` | Required command for normal ticket work and rung 1 when no provider order is configured. |
+| `PROVIDER_ORDER` | Optional comma-separated subscription order, such as `codex,cursor`. The first installed provider serves the run. Quota exhaustion retries the same run on the next installed provider immediately. |
+| `PROVIDER_<NAME>_CLI` | Full command for the matching name in `PROVIDER_ORDER`, for example `PROVIDER_CODEX_CLI` and `PROVIDER_CURSOR_CLI`. Missing commands and commands whose executable is not installed are skipped before routing. |
+| `LADDER` | Optional `\|`-separated full commands. Once three non-quota attempts have failed, the next attempt selects command one; after four failures, the next selects command two, and so on. Empty or absent means no escalation. |
 | `RESEARCH_CLI` | Optional command for `agent-advisor` and supervisor research. Empty or absent means no research step. |
 | `TRIAGE_HARD_CLI` | Optional command for a ticket labelled `hard`. Empty or absent means `MODEL_CLI`. |
 | `OWNER_COMMENT_CLASSIFIER_CLI` | Optional command that classifies the board owner's newest comment before pickup. It defaults to `TRIAGE_MODEL_CLI` and must return exactly `hold`, `go`, `question`, or `feedback`. |
 | `CHAT_CLI` | Optional command for Agent Chat. Empty or absent means `MODEL_CLI`. |
 
 Each value is the complete non-interactive command, including its model, tool, permission, and print flags. The runner splits it into arguments without shell evaluation and appends the prompt as the final argument, which is the existing `MODEL_CLI` contract. Put `-p`, `--print`, or the harness's equivalent before that final prompt. Shell pipelines and a literal `|` cannot appear inside a command because `|` separates ladder entries.
+
+One run record stays open during quota fallback. Run telemetry records the provider that served the run. If every installed provider reports exhausted quota, the runner returns the ticket to its original column, posts the earliest reset reported by those providers, and retries after that time. If none reports a time, the ticket says the reset time is unavailable and waits for a new ticket update.
 
 Reply-only runs ignore these provider keys. They always use Codex GPT-5.6 Sol at high effort in the five-minute read-only reply sandbox, then let the runner validate and post the returned HTML.
 
@@ -24,6 +28,17 @@ A pi-only agent can carry no escalation policy at all:
 ```sh
 MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash"
 ```
+
+A Codex-first agent with immediate Cursor subscription fallback can use:
+
+```sh
+MODEL_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+PROVIDER_ORDER="codex,cursor"
+PROVIDER_CODEX_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+PROVIDER_CURSOR_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
+```
+
+Reverse `PROVIDER_ORDER` to `cursor,codex` for an agent that should spend Cursor first.
 
 A Cursor-first agent that explicitly chooses the former 3.14 policy can use:
 

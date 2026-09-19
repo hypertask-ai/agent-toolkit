@@ -288,6 +288,125 @@ PYEOF
   printf '%s' "$command"
 }
 
+# core_command_available <full-command>: the command is routable only when its
+# executable exists. Provider fallback uses this before launch, so a configured
+# subscription that is not installed cannot consume or fail a run.
+core_command_available() {
+  local command="$1" argv0
+  read -r argv0 _ <<< "$command"
+  [ -n "$argv0" ] && command -v "$argv0" >/dev/null 2>&1
+}
+
+# core_command_provider <full-command>: identify the provider only from command
+# syntax that names it. Unknown wrappers stay unknown rather than guessing.
+core_command_provider() {
+  MODEL_COMMAND="$1" python3 <<'PYEOF'
+import os
+import shlex
+from pathlib import Path
+
+try:
+    argv = shlex.split(os.environ["MODEL_COMMAND"])
+except ValueError:
+    argv = []
+provider = ""
+if argv:
+    executable = Path(argv[0]).name
+    if executable == "cursor-agent":
+        provider = "cursor"
+    elif executable == "codex":
+        provider = "codex"
+    elif executable == "claude":
+        provider = "claude"
+    elif executable in {"hax", "pi"}:
+        for index, value in enumerate(argv):
+            if value == "--provider" and index + 1 < len(argv):
+                provider = argv[index + 1]
+                break
+            if value.startswith("--provider="):
+                provider = value.split("=", 1)[1]
+                break
+print(provider.lower())
+PYEOF
+}
+
+# core_provider_quota_error <stderr-file>: match subscription exhaustion, not
+# generic process failures or ordinary HTTP rate limiting.
+core_provider_quota_error() {
+  QUOTA_ERROR_FILE="$1" python3 <<'PYEOF'
+import os
+import re
+
+try:
+    text = open(os.environ["QUOTA_ERROR_FILE"], encoding="utf-8", errors="replace").read()
+except OSError:
+    text = ""
+patterns = (
+    r"\binsufficient_quota\b",
+    r"\b(?:usage|spending|monthly|weekly|token|credit) limit (?:has been )?(?:reached|exceeded)\b",
+    r"\b(?:reached|exceeded) (?:your|the) (?:usage|spending|monthly|weekly|token|credit) limit\b",
+    r"\bquota (?:has been )?(?:exhausted|reached|exceeded)\b",
+    r"\b(?:exhausted|reached) (?:your|the) quota\b",
+    r"\b(?:out of|no) (?:tokens|credits)(?: remaining)?\b",
+    r"\bno (?:premium |fast )?requests remaining\b",
+    r"\bcredit balance (?:is )?(?:too low|exhausted)\b",
+)
+raise SystemExit(0 if any(re.search(pattern, text, re.I) for pattern in patterns) else 1)
+PYEOF
+}
+
+# core_provider_quota_reset <stderr-file>: print "<epoch>\t<UTC ISO time>"
+# when the provider reports an absolute or relative reset. No guessed reset is
+# safer than making the runner promise a time the subscription did not provide.
+core_provider_quota_reset() {
+  QUOTA_ERROR_FILE="$1" python3 <<'PYEOF'
+import datetime as dt
+import os
+import re
+
+try:
+    text = open(os.environ["QUOTA_ERROR_FILE"], encoding="utf-8", errors="replace").read()
+except OSError:
+    text = ""
+now = dt.datetime.now(dt.timezone.utc)
+reset = None
+absolute = re.search(
+    r"(?:reset(?:s|ting)?|available again)(?:\s+(?:at|on))?[:\s]+"
+    r"(\d{4}-\d{2}-\d{2}[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2})?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)",
+    text,
+    re.I,
+)
+if absolute:
+    value = absolute.group(1).replace(" ", "T")
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    if re.search(r"[+-][0-9]{4}$", value):
+        value = value[:-5] + value[-5:-2] + ":" + value[-2:]
+    try:
+        reset = dt.datetime.fromisoformat(value)
+        if reset.tzinfo is None:
+            reset = reset.replace(tzinfo=dt.timezone.utc)
+        reset = reset.astimezone(dt.timezone.utc)
+    except ValueError:
+        reset = None
+if reset is None:
+    unix = re.search(r'"?(?:reset_at|resetAt|reset_epoch)"?\s*[:=]\s*"?(\d{10})', text, re.I)
+    if unix:
+        reset = dt.datetime.fromtimestamp(int(unix.group(1)), dt.timezone.utc)
+if reset is None:
+    relative = re.search(
+        r"(?:reset(?:s)?|try again|available again)\s+in\s+"
+        r"(?:(\d+)\s*(?:h|hour|hours))?\s*(?:(\d+)\s*(?:m|min|minute|minutes))?",
+        text,
+        re.I,
+    )
+    if relative and (relative.group(1) or relative.group(2)):
+        reset = now + dt.timedelta(hours=int(relative.group(1) or 0), minutes=int(relative.group(2) or 0))
+if reset is not None:
+    print(f"{int(reset.timestamp())}\t{reset.isoformat().replace('+00:00', 'Z')}")
+PYEOF
+}
+
 # ---------- secrets ----------
 # core_save_secret <path> <value-on-stdin>
 # Writes 0600, verifies it landed, never echoes the value.
