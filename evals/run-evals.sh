@@ -42,9 +42,26 @@ HERE="$(dirname "$SELF")"
 CASES="$HERE/cases.jsonl"
 ONLY=""
 TEST_TIMEOUT_SECONDS="${EVAL_TEST_TIMEOUT_SECONDS:-300}"
+SUBTESTS_RUN=0
+SUBTEST_FAILURES=()
 
 usage() { sed -n '2,34p' "$SELF" | sed 's/^# \{0,1\}//'; }
-run_test() { timeout "$TEST_TIMEOUT_SECONDS" "$@"; }
+run_test() {
+  local test_file="$1" output status
+  shift
+  SUBTESTS_RUN=$((SUBTESTS_RUN + 1))
+  output="$(mktemp "${TMPDIR:-/tmp}/agent-template-eval-subtest.XXXXXX")"
+  timeout "$TEST_TIMEOUT_SECONDS" "$@" 2>&1 | tee "$output"
+  status="${PIPESTATUS[0]}"
+  if [ "$status" -ne 0 ]; then
+    if ! grep -qF "FAIL $(basename "$test_file") " "$output"; then
+      printf 'FAIL %s exited %s\n' "$(basename "$test_file")" "$status"
+    fi
+    SUBTEST_FAILURES+=("$(basename "$test_file")")
+  fi
+  rm -f "$output"
+  return "$status"
+}
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -228,19 +245,19 @@ PYEOF
 if [ -z "$ONLY" ]; then
   echo ""
   echo "-- agent-chat behavioural checks --"
-  run_test python3 "$HERE/agent-chat.test.py"
+  run_test "$HERE/agent-chat.test.py" python3 "$HERE/agent-chat.test.py" || :
   echo ""
   echo "-- reply formatting behavioural checks --"
-  run_test python3 "$HERE/reply-formatting.test.py"
+  run_test "$HERE/reply-formatting.test.py" python3 "$HERE/reply-formatting.test.py" || :
   echo ""
   echo "-- agent-kick behavioural checks --"
-  run_test python3 "$HERE/agent-kick.test.py"
+  run_test "$HERE/agent-kick.test.py" python3 "$HERE/agent-kick.test.py" || :
   echo ""
   echo "-- ticket ack lane behavioural checks --"
-  run_test python3 "$HERE/ticket-ack.test.py"
+  run_test "$HERE/ticket-ack.test.py" python3 "$HERE/ticket-ack.test.py" || :
   echo ""
   echo "-- agent-events behavioural checks --"
-  run_test python3 "$HERE/agent-events.test.py"
+  run_test "$HERE/agent-events.test.py" python3 "$HERE/agent-events.test.py" || :
 fi
 
 # The case file replays text corrections. sync-project.sh is about what lands
@@ -250,180 +267,194 @@ fi
 if [ -z "$ONLY" ] && [ -x "$HERE/sync-project.test.sh" ]; then
   echo ""
   echo "-- sync-project behavioural checks --"
-  run_test bash "$HERE/sync-project.test.sh"
+  run_test "$HERE/sync-project.test.sh" bash "$HERE/sync-project.test.sh" || :
+fi
+if [ -z "$ONLY" ] && [ -x "$HERE/eval-runner.test.sh" ]; then
+  echo ""
+  echo "-- eval runner failure checks --"
+  run_test "$HERE/eval-runner.test.sh" bash "$HERE/eval-runner.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/command-policy.test.sh" ]; then
   echo ""
   echo "-- command policy behavioural checks --"
-  run_test bash "$HERE/command-policy.test.sh"
+  run_test "$HERE/command-policy.test.sh" bash "$HERE/command-policy.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/identity-shim.test.sh" ]; then
   echo ""
   echo "-- identity shim behavioural checks --"
-  run_test bash "$HERE/identity-shim.test.sh"
+  run_test "$HERE/identity-shim.test.sh" bash "$HERE/identity-shim.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/token-wrapper-guard.test.sh" ]; then
   echo ""
   echo "-- token wrapper guard behavioural checks --"
-  run_test bash "$HERE/token-wrapper-guard.test.sh"
+  run_test "$HERE/token-wrapper-guard.test.sh" bash "$HERE/token-wrapper-guard.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/hypertask-adapter.test.sh" ]; then
   echo ""
   echo "-- hypertask adapter behavioural checks --"
-  run_test bash "$HERE/hypertask-adapter.test.sh"
+  run_test "$HERE/hypertask-adapter.test.sh" bash "$HERE/hypertask-adapter.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/queue-ranking.test.sh" ]; then
   echo ""
   echo "-- queue ranking behavioural checks --"
-  run_test bash "$HERE/queue-ranking.test.sh"
+  run_test "$HERE/queue-ranking.test.sh" bash "$HERE/queue-ranking.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/fast-tick.test.sh" ]; then
   echo ""
   echo "-- fast tick API budget checks --"
-  run_test bash "$HERE/fast-tick.test.sh"
+  run_test "$HERE/fast-tick.test.sh" bash "$HERE/fast-tick.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owned-reply-trigger.test.sh" ]; then
   echo ""
   echo "-- owned reply trigger behavioural checks --"
-  run_test bash "$HERE/owned-reply-trigger.test.sh"
+  run_test "$HERE/owned-reply-trigger.test.sh" bash "$HERE/owned-reply-trigger.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/answerer-selection.test.sh" ]; then
   echo ""
   echo "-- answerer selection behavioural checks --"
-  run_test bash "$HERE/answerer-selection.test.sh"
+  run_test "$HERE/answerer-selection.test.sh" bash "$HERE/answerer-selection.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/conf-dir-resolution.test.sh" ]; then
   echo ""
   echo "-- config directory resolution checks --"
-  run_test bash "$HERE/conf-dir-resolution.test.sh"
+  run_test "$HERE/conf-dir-resolution.test.sh" bash "$HERE/conf-dir-resolution.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/comment-cursor.test.sh" ]; then
   echo ""
   echo "-- comment cursor behavioural checks --"
-  run_test bash "$HERE/comment-cursor.test.sh"
+  run_test "$HERE/comment-cursor.test.sh" bash "$HERE/comment-cursor.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/comment-loop.test.sh" ]; then
   echo ""
   echo "-- comment loop behavioural checks --"
-  run_test bash "$HERE/comment-loop.test.sh"
+  run_test "$HERE/comment-loop.test.sh" bash "$HERE/comment-loop.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/quiet-mode.test.sh" ]; then
   echo ""
   echo "-- current conf default migration checks --"
-  run_test bash "$HERE/quiet-mode.test.sh"
+  run_test "$HERE/quiet-mode.test.sh" bash "$HERE/quiet-mode.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/one-ticket-live.test.sh" ]; then
   echo ""
   echo "-- one ticket until live behavioural checks --"
-  run_test bash "$HERE/one-ticket-live.test.sh"
+  run_test "$HERE/one-ticket-live.test.sh" bash "$HERE/one-ticket-live.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/agent-template-update.test.sh" ]; then
   echo ""
   echo "-- agent-template update behavioural checks --"
-  run_test bash "$HERE/agent-template-update.test.sh"
+  run_test "$HERE/agent-template-update.test.sh" bash "$HERE/agent-template-update.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/release-policy.test.sh" ]; then
   echo ""
   echo "-- merge-time release policy checks --"
-  run_test bash "$HERE/release-policy.test.sh"
+  run_test "$HERE/release-policy.test.sh" bash "$HERE/release-policy.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/qa-sections.test.sh" ]; then
   echo ""
   echo "-- QA section behavioural checks --"
-  run_test bash "$HERE/qa-sections.test.sh"
+  run_test "$HERE/qa-sections.test.sh" bash "$HERE/qa-sections.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/qa-lifecycle.test.sh" ]; then
   echo ""
   echo "-- QA lifecycle behavioural checks --"
-  run_test bash "$HERE/qa-lifecycle.test.sh"
+  run_test "$HERE/qa-lifecycle.test.sh" bash "$HERE/qa-lifecycle.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/board-state-lifecycle.test.sh" ]; then
   echo ""
   echo "-- board state lifecycle behavioural checks --"
-  run_test bash "$HERE/board-state-lifecycle.test.sh"
+  run_test "$HERE/board-state-lifecycle.test.sh" bash "$HERE/board-state-lifecycle.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/run-watchdog.test.sh" ]; then
   echo ""
   echo "-- run watchdog and single-claim checks --"
-  run_test bash "$HERE/run-watchdog.test.sh"
+  run_test "$HERE/run-watchdog.test.sh" bash "$HERE/run-watchdog.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owner-comment-classification.test.sh" ]; then
   echo ""
   echo "-- owner comment classification behavioural checks --"
-  run_test bash "$HERE/owner-comment-classification.test.sh"
+  run_test "$HERE/owner-comment-classification.test.sh" bash "$HERE/owner-comment-classification.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/manager-actions.test.sh" ]; then
   echo ""
   echo "-- manager action behavioural checks --"
-  run_test bash "$HERE/manager-actions.test.sh"
+  run_test "$HERE/manager-actions.test.sh" bash "$HERE/manager-actions.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/manager-tick.test.sh" ]; then
   echo ""
   echo "-- manager tick regression checks --"
-  run_test bash "$HERE/manager-tick.test.sh"
+  run_test "$HERE/manager-tick.test.sh" bash "$HERE/manager-tick.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/maintainer-actions.test.sh" ]; then
   echo ""
   echo "-- maintainer action behavioural checks --"
-  run_test bash "$HERE/maintainer-actions.test.sh"
+  run_test "$HERE/maintainer-actions.test.sh" bash "$HERE/maintainer-actions.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/repos-allow.test.sh" ]; then
   echo ""
   echo "-- repository allowlist behavioural checks --"
-  run_test bash "$HERE/repos-allow.test.sh"
+  run_test "$HERE/repos-allow.test.sh" bash "$HERE/repos-allow.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/instruction-tickets.test.sh" ]; then
   echo ""
   echo "-- instruction ticket behavioural checks --"
-  run_test bash "$HERE/instruction-tickets.test.sh"
+  run_test "$HERE/instruction-tickets.test.sh" bash "$HERE/instruction-tickets.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/task-writer.test.sh" ]; then
   echo ""
   echo "-- Task Writer behavioural checks --"
-  run_test bash "$HERE/task-writer.test.sh"
+  run_test "$HERE/task-writer.test.sh" bash "$HERE/task-writer.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/writer-gate.test.sh" ]; then
   echo ""
   echo "-- bot writer gate behavioural checks --"
-  run_test bash "$HERE/writer-gate.test.sh"
+  run_test "$HERE/writer-gate.test.sh" bash "$HERE/writer-gate.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -f "$HERE/comment-writer-real-cli.test.py" ]; then
   echo ""
   echo "-- real CLI comment writer dry-run check --"
-  run_test python3 "$HERE/comment-writer-real-cli.test.py"
+  run_test "$HERE/comment-writer-real-cli.test.py" python3 "$HERE/comment-writer-real-cli.test.py" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/reply-contract.test.sh" ]; then
   echo ""
   echo "-- reply contract behavioural checks --"
-  run_test bash "$HERE/reply-contract.test.sh"
+  run_test "$HERE/reply-contract.test.sh" bash "$HERE/reply-contract.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/board-health.test.sh" ]; then
   echo ""
   echo "-- board health behavioural checks --"
-  run_test bash "$HERE/board-health.test.sh"
+  run_test "$HERE/board-health.test.sh" bash "$HERE/board-health.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/feedback-loop.test.sh" ]; then
   echo ""
   echo "-- feedback loop behavioural checks --"
-  run_test bash "$HERE/feedback-loop.test.sh"
+  run_test "$HERE/feedback-loop.test.sh" bash "$HERE/feedback-loop.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/fleet-progress.test.sh" ]; then
   echo ""
   echo "-- fleet progress and stall checks --"
-  run_test bash "$HERE/fleet-progress.test.sh"
+  run_test "$HERE/fleet-progress.test.sh" bash "$HERE/fleet-progress.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/agent-status.test.sh" ]; then
   echo ""
   echo "-- Agents page status snapshot checks --"
-  run_test bash "$HERE/agent-status.test.sh"
+  run_test "$HERE/agent-status.test.sh" bash "$HERE/agent-status.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/learned-rules.test.sh" ]; then
   echo ""
   echo "-- learned-rules behavioural checks --"
-  run_test bash "$HERE/learned-rules.test.sh"
+  run_test "$HERE/learned-rules.test.sh" bash "$HERE/learned-rules.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owner-rule-proposal.test.sh" ]; then
   echo ""
   echo "-- one comment per owner message and rule proposal filing --"
-  run_test bash "$HERE/owner-rule-proposal.test.sh"
+  run_test "$HERE/owner-rule-proposal.test.sh" bash "$HERE/owner-rule-proposal.test.sh" || :
+fi
+
+if [ -z "$ONLY" ]; then
+  echo ""
+  printf '%d subtest file(s) run, %d failed\n' "$SUBTESTS_RUN" "${#SUBTEST_FAILURES[@]}"
+  if [ "${#SUBTEST_FAILURES[@]}" -gt 0 ]; then
+    printf 'failing subtest files: %s\n' "${SUBTEST_FAILURES[*]}"
+    exit 1
+  fi
 fi

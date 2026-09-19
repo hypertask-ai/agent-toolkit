@@ -1,1 +1,2 @@
-AGTE-123 isolates QA lifecycle eval identity shims from concurrent host runs so toolkit updates are not refused by cross-run file races.
+- AGTE-123 isolates QA lifecycle eval identity shims from concurrent host runs so toolkit updates are not refused by cross-run file races.
+- Eval subtest crashes now produce a named failure and a final summary; refused updates name the first three failures and preserve the complete eval log.
