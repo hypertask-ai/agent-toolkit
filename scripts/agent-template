@@ -1097,6 +1097,11 @@ if [ "${SUBCOMMAND:-feedback}" = "promote" ]; then
   INSTALLED_COMMIT="$(sed -n 's/^commit=//p' "$INSTALL_STATE" | tail -n1)"
   INSTALLED_AT="$(sed -n 's/^installed_at=//p' "$INSTALL_STATE" | tail -n1)"
   case "$INSTALLED_AT" in ''|*[!0-9]*) die "invalid install time in $INSTALL_STATE" "run agent-template update again" ;; esac
+  STABLE_COMMIT="$(git -C "$REPO" rev-parse -q --verify 'refs/tags/stable^{commit}' 2>/dev/null || true)"
+  if [ -n "$INSTALLED_COMMIT" ] && [ "$STABLE_COMMIT" = "$INSTALLED_COMMIT" ]; then
+    echo "promote skipped: stable already points to $INSTALLED_VERSION ($INSTALLED_COMMIT)"
+    exit 0
+  fi
   age=$(( $(date +%s) - INSTALLED_AT ))
   if [ "$age" -lt 86400 ]; then
     echo "promote refused: installed $INSTALLED_VERSION has run for ${age}s, less than 24h"
@@ -1187,8 +1192,111 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   CONFIG_DIR="${AGENT_TEMPLATE_CONFIG_DIR:-$HOME/.config/hypertask-agents}"
   SYSTEMD_USER_DIR="${AGENT_SYSTEMD_DIR:-$HOME/.config/systemd/user}"
   INSTALLED_TEMPLATE="${AGENT_TEMPLATE_INSTALL_DIR:-$CORE_ROOT}"
+  UPDATE_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-template"
+  UPDATE_BOARD_CLI="${AGENT_TEMPLATE_UPDATE_BOARD_CLI:-}"
+  UPDATE_HEALTH_BOARD="${AGENT_TEMPLATE_UPDATE_HEALTH_BOARD:-}"
   CHANNEL="$(host_config_value CHANNEL stable)"
   AUTO_UPDATE="$(host_config_value AUTO_UPDATE on)"
+
+  if [ -z "$UPDATE_BOARD_CLI" ]; then
+    for update_conf in "$CONFIG_DIR"/*.conf; do
+      [ -f "$update_conf" ] || continue
+      [ "$(manager_conf_value "$update_conf" MAINTAINER 2>/dev/null || true)" = "on" ] || continue
+      candidate_cli="$(manager_conf_value "$update_conf" BOARD_CLI 2>/dev/null || true)"
+      [ -x "$candidate_cli" ] || continue
+      UPDATE_BOARD_CLI="$candidate_cli"
+      UPDATE_HEALTH_BOARD="${UPDATE_HEALTH_BOARD:-$(manager_conf_value "$update_conf" BOARD_ID 2>/dev/null || true)}"
+      UPDATE_HEALTH_BOARD="${UPDATE_HEALTH_BOARD%%,*}"
+      break
+    done
+  fi
+  if [ -z "$UPDATE_BOARD_CLI" ]; then
+    for update_conf in "$CONFIG_DIR"/*.conf; do
+      [ -f "$update_conf" ] || continue
+      candidate_cli="$(manager_conf_value "$update_conf" BOARD_CLI 2>/dev/null || true)"
+      [ -x "$candidate_cli" ] || continue
+      UPDATE_BOARD_CLI="$candidate_cli"
+      UPDATE_HEALTH_BOARD="${UPDATE_HEALTH_BOARD:-$(manager_conf_value "$update_conf" BOARD_ID 2>/dev/null || true)}"
+      UPDATE_HEALTH_BOARD="${UPDATE_HEALTH_BOARD%%,*}"
+      break
+    done
+  fi
+
+  update_health_ref() {
+    local state_file task task_json project_json section_result section body output
+    state_file="${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll/board-health.json"
+    if [ -f "$state_file" ]; then
+      task="$(HEALTH_BOARD="$UPDATE_HEALTH_BOARD" python3 - "$state_file" <<'PYEOF'
+import json, os, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    doc = {}
+print(str((((doc.get("boards") or {}).get(os.environ["HEALTH_BOARD"]) or {}).get("ref") or "")))
+PYEOF
+)"
+      if [ -n "$task" ]; then
+        printf '%s\n' "$task"
+        return
+      fi
+    fi
+    task_json="$("$UPDATE_BOARD_CLI" task list --project "$UPDATE_HEALTH_BOARD" --limit 100 --json 2>/dev/null || true)"
+    task="$(printf '%s' "$task_json" | python3 -c '
+import json, sys
+try: doc = json.load(sys.stdin)
+except ValueError: print(""); raise SystemExit
+for row in doc.get("tasks") or []:
+    if str(row.get("title") or "").strip().casefold() == "board health":
+        print(row.get("ticketNumber") or row.get("ref") or "")
+        break
+' 2>/dev/null || true)"
+    if [ -n "$task" ]; then
+      printf '%s\n' "$task"
+      return
+    fi
+    project_json="$("$UPDATE_BOARD_CLI" --json project show "$UPDATE_HEALTH_BOARD" 2>/dev/null)" || return 1
+    section_result="$(board_section_or_first "$project_json" Bugs)" || return 1
+    section="$(printf '%s\n' "$section_result" | sed -n '1p')"
+    body='<p><strong>This standing ticket records the health of agents on this board.</strong></p><h2>What changes</h2><ol><li><p>Automated host updates and fleet checks post their results here.</p></li></ol><h2>Done when</h2><p>Each automated check records its latest result.</p>'
+    output="$("$UPDATE_BOARD_CLI" task create --raw --project "$UPDATE_HEALTH_BOARD" \
+      --section "$section" --title 'Board health' --description "$body" --json 2>/dev/null)" || return 1
+    printf '%s' "$output" | python3 -c '
+import json, sys
+try: doc = json.load(sys.stdin)
+except ValueError: raise SystemExit(1)
+row = doc.get("task") if isinstance(doc.get("task"), dict) else doc
+ref = row.get("ticketNumber") or row.get("ref") or ""
+if not ref: raise SystemExit(1)
+print(ref)
+'
+  }
+
+  update_post_success() {
+    local health_ref message
+    [ -x "$UPDATE_BOARD_CLI" ] && [ -n "$UPDATE_HEALTH_BOARD" ] || return 1
+    health_ref="$(update_health_ref)" || return 1
+    [ -n "$health_ref" ] || return 1
+    message="<p><strong>Decision: Toolkit $TARGET_VERSION passed evals and is now installed.</strong></p><p>Next: No action needed.</p>"
+    AGENT_COMMENT_VERBATIM=yes "$UPDATE_BOARD_CLI" comment add "$health_ref" --text "$message" >/dev/null
+  }
+
+  update_file_eval_failure() {
+    local marker project_json section_result section title description output
+    mkdir -p "$UPDATE_STATE_DIR"
+    marker="$UPDATE_STATE_DIR/update-failure-${TARGET_VERSION//[^a-zA-Z0-9._-]/_}"
+    [ ! -f "$marker" ] || { echo "eval failure ticket already filed for $TARGET_VERSION"; return 0; }
+    [ -x "$UPDATE_BOARD_CLI" ] || return 1
+    project_json="$("$UPDATE_BOARD_CLI" --json project show "$FEEDBACK_BOARD_ID" 2>/dev/null)" || return 1
+    section_result="$(board_section_or_first "$project_json" "$FEEDBACK_BOARD_SECTION")" || return 1
+    section="$(printf '%s\n' "$section_result" | sed -n '1p')"
+    title="Restore automatic host update to $TARGET_VERSION"
+    description="<p><strong>Toolkit $TARGET_VERSION failed its host evals, so the host kept $INSTALLED_VERSION.</strong></p><h2>What went wrong</h2><p>$RED_COUNT evals failed during the automatic update.</p><h2>What changes</h2><ol><li><p>Fix the failing toolkit evals.</p></li><li><p>Let the host retry the same version.</p></li></ol><h2>Done when</h2><p>The eval suite passes and the host installs toolkit $TARGET_VERSION.</p>"
+    output="$("$UPDATE_BOARD_CLI" task create --raw --project "$FEEDBACK_BOARD_ID" \
+      --section "$section" --title "$title" --description "$description" --json 2>/dev/null)" || return 1
+    printf '%s' "$output" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null || return 1
+    printf '%s\n' "$output" > "$marker"
+    echo "eval failure ticket filed for $TARGET_VERSION"
+  }
   if [ "$TIMER_RUN" = "yes" ] && [ "$AUTO_UPDATE" = "off" ]; then
     current="$(cat "$INSTALLED_TEMPLATE/VERSION" 2>/dev/null || echo unknown)"
     stable="$(git -C "$REPO" show stable:VERSION 2>/dev/null || echo unknown)"
@@ -1219,6 +1327,21 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   TARGET_VERSION="$(cat "$TEMPLATE_DIR/VERSION")"
   TARGET_COMMIT="$(git -C "$REPO" rev-parse HEAD)"
   echo "channel $CHANNEL selected: $TARGET_VERSION ($(git -C "$REPO" rev-parse --short HEAD))"
+
+  UPDATE_SUCCESS_MARKER="$UPDATE_STATE_DIR/update-success-${TARGET_VERSION//[^a-zA-Z0-9._-]/_}"
+  CURRENT_VERSION="$(cat "$INSTALLED_TEMPLATE/VERSION" 2>/dev/null || echo unknown)"
+  if [ "$TIMER_RUN" = "yes" ] && [ "$CURRENT_VERSION" = "$TARGET_VERSION" ]; then
+    echo "no VERSION change: toolkit $TARGET_VERSION is already installed"
+    if [ -f "$UPDATE_SUCCESS_MARKER" ]; then
+      exit 0
+    fi
+    update_post_success \
+      || die "toolkit $TARGET_VERSION is installed but its Board health update failed" \
+          "restore the maintainer board CLI; the timer will retry the post"
+    mkdir -p "$UPDATE_STATE_DIR"
+    printf '%s\n' "$TARGET_COMMIT" > "$UPDATE_SUCCESS_MARKER"
+    exit 0
+  fi
 
   echo "== 1a. untracked template caches =="
   cache_found=no
@@ -1347,6 +1470,11 @@ PYEOF
       echo "$REFUSAL"
       mkdir -p "$FEEDBACK_LOG_DIR"
       printf '%s\n' "$REFUSAL" >> "$FEEDBACK_LOG_DIR/update.log"
+      if [ "$TIMER_RUN" = "yes" ]; then
+        update_file_eval_failure \
+          || die "toolkit $TARGET_VERSION failed evals and its board ticket could not be filed" \
+              "restore the maintainer board CLI; the timer will retry without changing the installed version"
+      fi
       exit 0
     fi
   fi
@@ -1733,6 +1861,40 @@ PYEOF
         fi
       done
     fi
+  fi
+
+  if [ "$DRY_RUN" != "yes" ] && [ "${#INSTALLED_UNITS[@]}" -gt 0 ]; then
+    echo "== 5. restart chat and timers =="
+    if printf '%s\n' "${INSTALLED_UNITS[@]}" | grep -qx 'agent-chat.service'; then
+      systemctl --user restart agent-chat.service \
+        || die "systemd could not restart agent-chat.service" \
+            "inspect the chat service, then let the update timer retry"
+      echo "  agent-chat.service: restarted"
+    fi
+    if [ "$KEEP_TIMERS" = "yes" ]; then
+      echo "  kept timer states unchanged (--keep-timers)"
+    else
+      {
+        printf '%s\n' "${INSTALLED_UNITS[@]}" | sed -n '/\.timer$/p'
+        systemctl --user list-unit-files 'agent-board-poll@*.timer' \
+          --state=enabled --no-legend --plain 2>/dev/null | awk '{print $1}' || true
+      } | sort -u | while IFS= read -r timer; do
+        [ -n "$timer" ] || continue
+        systemctl --user is-enabled "$timer" >/dev/null 2>&1 || continue
+        systemctl --user restart "$timer" \
+          || die "systemd could not restart $timer" \
+              "inspect the timer, then let the update timer retry"
+        echo "  $timer: restarted"
+      done
+    fi
+  fi
+
+  if [ "$TIMER_RUN" = "yes" ] && [ "$DRY_RUN" != "yes" ]; then
+    update_post_success \
+      || die "toolkit $TARGET_VERSION installed but its Board health update failed" \
+          "restore the maintainer board CLI; the timer will retry the post"
+    mkdir -p "$UPDATE_STATE_DIR"
+    printf '%s\n' "$TARGET_COMMIT" > "$UPDATE_SUCCESS_MARKER"
   fi
 
   echo "== feedback filed from this host =="

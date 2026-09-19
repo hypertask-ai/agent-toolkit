@@ -487,8 +487,8 @@ EOF
 
   # agent-template-update.timer is how a bot host stays in sync with this
   # template on its own, without anyone explaining the fix to it by hand:
-  # once a day it pulls AGENT_TEMPLATE_REPO, reinstalls, and brings any
-  # old-schema conf forward. Refreshed on every install.sh run so a fix to
+  # every five minutes it checks AGENT_TEMPLATE_REPO and only installs when
+  # VERSION changes. Refreshed on every install.sh run so a fix to
   # the schedule or the unit reaches every host, and re-enabling here is
   # what makes that refresh idempotent whether or not the timer already
   # exists on this machine.
@@ -507,12 +507,12 @@ ExecStart=$BIN/agent-template promote
 EOF
   cat > "$SYSTEMD_USER_DIR/agent-template-update.timer" <<EOF
 [Unit]
-Description=Daily agent-template update
+Description=Check for agent toolkit updates every five minutes
 
 [Timer]
-OnCalendar=*-*-* 06:30:00
-Persistent=true
-AccuracySec=1m
+OnBootSec=2m
+OnUnitActiveSec=5m
+AccuracySec=30s
 Unit=agent-template-update.service
 
 [Install]
@@ -603,7 +603,7 @@ EOF
   echo "reconcile timer: agent-board-reconcile.timer, every 5 minutes"
   echo "chat service: agent-chat.service (enabled and restarted)"
   echo "events service: agent-events.service (enabled and restarted)"
-  echo "update timer: agent-template-update.timer, daily 06:30 local ($(systemctl --user list-timers agent-template-update.timer --no-pager 2>/dev/null | sed -n '2p'))"
+  echo "update timer: agent-template-update.timer, every 5 minutes ($(systemctl --user list-timers agent-template-update.timer --no-pager 2>/dev/null | sed -n '2p'))"
 else
   echo "WARNING: no systemd --user session here: skipped refreshing agent-board-poll@.service/.timer and agent-template-update.timer" >&2
 fi
