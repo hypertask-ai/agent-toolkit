@@ -163,4 +163,31 @@ else
   bad answer-inside-wait-window-has-no-ack "comments=$comments board=$posted feedback=$(cat "$TMP/feedback.log")"
 fi
 
+# --- 3. a deferred acknowledgement nobody answered is owed to the owner ------
+# The reply lane never ran on the tick that deferred it, so the next tick past
+# the wait window posts it. Without this the owner gets silence.
+: > "$TMP/board.log"
+: > "$TMP/feedback.log"
+rm -rf "$TMP/state"
+mkdir -p "$TMP/state/agent-board-poll"
+printf '15\t92\tquestion\t%s\n' "$(( $(date +%s) - 300 ))" \
+  > "$TMP/state/agent-board-poll/dev-TEST-1.owner-ack"
+cat > "$TMP/comments.json" <<'EOF'
+{"comments":[{"id":93,"createdAt":"2026-09-19T08:02:00Z","agent":{"id":"agent-dev","displayName":"Dev"},"creator":null,"text":"<p>Answer: already said.</p>"}]}
+EOF
+HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+  COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" \
+  MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
+  MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
+  MOCK_FEEDBACK_LOG="$TMP/feedback.log" MOCK_PROMPT="$TMP/prompt.txt" \
+  AGENT_TEMPLATE_CLI="$TMP/bin/agent-template" \
+  REPLY_HAX_BIN="$TMP/bin/hax" REPLY_CODEX_AUTH="$TMP/codex-auth.json" \
+  "$ROOT/scripts/agent-board-poll" --once dev > "$TMP/out" 2>&1 || true
+if grep -qF 'I read your comment as a question' "$TMP/board.log" \
+  && [ ! -f "$TMP/state/agent-board-poll/dev-TEST-1.owner-ack" ]; then
+  ok stale-ack-past-wait-window-is-posted 'an unanswered acknowledgement is posted once and cleared'
+else
+  bad stale-ack-past-wait-window-is-posted "board=$(cat "$TMP/board.log") pending=$(ls "$TMP/state/agent-board-poll" 2>/dev/null)"
+fi
+
 exit "$([ "$fails" -eq 0 ] && echo 0 || echo 1)"
