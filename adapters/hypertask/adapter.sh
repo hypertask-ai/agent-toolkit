@@ -2478,7 +2478,7 @@ for comment in reversed(comments):
     if re.search(r"\bqa\s*(verdict|result)?\s*[:\-]?\s*pass\b", body):
         break
 
-done = section in {"done", "archive", "shipped"}
+done = section in {"done", "archive", "archived", "shipped"}
 reply_only = "reply_only" in reason.split("+")
 
 prs = json.loads(os.environ["PR_JSON"]) or []

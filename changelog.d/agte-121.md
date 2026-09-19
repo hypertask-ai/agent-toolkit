@@ -1,0 +1,1 @@
+- AGTE-121 closes and unassigns tickets shipped by ticket-prefixed commits on allowlisted base branches, links the commit once, and prevents completed tickets from being picked up again.
