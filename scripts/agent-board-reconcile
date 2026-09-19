@@ -232,6 +232,7 @@ for line in sys.stdin:
         continue
     if str(row.get("ref") or "").casefold() == wanted:
         print(json.dumps(row))
+        sys.stdin.read()
         break
 ')"
         [ -n "$row" ] || continue
