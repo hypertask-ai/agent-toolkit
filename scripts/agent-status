@@ -283,18 +283,26 @@ def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) ->
         all_outcomes.extend(outcomes)
         lock = read_json(state_dir / f"{slug}.lock")
         current = ticket_from_lock(lock)
+        current_key = current.get("ticket_key") if current else None
         lock_at = parse_time(lock.get("started_at"))
+        run_record = read_json(state_dir / "run-records" / f"{slug}-{current_key}.json") if current_key else {}
+        last_output_at = parse_time(run_record.get("last_output_at"))
+        waiting_on_pr = run_record.get("waiting_on_pr") is True
+        wait_state = str(run_record.get("wait_state") or "") or None
         blocked = read_json(state_dir / f"{slug}.blocked")
         if current:
-            phase = "qa" if role == "qa" else "recovering" if role == "manager" else "working"
-            observed = lock_at or log_at or now
+            phase = "waiting" if waiting_on_pr else "qa" if role == "qa" else "recovering" if role == "manager" else "working"
+            observed = last_output_at or lock_at or log_at or now
         elif blocked.get("ticket"):
             phase, observed = "blocked", parse_time(blocked.get("since")) or log_at or now
         else:
             phase, observed = log_phase, log_at or now
         agents.append({
             "agent_id": agent_id, "slug": slug, "role": role, "current_ticket": current,
-            "obligations": [current] if current else [], "execution": {"phase": phase, "observed_at": observed},
+            "obligations": [current] if current else [],
+            "execution": {"phase": phase, "observed_at": observed,
+                          "last_output_at": last_output_at, "waiting_on_pr": waiting_on_pr,
+                          "wait_state": wait_state},
             "progress": {"state": "unknown"}, "incident_ids": [],
         })
         cutoff = now - 7 * 86400
@@ -308,8 +316,10 @@ def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) ->
             "repository": config.get("PR_REPO"), "timerActive": None, "lastTick": None,
             "lastRun": ({"ticket": last_run["ticket"], "startedAt": iso(last_run["started_at"]),
                          "endedAt": iso(last_run["ended_at"]) if last_run["ended_at"] else None,
-                         "result": "running" if last_run["ended_at"] is None and phase in {"working", "qa", "recovering"} else last_run["result"],
+                         "result": "running" if last_run["ended_at"] is None and phase in {"working", "qa", "recovering", "waiting"} else last_run["result"],
                          "exitCode": 0 if last_run["result"] == "succeeded" else None,
+                         "lastOutputAt": iso(last_output_at) if last_output_at else None,
+                         "waitingOnPr": waiting_on_pr, "waitState": wait_state,
                          "rung": {"cursor": "Grok", "claude": "Claude", "codex": "Codex"}.get(provider_of(last_run["model"], command), "Unknown")}
                         if last_run else None),
             "ticketsPickedToday": len({row["ticket"] for row in runs if dt.datetime.fromtimestamp(row["started_at"], dt.timezone.utc).date() == dt.datetime.fromtimestamp(now, dt.timezone.utc).date()}),

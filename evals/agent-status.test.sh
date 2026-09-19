@@ -27,7 +27,11 @@ assert.deepEqual(normalized.agents.map(agent=>[agent.slug,agent.role]),[
 ]);
 const dev=normalized.agents.find(agent=>agent.slug==='tk-dev-1');
 assert.equal(dev.current_ticket.ticket_key,'AGTE-83');
-assert.equal(dev.execution.phase,'working');
+assert.equal(dev.execution.phase,'waiting');
+const rawDev=snapshot.agents.find(agent=>agent.slug==='tk-dev-1');
+assert.equal(rawDev.execution.last_output_at,1789726500);
+assert.equal(rawDev.execution.waiting_on_pr,true);
+assert.equal(rawDev.execution.wait_state,'awaiting-merge');
 assert.equal(normalized.sources.supervisor.state,'needs_attention');
 assert.equal(normalized.incidents.length,1);
 assert.equal(normalized.incidents[0].affected_agent_slug,'tk-dev-1');
@@ -41,6 +45,10 @@ assert.equal(feed.kpi.liveTickets.today.agents,2);
 assert.equal(feed.kpi.firstPass.rate,50);
 assert.ok(feed.kpi.costPerLiveTicket.cursor>0);
 assert.equal(feed.agents.length,3);
+const feedDev=feed.agents.find(agent=>agent.slug==='tk-dev-1');
+assert.equal(feedDev.lastRun.lastOutputAt,'2026-09-18T10:15:00Z');
+assert.equal(feedDev.lastRun.waitingOnPr,true);
+assert.equal(feedDev.lastRun.waitState,'awaiting-merge');
 NODE
 
 ROOT="$ROOT" TMP="$TMP" python3 <<'PY'

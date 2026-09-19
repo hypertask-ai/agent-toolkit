@@ -330,14 +330,22 @@ def runtime_payload(agent: RuntimeAgent, board_state_dir: Path, sequence: int, v
     ticket = str(lock.get("ticket") or "").upper()
     if TICKET_PATTERN.fullmatch(ticket):
         started_at = str(lock.get("started_at") or "") or None
-        queue.append({
+        run_record = read_json(board_state_dir / "run-records" / f"{agent.slug}-{ticket}.json")
+        last_output_at = str(run_record.get("last_output_at") or "") or None
+        waiting_on_pr = run_record.get("waiting_on_pr") is True
+        wait_state = str(run_record.get("wait_state") or "") or None
+        item = {
             "ticket": ticket,
             "board_id": int(lock.get("board_id") or agent.board_ids[0]),
-            "state": "running",
-            "reason": "other",
+            "state": "waiting" if waiting_on_pr else "running",
+            "reason": f"waiting_on_pr ({wait_state})" if waiting_on_pr else "other",
             "started_at": started_at,
-        })
-        last_progress_at = started_at
+        }
+        if run_record:
+            item.update({"last_output_at": last_output_at,
+                         "waiting_on_pr": waiting_on_pr, "wait_state": wait_state})
+        queue.append(item)
+        last_progress_at = last_output_at or started_at
     else:
         blocked = read_json(board_state_dir / f"{agent.slug}.blocked")
         blocked_ticket = str(blocked.get("ticket") or "").upper()

@@ -342,6 +342,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/board-state-lifecycle.test.sh" ]; then
   echo "-- board state lifecycle behavioural checks --"
   run_test bash "$HERE/board-state-lifecycle.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/run-watchdog.test.sh" ]; then
+  echo ""
+  echo "-- run watchdog and single-claim checks --"
+  run_test bash "$HERE/run-watchdog.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owner-comment-classification.test.sh" ]; then
   echo ""
   echo "-- owner comment classification behavioural checks --"
