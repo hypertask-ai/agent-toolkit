@@ -185,10 +185,11 @@ core_enable_agent_identity() {
 # board CLIs in <bin-dir>, so that is what this scans: any executable there
 # that embeds a managed agent's TOKEN_FILE path but is not that agent's own
 # BOARD_CLI. It is rewritten to exec the agent's BOARD_CLI (which carries the
-# marker check and owner-mention stripping) with a timestamped backup kept
-# next to it. A target this cannot safely rewrite as a script -- unreadable,
-# unwritable, or not text -- gets a loud warning instead of a silent skip;
-# dry-run reports the same findings and changes nothing.
+# marker check and owner-mention stripping) with one timestamped backup kept
+# next to it. Backup files are never scanned as wrappers. A target this cannot
+# safely rewrite as a script -- unreadable, unwritable, or not text -- gets a
+# loud warning instead of a silent skip; dry-run reports the same findings and
+# changes nothing.
 core_guard_token_wrappers() {
   local bin_dir="$1" dry_run="${2:-no}" dir conf found_confs
   [ -d "$bin_dir" ] || return 0
@@ -215,9 +216,24 @@ core_guard_token_wrappers() {
     return 0
   fi
 
-  local entry resolved_entry resolved_board line slug token_file board_cli backup
+  local entry resolved_entry resolved_board line slug token_file board_cli backup candidate
   for entry in "$bin_dir"/*; do
+    case "${entry##*/}" in *.bak-*) continue ;; esac
     [ -f "$entry" ] && [ -x "$entry" ] || continue
+
+    backup=""
+    if [ "$dry_run" != "yes" ]; then
+      for candidate in "$entry".bak-*; do
+        [ -f "$candidate" ] || continue
+        if [ -z "$backup" ] || [ "${#candidate}" -gt "${#backup}" ]; then
+          [ -z "$backup" ] || rm -f -- "$backup"
+          backup="$candidate"
+        else
+          rm -f -- "$candidate"
+        fi
+      done
+    fi
+
     resolved_entry="$(readlink -f "$entry" 2>/dev/null || printf '%s' "$entry")"
     while IFS=$'\t' read -r slug token_file board_cli; do
       [ -n "$slug" ] || continue
@@ -235,7 +251,7 @@ core_guard_token_wrappers() {
         warn "$entry embeds $slug's token file outside the identity shim and could not be rewritten. Do this next: remove it or point it at the BOARD_CLI for $slug by hand"
         continue
       fi
-      backup="$entry.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+      backup="${backup:-$entry.bak-$(date -u +%Y%m%dT%H%M%SZ)}"
       cp -a "$entry" "$backup"
       cat > "$entry" <<EOF
 #!/usr/bin/env bash
