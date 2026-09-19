@@ -1901,11 +1901,40 @@ raise SystemExit(0 if str(json.load(sys.stdin).get("state") or "").upper() == "M
   return 1
 }
 
-# adapter_ticket_merged_pr <token-file> <board-id> <task-id> <repo>
+# adapter_ticket_merged_pr <token-file> <board-id> <task-id> <repo> <ref>
 adapter_ticket_merged_pr() {
-  local comments
-  comments="$(_ht_get "$1" "/mcp/comments?task_id=$3&project_id=$2")" || return 2
-  printf '%s' "$comments" | adapter_merged_pr_from_comments "$4"
+  local token_file="$1" board_id="$2" task_id="$3" repo="$4" ref="$5"
+  local rows url comments comment_rc direct_failed="no"
+  [ -n "$repo" ] && [ -n "$ref" ] || return 2
+  if command -v gh >/dev/null 2>&1 \
+     && rows="$(gh pr list --repo "$repo" --state merged --search "$ref in:title" --limit 100 \
+       --json number,title,url 2>/dev/null)"; then
+    if ! url="$(ROWS="$rows" REF="$ref" python3 -c '
+import json, os, re
+pattern = re.compile(r"^" + re.escape(os.environ["REF"]) + r"(?:$|[\s:])", re.I)
+for pr in json.loads(os.environ["ROWS"] or "[]"):
+    if pattern.match(str(pr.get("title") or "")) and pr.get("url"):
+        print(pr["url"])
+        break
+')"; then
+      direct_failed="yes"
+    elif [ -n "$url" ]; then
+      printf '%s\n' "$url"
+      return 0
+    fi
+  else
+    direct_failed="yes"
+  fi
+
+  comments="$(_ht_get "$token_file" "/mcp/comments?task_id=$task_id&project_id=$board_id")" || return 2
+  if url="$(printf '%s' "$comments" | adapter_merged_pr_from_comments "$repo")"; then
+    printf '%s\n' "$url"
+    return 0
+  else
+    comment_rc=$?
+  fi
+  [ "$direct_failed" = "no" ] || return 2
+  return "$comment_rc"
 }
 
 # adapter_agent_has_open_pr <repo> <ref> <branch-prefix> <opened-prs>

@@ -286,29 +286,46 @@ print(row.get("id") or "")
 print(row.get("ref") or "")
 print(row.get("board") or "")
 print(row.get("section") or "")
-print(row.get("comment_count") or 0)
 ')"
-        { IFS= read -r task_id; IFS= read -r ref; IFS= read -r board; IFS= read -r section; IFS= read -r comment_count; } <<< "$fields"
-        [ "${section,,}" != "${DONE_SECTION,,}" ] || continue
-        [ "$comment_count" -gt 0 ] || continue
+        { IFS= read -r task_id; IFS= read -r ref; IFS= read -r board; IFS= read -r section; } <<< "$fields"
+        current="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$log" || true)"
+        [ -n "$current" ] || current="$section"
+        current_lower="${current,,}"
+        if [ "$current_lower" = "${DONE_SECTION,,}" ] \
+           || [ "$current_lower" = "archived" ] || [ "$current_lower" = "archive" ]; then
+          continue
+        fi
+        record="$STATE_DIR/run-records/$slug-$ref.json"
+        if [ -f "$record" ] && record_is_live "$record"; then continue; fi
         set +e
-        merged_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" "${PR_REPO:-}" 2>>"$log")"
+        merged_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" "${PR_REPO:-}" "$ref" 2>>"$log")"
         merged_rc=$?
         set -e
         if [ "$merged_rc" -eq 2 ]; then
-          health_log "$board" "Reconciler could not check the pull request linked to $ref, so it left the ticket in $section."
+          health_log "$board" "Reconciler could not check merged pull requests for $ref, so it left the ticket in $current."
           continue
         fi
         [ "$merged_rc" -eq 0 ] || continue
-        if adapter_move_task "$BOARD_CLI" "$ref" "$DONE_SECTION" >>"$log" 2>&1; then
-          current="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$log" || true)"
-          if [ "${current,,}" = "${DONE_SECTION,,}" ]; then
-            printf '%s reconciler moved %s to %s because %s is merged\n' \
-              "$(date -Is)" "$ref" "$DONE_SECTION" "$merged_url" >> "$log"
-            continue
-          fi
+        if ! adapter_move_task "$BOARD_CLI" "$ref" "$DONE_SECTION" >>"$log" 2>&1; then
+          health_log "$board" "Reconciler could not move $ref to $DONE_SECTION after $merged_url merged."
+          continue
         fi
-        health_log "$board" "Reconciler could not move $ref to $DONE_SECTION after its linked pull request merged."
+        current="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$log" || true)"
+        if [ "${current,,}" != "${DONE_SECTION,,}" ]; then
+          health_log "$board" "Reconciler could not verify $ref in $DONE_SECTION after $merged_url merged."
+          continue
+        fi
+        if ! adapter_clear_assignees "$BOARD_CLI" "$ref" >>"$log" 2>&1; then
+          health_log "$board" "Reconciler moved $ref to $DONE_SECTION for $merged_url, but could not clear its assignees."
+        fi
+        shipped_comment="Shipped by merged pull request $merged_url, moved to Done."
+        if AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$ref" --raw \
+            --text "$shipped_comment" >>"$log" 2>&1; then
+          printf '%s reconciler moved %s to %s because %s is merged\n' \
+            "$(date -Is)" "$ref" "$DONE_SECTION" "$merged_url" >> "$log"
+        else
+          health_log "$board" "Reconciler moved $ref to $DONE_SECTION for $merged_url, but could not post its shipping comment."
+        fi
       done <<< "$rows"
     fi
   )
