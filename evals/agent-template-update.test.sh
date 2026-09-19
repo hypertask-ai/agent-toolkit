@@ -178,8 +178,9 @@ else
   bad timer-update-restarts-and-reports "status=$status output=$(cat "$TMP/timer-green.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
 fi
 
-# An unchanged VERSION still reconciles webhooks without running evals, install, restarts, or another post.
+# An unchanged commit still reconciles webhooks without running evals, install, restarts, or another post.
 printf 'test-version\n' > "$SUCCESS_INSTALLED/VERSION"
+printf 'version=test-version\ncommit=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\ninstalled_at=1\n' > "$TMP/state/agent-template/install-state"
 mkdir -p "$SUCCESS_INSTALLED/scripts"
 cat > "$SUCCESS_INSTALLED/scripts/agent-events" <<'EOF'
 #!/usr/bin/env bash
@@ -195,12 +196,29 @@ AGENT_TEMPLATE_INSTALL_DIR="$SUCCESS_INSTALLED" EVAL_MODE=red run_update --timer
 status=$?
 set -e
 if [ "$status" -eq 0 ] && [ ! -e "$TMP/installed" ] \
-   && grep -q '^no VERSION change: toolkit test-version is already installed$' "$TMP/timer-same.out" \
+   && grep -q '^toolkit test-version at deadbee is already installed$' "$TMP/timer-same.out" \
    && [ "$(cat "$TMP/webhook.log")" = "reconcile-all" ] \
    && [ ! -s "$TMP/systemctl.log" ] && [ ! -s "$TMP/update-board.log" ]; then
-  ok unchanged-version-noop "an unchanged five-minute check still reconciles managed webhooks"
+  ok unchanged-commit-noop "an unchanged five-minute check still reconciles managed webhooks"
 else
-  bad unchanged-version-noop "status=$status output=$(cat "$TMP/timer-same.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
+  bad unchanged-commit-noop "status=$status output=$(cat "$TMP/timer-same.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
+fi
+
+# A newer commit installs even when the author did not change VERSION.
+printf 'version=test-version\ncommit=oldcommit\ninstalled_at=1\n' > "$TMP/state/agent-template/install-state"
+rm -f "$TMP/installed"
+: > "$TMP/systemctl.log"
+: > "$TMP/update-board.log"
+set +e
+AGENT_TEMPLATE_INSTALL_DIR="$SUCCESS_INSTALLED" run_update --timer >"$TMP/timer-new-commit.out" 2>"$TMP/timer-new-commit.err"
+status=$?
+set -e
+if [ "$status" -eq 0 ] && [ -e "$TMP/installed" ] \
+   && grep -q '^== 2\. stage and evaluate test-version ==$' "$TMP/timer-new-commit.out" \
+   && grep -q '^comment add HEALTH-1 .*Toolkit test-version passed evals and is now installed' "$TMP/update-board.log"; then
+  ok same-version-new-commit "a newer latest-channel commit reaches the host without a version bump"
+else
+  bad same-version-new-commit "status=$status output=$(cat "$TMP/timer-new-commit.out") board=$(cat "$TMP/update-board.log")"
 fi
 
 # A red staged suite refuses without invoking install and files one board ticket.
@@ -225,8 +243,8 @@ repeat_status=$?
 set -e
 if [ "$repeat_status" -eq 0 ] \
    && [ "$(grep -c '^task create --raw --project 5500 ' "$TMP/update-board.log")" -eq 1 ] \
-   && grep -q '^eval failure ticket already filed for test-version$' "$TMP/red-repeat.out"; then
-  ok red-evals-ticket-deduplicated "the five-minute retry does not file another bug for the same version"
+   && grep -q '^eval failure ticket already filed for test-version at deadbee$' "$TMP/red-repeat.out"; then
+  ok red-evals-ticket-deduplicated "the five-minute retry does not file another bug for the same commit"
 else
   bad red-evals-ticket-deduplicated "status=$repeat_status output=$(cat "$TMP/red-repeat.out") board=$(cat "$TMP/update-board.log")"
 fi
