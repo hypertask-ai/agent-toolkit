@@ -41,8 +41,10 @@ SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 HERE="$(dirname "$SELF")"
 CASES="$HERE/cases.jsonl"
 ONLY=""
+TEST_TIMEOUT_SECONDS="${EVAL_TEST_TIMEOUT_SECONDS:-300}"
 
 usage() { sed -n '2,34p' "$SELF" | sed 's/^# \{0,1\}//'; }
+run_test() { timeout "$TEST_TIMEOUT_SECONDS" "$@"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -226,19 +228,19 @@ PYEOF
 if [ -z "$ONLY" ]; then
   echo ""
   echo "-- agent-chat behavioural checks --"
-  python3 "$HERE/agent-chat.test.py"
+  run_test python3 "$HERE/agent-chat.test.py"
   echo ""
   echo "-- reply formatting behavioural checks --"
-  python3 "$HERE/reply-formatting.test.py"
+  run_test python3 "$HERE/reply-formatting.test.py"
   echo ""
   echo "-- agent-kick behavioural checks --"
-  python3 "$HERE/agent-kick.test.py"
+  run_test python3 "$HERE/agent-kick.test.py"
   echo ""
   echo "-- ticket ack lane behavioural checks --"
-  python3 "$HERE/ticket-ack.test.py"
+  run_test python3 "$HERE/ticket-ack.test.py"
   echo ""
   echo "-- agent-events behavioural checks --"
-  python3 "$HERE/agent-events.test.py"
+  run_test python3 "$HERE/agent-events.test.py"
 fi
 
 # The case file replays text corrections. sync-project.sh is about what lands
@@ -248,97 +250,97 @@ fi
 if [ -z "$ONLY" ] && [ -x "$HERE/sync-project.test.sh" ]; then
   echo ""
   echo "-- sync-project behavioural checks --"
-  bash "$HERE/sync-project.test.sh"
+  run_test bash "$HERE/sync-project.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/command-policy.test.sh" ]; then
   echo ""
   echo "-- command policy behavioural checks --"
-  bash "$HERE/command-policy.test.sh"
+  run_test bash "$HERE/command-policy.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/identity-shim.test.sh" ]; then
   echo ""
   echo "-- identity shim behavioural checks --"
-  bash "$HERE/identity-shim.test.sh"
+  run_test bash "$HERE/identity-shim.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/token-wrapper-guard.test.sh" ]; then
   echo ""
   echo "-- token wrapper guard behavioural checks --"
-  bash "$HERE/token-wrapper-guard.test.sh"
+  run_test bash "$HERE/token-wrapper-guard.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/hypertask-adapter.test.sh" ]; then
   echo ""
   echo "-- hypertask adapter behavioural checks --"
-  bash "$HERE/hypertask-adapter.test.sh"
+  run_test bash "$HERE/hypertask-adapter.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/queue-ranking.test.sh" ]; then
   echo ""
   echo "-- queue ranking behavioural checks --"
-  bash "$HERE/queue-ranking.test.sh"
+  run_test bash "$HERE/queue-ranking.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/fast-tick.test.sh" ]; then
   echo ""
   echo "-- fast tick API budget checks --"
-  bash "$HERE/fast-tick.test.sh"
+  run_test bash "$HERE/fast-tick.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owned-reply-trigger.test.sh" ]; then
   echo ""
   echo "-- owned reply trigger behavioural checks --"
-  bash "$HERE/owned-reply-trigger.test.sh"
+  run_test bash "$HERE/owned-reply-trigger.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/answerer-selection.test.sh" ]; then
   echo ""
   echo "-- answerer selection behavioural checks --"
-  bash "$HERE/answerer-selection.test.sh"
+  run_test bash "$HERE/answerer-selection.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/conf-dir-resolution.test.sh" ]; then
   echo ""
   echo "-- config directory resolution checks --"
-  bash "$HERE/conf-dir-resolution.test.sh"
+  run_test bash "$HERE/conf-dir-resolution.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/comment-cursor.test.sh" ]; then
   echo ""
   echo "-- comment cursor behavioural checks --"
-  bash "$HERE/comment-cursor.test.sh"
+  run_test bash "$HERE/comment-cursor.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/comment-loop.test.sh" ]; then
   echo ""
   echo "-- comment loop behavioural checks --"
-  bash "$HERE/comment-loop.test.sh"
+  run_test bash "$HERE/comment-loop.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/quiet-mode.test.sh" ]; then
   echo ""
   echo "-- current conf default migration checks --"
-  bash "$HERE/quiet-mode.test.sh"
+  run_test bash "$HERE/quiet-mode.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/one-ticket-live.test.sh" ]; then
   echo ""
   echo "-- one ticket until live behavioural checks --"
-  bash "$HERE/one-ticket-live.test.sh"
+  run_test bash "$HERE/one-ticket-live.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/agent-template-update.test.sh" ]; then
   echo ""
   echo "-- agent-template update behavioural checks --"
-  bash "$HERE/agent-template-update.test.sh"
+  run_test bash "$HERE/agent-template-update.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/release-policy.test.sh" ]; then
   echo ""
   echo "-- merge-time release policy checks --"
-  bash "$HERE/release-policy.test.sh"
+  run_test bash "$HERE/release-policy.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/qa-sections.test.sh" ]; then
   echo ""
   echo "-- QA section behavioural checks --"
-  bash "$HERE/qa-sections.test.sh"
+  run_test bash "$HERE/qa-sections.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/qa-lifecycle.test.sh" ]; then
   echo ""
   echo "-- QA lifecycle behavioural checks --"
-  bash "$HERE/qa-lifecycle.test.sh"
+  run_test bash "$HERE/qa-lifecycle.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/board-state-lifecycle.test.sh" ]; then
   echo ""
   echo "-- board state lifecycle behavioural checks --"
-  bash "$HERE/board-state-lifecycle.test.sh"
+  run_test bash "$HERE/board-state-lifecycle.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owner-comment-classification.test.sh" ]; then
   echo ""
@@ -348,70 +350,70 @@ fi
 if [ -z "$ONLY" ] && [ -x "$HERE/manager-actions.test.sh" ]; then
   echo ""
   echo "-- manager action behavioural checks --"
-  bash "$HERE/manager-actions.test.sh"
+  run_test bash "$HERE/manager-actions.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/manager-tick.test.sh" ]; then
   echo ""
   echo "-- manager tick regression checks --"
-  bash "$HERE/manager-tick.test.sh"
+  run_test bash "$HERE/manager-tick.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/maintainer-actions.test.sh" ]; then
   echo ""
   echo "-- maintainer action behavioural checks --"
-  bash "$HERE/maintainer-actions.test.sh"
+  run_test bash "$HERE/maintainer-actions.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/repos-allow.test.sh" ]; then
   echo ""
   echo "-- repository allowlist behavioural checks --"
-  bash "$HERE/repos-allow.test.sh"
+  run_test bash "$HERE/repos-allow.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/instruction-tickets.test.sh" ]; then
   echo ""
   echo "-- instruction ticket behavioural checks --"
-  bash "$HERE/instruction-tickets.test.sh"
+  run_test bash "$HERE/instruction-tickets.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/task-writer.test.sh" ]; then
   echo ""
   echo "-- Task Writer behavioural checks --"
-  bash "$HERE/task-writer.test.sh"
+  run_test bash "$HERE/task-writer.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/writer-gate.test.sh" ]; then
   echo ""
   echo "-- bot writer gate behavioural checks --"
-  bash "$HERE/writer-gate.test.sh"
+  run_test bash "$HERE/writer-gate.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -f "$HERE/comment-writer-real-cli.test.py" ]; then
   echo ""
   echo "-- real CLI comment writer dry-run check --"
-  python3 "$HERE/comment-writer-real-cli.test.py"
+  run_test python3 "$HERE/comment-writer-real-cli.test.py"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/reply-contract.test.sh" ]; then
   echo ""
   echo "-- reply contract behavioural checks --"
-  bash "$HERE/reply-contract.test.sh"
+  run_test bash "$HERE/reply-contract.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/board-health.test.sh" ]; then
   echo ""
   echo "-- board health behavioural checks --"
-  bash "$HERE/board-health.test.sh"
+  run_test bash "$HERE/board-health.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/feedback-loop.test.sh" ]; then
   echo ""
   echo "-- feedback loop behavioural checks --"
-  bash "$HERE/feedback-loop.test.sh"
+  run_test bash "$HERE/feedback-loop.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/fleet-progress.test.sh" ]; then
   echo ""
   echo "-- fleet progress and stall checks --"
-  bash "$HERE/fleet-progress.test.sh"
+  run_test bash "$HERE/fleet-progress.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/agent-status.test.sh" ]; then
   echo ""
   echo "-- Agents page status snapshot checks --"
-  bash "$HERE/agent-status.test.sh"
+  run_test bash "$HERE/agent-status.test.sh"
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/learned-rules.test.sh" ]; then
   echo ""
   echo "-- learned-rules behavioural checks --"
-  bash "$HERE/learned-rules.test.sh"
+  run_test bash "$HERE/learned-rules.test.sh"
 fi
