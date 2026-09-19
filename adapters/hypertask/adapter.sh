@@ -1787,6 +1787,52 @@ print(task.get("section") or "")
 '
 }
 
+# adapter_merged_pr_from_comments <repo>
+# Reads one Hypertask comments response on stdin and prints the first linked
+# pull request URL whose GitHub state is MERGED. A ticket link is authoritative;
+# the pull request does not also need the ticket reference in its title or branch.
+adapter_merged_pr_from_comments() {
+  local repo="$1" numbers number view failed="no"
+  [ -n "$repo" ] || return 2
+  numbers="$(REPO="$repo" python3 -c '
+import html, json, os, re, sys
+repo = re.escape(os.environ["REPO"])
+pattern = re.compile(r"https://github[.]com/" + repo + r"/pull/([0-9]+)(?![0-9])", re.I)
+seen = set()
+for comment in json.load(sys.stdin).get("comments") or []:
+    text = html.unescape(str(comment.get("text") or comment.get("commentText") or comment.get("comment") or comment.get("html") or ""))
+    for match in pattern.finditer(text):
+        if match.group(1) not in seen:
+            seen.add(match.group(1))
+            print(match.group(1))
+')" || return 2
+  [ -n "$numbers" ] || return 1
+  command -v gh >/dev/null 2>&1 || return 2
+  while IFS= read -r number; do
+    [ -n "$number" ] || continue
+    if ! view="$(gh pr view "$number" --repo "$repo" --json state,url 2>/dev/null)"; then
+      failed="yes"
+      continue
+    fi
+    if printf '%s' "$view" | python3 -c '
+import json, sys
+raise SystemExit(0 if str(json.load(sys.stdin).get("state") or "").upper() == "MERGED" else 1)
+'; then
+      printf '%s' "$view" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("url") or "")'
+      return 0
+    fi
+  done <<< "$numbers"
+  [ "$failed" = "no" ] || return 2
+  return 1
+}
+
+# adapter_ticket_merged_pr <token-file> <board-id> <task-id> <repo>
+adapter_ticket_merged_pr() {
+  local comments
+  comments="$(_ht_get "$1" "/mcp/comments?task_id=$3&project_id=$2")" || return 2
+  printf '%s' "$comments" | adapter_merged_pr_from_comments "$4"
+}
+
 # adapter_agent_has_open_pr <repo> <ref> <branch-prefix> <opened-prs>
 adapter_agent_has_open_pr() {
   local repo="$1" ref="$2" prefix="$3" opened_prs="$4" rows
@@ -2284,9 +2330,17 @@ print(json.dumps({"action":action, "state":state, "wait_reason":wait_reason,
 adapter_pick_rank() {
   local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4" ref="$5"
   local task_id="$6" section="$7" reason="$8"
-  local comments pr_json="" repo="${PR_REPO:-}" pr_known="no"
+  local comments pr_json="" repo="${PR_REPO:-}" pr_known="no" linked_merged_pr="" linked_rc
 
   comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")"
+  if linked_merged_pr="$(printf '%s' "$comments" | adapter_merged_pr_from_comments "$repo")"; then
+    :
+  else
+    linked_rc=$?
+    if [ "$linked_rc" -eq 2 ]; then
+      printf 'ERROR: could not check a linked pull request for %s in %s\n' "$ref" "$repo" >&2
+    fi
+  fi
 
   # PR_REPO is required (agent-board-poll refuses to tick without it), so the
   # only question here is whether gh could answer. gh missing or the call
@@ -2310,7 +2364,7 @@ adapter_pick_rank() {
   printf '%s' "$comments" | \
   AGENT_ID="$agent_id" AGENT_NAME="$agent_name" REF="$ref" SECTION="$section" \
   REASON="$reason" PR_JSON="${pr_json:-[]}" HAVE_PR_VIEW="$pr_known" \
-  python3 -c '
+  LINKED_MERGED_PR="$linked_merged_pr" python3 -c '
 import json, os, re, sys
 
 def text_of(comment):
@@ -2357,19 +2411,23 @@ prs = json.loads(os.environ["PR_JSON"]) or []
 # actually name this ticket in the branch or the title.
 prs = [p for p in prs if ref.casefold() in
        (str(p.get("headRefName") or "") + " " + str(p.get("url") or "")).casefold()]
-merged = any(str(p.get("state") or "").upper() == "MERGED" for p in prs)
+merged = bool(os.environ["LINKED_MERGED_PR"]) or any(
+    str(p.get("state") or "").upper() == "MERGED" for p in prs)
 open_pr = [p for p in prs if str(p.get("state") or "").upper() == "OPEN"]
 pr_known = os.environ["HAVE_PR_VIEW"] == "yes"
 
-if reply_only:
+if reply_only and done:
     print("-3 %s has a human direct mention or question, so it is a reply-only candidate in %s"
           % (ref, section))
 elif done:
     print("0 %s is %s, nothing left to do" % (ref, section))
+elif merged:
+    print("0 %s has a merged pull request, so it cannot start another run" % ref)
+elif reply_only:
+    print("-3 %s has a human direct mention or question, so it is a reply-only candidate in %s"
+          % (ref, section))
 elif qa_fail and worked:
     print("2 %s was sent back by QA on work this agent did, so it comes before any new ticket" % ref)
-elif claimed and merged:
-    print("3 %s was claimed by this agent but its pull request is merged, so it no longer holds the agent" % ref)
 elif claimed and open_pr:
     print("1 %s is claimed by this agent and its pull request %s is still open, so this agent owes it a fix"
           % (ref, open_pr[0].get("url")))
