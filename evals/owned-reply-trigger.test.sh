@@ -95,6 +95,22 @@ if [[ " $* " = *' -X POST '* ]] && [[ "$url" = *'/mcp/comments' ]]; then
   if [ -n "${BOARD_POST_CAPTURE:-}" ]; then
     DATA="$data" python3 -c 'import json,os; print(json.loads(os.environ["DATA"])["text"], end="")' > "$BOARD_POST_CAPTURE"
   fi
+  if [ -n "${INBOX_CAPTURE:-}" ]; then
+    DATA="$data" python3 - "$COMMENTS_JSON" "$INBOX_CAPTURE" <<'PYEOF'
+import json, os, sys
+payload = json.loads(os.environ["DATA"])
+comments = json.load(open(sys.argv[1], encoding="utf-8"))["comments"]
+reply_to = payload.get("reply_to_comment_id")
+answered = next((row for row in comments if row["id"] == reply_to), None)
+direct_reply = answered is not None
+json.dump({
+    "kind": "Mentioned" if direct_reply else "Routine",
+    "ownerId": answered["creator"]["id"] if answered else None,
+    "directReply": direct_reply,
+    "replyToCommentId": reply_to,
+}, open(sys.argv[2], "w", encoding="utf-8"))
+PYEOF
+  fi
   printf '%s\n200' '{"success":true,"comment":{"id":4}}'
   exit 0
 fi
@@ -170,7 +186,8 @@ printf 'TEST-1\t%s\n' "$(date +%s)" > "$TMP/state/agent-board-poll/test.owner-me
 PROMPT_CAPTURE="$TMP/prompt" TIMEOUT_CAPTURE="$TMP/timeout" HAX_CAPTURE="$TMP/hax" \
   REPLY_CWD_CAPTURE="$TMP/reply-cwd" REPLY_MODE_CAPTURE="$TMP/reply-mode" \
   REPLY_CONTENT_CAPTURE="$TMP/reply-content" BOARD_POST_CAPTURE="$TMP/answer.post" \
-  REPLY_POST_CAPTURE="$TMP/answer-request.json" REPLY_HAX_BIN="$TMP/bin/hax-stub" \
+  REPLY_POST_CAPTURE="$TMP/answer-request.json" INBOX_CAPTURE="$TMP/owner-inbox.json" \
+  REPLY_HAX_BIN="$TMP/bin/hax-stub" \
   REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
   HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
   XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
@@ -207,6 +224,22 @@ if [ "$stamp_ok" = yes ] \
   ok reply-only-prompt-contract 'an Answer to an owner mention posts with the mention intact after its daily allowance was used'
 else
   bad reply-only-prompt-contract "prompt=$(cat "$TMP/prompt" 2>/dev/null || true)"
+fi
+
+if python3 - "$TMP/owner-inbox.json" <<'PYEOF'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row == {
+    "kind": "Mentioned",
+    "ownerId": 6,
+    "directReply": True,
+    "replyToCommentId": 3,
+}
+PYEOF
+then
+  ok owner-mentioned-direct-reply 'an answer to the owner mention creates a Mentioned row with directReply true'
+else
+  bad owner-mentioned-direct-reply "inbox=$(cat "$TMP/owner-inbox.json" 2>/dev/null || true)"
 fi
 
 if [ "$(cat "$TMP/timeout")" = 300 ] \
