@@ -1,0 +1,1 @@
+AGTE-101 moves tickets with linked merged pull requests to Done during the five-minute reconciliation pass, prevents those tickets from starting another run, and guards the five-minute self-update schedule with an eval.

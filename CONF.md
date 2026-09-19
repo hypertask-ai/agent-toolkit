@@ -12,6 +12,7 @@ Core treats model commands as opaque strings. It has no provider allow-list and 
 | `LADDER` | Optional `\|`-separated full commands. Once three attempts have failed, the next attempt selects command one; after four failures, the next selects command two, and so on. Empty or absent means no escalation. |
 | `RESEARCH_CLI` | Optional command for `agent-advisor` and supervisor research. Empty or absent means no research step. |
 | `TRIAGE_HARD_CLI` | Optional command for a ticket labelled `hard`. Empty or absent means `MODEL_CLI`. |
+| `OWNER_COMMENT_CLASSIFIER_CLI` | Optional command that classifies the board owner's newest comment before pickup. It defaults to `TRIAGE_MODEL_CLI` and must return exactly `hold`, `go`, `question`, or `feedback`. |
 | `CHAT_CLI` | Optional command for Agent Chat. Empty or absent means `MODEL_CLI`. |
 
 Each value is the complete non-interactive command, including its model, tool, permission, and print flags. The runner splits it into arguments without shell evaluation and appends the prompt as the final argument, which is the existing `MODEL_CLI` contract. Put `-p`, `--print`, or the harness's equivalent before that final prompt. Shell pipelines and a literal `|` cannot appear inside a command because `|` separates ladder entries.
@@ -53,6 +54,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `WATCH_SECTIONS` | Comma-separated watched columns. QA agents include `QA` by default and on template update. |
 | `IN_PROGRESS_SECTION` | Destination while a model run is live, default `In Progress`. |
 | `REVIEW_SECTION` | Destination after the run opens a pull request, default `AI Review`. |
+| `DONE_SECTION` | Destination when the reconciler finds a linked merged pull request, default `Done`. |
 | `QA_FAIL_SECTION` | QA failure destination. Defaults to the board's first intake column. Failed QA also clears every assignee. |
 | `QA_BLOCKED_SECTION` | Blocked or cannot-test destination, default `Agent Blocked (Infra)`. |
 | `QA_TURNAROUND_HOURS` | Hours a ticket may remain in QA without an agent verdict before it becomes eligible again, default `4`. |
