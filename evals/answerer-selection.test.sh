@@ -62,6 +62,14 @@ EOF
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 url="${!#}"
+if [[ " $* " = *' -X POST '* ]] && [[ "$url" = *'/mcp/comments' ]]; then
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    [ "${args[$i]}" != "--data" ] || printf '%s\n' "${args[$((i + 1))]:-}" >> "$BOARD_WRITE_LOG"
+  done
+  printf '%s\n200' '{"success":true,"comment":{"id":21}}'
+  exit 0
+fi
 case "$url" in
   *'/mcp/tasks?'*) cat "$TASKS_JSON"; printf '\n200' ;;
   *'/mcp/comments?'*) cat "$COMMENTS_JSON"; printf '\n200' ;;
@@ -172,7 +180,8 @@ for slug in alpha beta gamma; do
 done
 if [ "$(wc -l < "$TMP/model-runs.log")" -eq 1 ] \
    && [ "$(cat "$TMP/model-runs.log")" = 'Gamma Bot' ] \
-   && [ "$(wc -l < "$TMP/board-writes.log")" -eq 1 ]; then
+   && [ "$(wc -l < "$TMP/board-writes.log")" -eq 1 ] \
+   && python3 -c 'import json,sys; row=json.load(open(sys.argv[1])); assert row["reply_to_comment_id"] == 20' "$TMP/board-writes.log"; then
   ok one-live-reply 'three polls produce one model answer and one stubbed board reply'
 else
   bad one-live-reply "models=$(cat "$TMP/model-runs.log") writes=$(cat "$TMP/board-writes.log")"

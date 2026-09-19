@@ -3140,7 +3140,8 @@ $(cat "$ORIGINAL_REPLY_FILE")"
           cp "$FALLBACK_REPLY_FILE" "$LINKED_FALLBACK_FILE"
         fi
         [ -z "$RULE_NOTE" ] || insert_rule_filing_note "$LINKED_FALLBACK_FILE" "$RULE_NOTE"
-        if (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; \
+        if (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply" \
+          AGENT_REPLY_TO_COMMENT_ID="$comment_id"; \
           post_ticket_comment "$ref" raw-file "$LINKED_FALLBACK_FILE"); then
           reply_posted=yes
           owner_ack_answered "$ref"
@@ -3155,7 +3156,8 @@ $(cat "$ORIGINAL_REPLY_FILE")"
       [ -z "$RULE_NOTE" ] || insert_rule_filing_note "$REPLY_FILE" "$RULE_NOTE"
       cat "$REPLY_FILE" >> "$LOG"
       printf '\n' >> "$LOG"
-      if ! (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; post_ticket_comment "$ref" file "$REPLY_FILE"); then
+      if ! (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply" \
+        AGENT_REPLY_TO_COMMENT_ID="$comment_id"; post_ticket_comment "$ref" file "$REPLY_FILE"); then
         printf 'validated reply could not be posted\n' >> "$ERRFILE"
         rc=74
       else
@@ -3164,7 +3166,8 @@ $(cat "$ORIGINAL_REPLY_FILE")"
     fi
     if [ "$rc" -ne 0 ]; then
       printf 'I could not answer this, error logged\n' > "$ERROR_FALLBACK_FILE"
-      if (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply"; \
+      if (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply" \
+          AGENT_REPLY_TO_COMMENT_ID="$comment_id"; \
           post_ticket_comment "$ref" raw-file "$ERROR_FALLBACK_FILE"); then
         printf 'posted reply failure fallback\n' >> "$ERRFILE"
         owner_ack_answered "$ref"

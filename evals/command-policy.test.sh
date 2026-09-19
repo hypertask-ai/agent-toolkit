@@ -48,6 +48,14 @@ EOF
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 url="${!#}"
+if [[ " $* " = *' -X POST '* ]] && [[ "$url" = *'/mcp/comments' ]]; then
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    [ "${args[$i]}" != "--data" ] || printf '%s' "${args[$((i + 1))]:-}" > "$REPLY_POST_CAPTURE"
+  done
+  printf '%s\n200' '{"success":true,"comment":{"id":100}}'
+  exit 0
+fi
 case "$url" in
   *'/mcp/tasks?'*) cat "$BOARD_JSON"; printf '\n200' ;;
   *'/mcp/comments?'*)
@@ -135,6 +143,7 @@ run_poll() {
     XDG_STATE_HOME="$state" COMPANY_SKILLS_DIR="$TMP/company" \
     BOARD_JSON="$TMP/board.json" MODEL_CAPTURE="$capture" \
     BOARD_CAPTURE="${BOARD_CAPTURE:-$TMP/board-capture}" BOARD_POST_CAPTURE="${BOARD_POST_CAPTURE:-}" \
+    REPLY_POST_CAPTURE="${REPLY_POST_CAPTURE:-$TMP/reply-post}" \
     COMMENT_JSON="${COMMENT_JSON:-}" REPLY_HAX_BIN="$TMP/bin/failing-model" \
     REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
     PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" "$@" test
@@ -200,21 +209,31 @@ write_conf "$state"
 sed -i 's#^MODEL_CLI=.*#MODEL_CLI="failing-model"#' "$TMP/home/.config/agents/test.conf"
 seed_failures "$state" TEST-4 0
 COMMENT_JSON='{"comments":[{"id":99,"createdAt":"2026-09-16T00:00:00Z","text":"<p><span data-label=\"agent-agent-1\">@Test Dev</span> please retry</p>","creator":{"displayName":"Valentin"}}]}'
-BOARD_CAPTURE="$board_capture" BOARD_POST_CAPTURE="$TMP/failure.post" COMMENT_JSON="$COMMENT_JSON" \
+BOARD_CAPTURE="$board_capture" BOARD_POST_CAPTURE="$TMP/failure.post" \
+  REPLY_POST_CAPTURE="$TMP/failure-request.json" COMMENT_JSON="$COMMENT_JSON" \
   run_poll "$state" "$capture" --once >"$TMP/failure.out" 2>"$TMP/failure.err" || true
 BOARD_CAPTURE="$board_capture" COMMENT_JSON="$COMMENT_JSON" \
   run_poll "$state" "$capture" --once --dry-run >"$TMP/failure-next.out" 2>>"$TMP/failure.err" || true
 status_file="$state/agent-board-poll/test.status"
+fallback_stamp_ok=no
+if python3 - "$TMP/failure-request.json" <<'PYEOF'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row == {"ticket_number": "TEST-4", "text": "I could not answer this, error logged", "reply_to_comment_id": 99}
+PYEOF
+then
+  fallback_stamp_ok=yes
+fi
 if [ -f "$status_file" ] \
+   && [ "$fallback_stamp_ok" = yes ] \
    && python3 -c 'import json,sys; row=json.load(open(sys.argv[1])); assert row["state"] == "failed" and row["ticket"] == "TEST-4"' "$status_file" \
-   && [ "$(cat "$TMP/failure.post")" = 'I could not answer this, error logged' ] \
-   && grep -q 'comment add TEST-4 --text I could not answer this, error logged' "$board_capture" \
+   && ! grep -q 'comment add TEST-4 --text I could not answer this, error logged' "$board_capture" \
    && ! grep -q '^task-TEST-4:99$' "$state/agent-board-poll/test.seen" \
    && grep -q 'no new human or other-agent comment bypasses the 1800s ticket cooldown' "$TMP/failure-next.out" \
    && ! grep -q 'would pick up TEST-4' "$TMP/failure-next.out"; then
   ok failed-mention-obeys-cooldown "failure posts the exact fallback and cannot rerun the same mention for 30 minutes"
 else
-  bad failed-mention-obeys-cooldown "status=$(cat "$status_file" 2>/dev/null || true) post=$(cat "$TMP/failure.post" 2>/dev/null || true) board=$(cat "$board_capture" 2>/dev/null || true) next=$(cat "$TMP/failure-next.out")"
+  bad failed-mention-obeys-cooldown "status=$(cat "$status_file" 2>/dev/null || true) request=$(cat "$TMP/failure-request.json" 2>/dev/null || true) board=$(cat "$board_capture" 2>/dev/null || true) next=$(cat "$TMP/failure-next.out")"
 fi
 
 # Migration preserves the old cursor policy and leaves a custom pi conf alone.

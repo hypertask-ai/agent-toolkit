@@ -85,6 +85,19 @@ EOF
 cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 url="${!#}"
+if [[ " $* " = *' -X POST '* ]] && [[ "$url" = *'/mcp/comments' ]]; then
+  args=("$@")
+  data=""
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    [ "${args[$i]}" != "--data" ] || data="${args[$((i + 1))]:-}"
+  done
+  [ -z "${REPLY_POST_CAPTURE:-}" ] || printf '%s' "$data" > "$REPLY_POST_CAPTURE"
+  if [ -n "${BOARD_POST_CAPTURE:-}" ]; then
+    DATA="$data" python3 -c 'import json,os; print(json.loads(os.environ["DATA"])["text"], end="")' > "$BOARD_POST_CAPTURE"
+  fi
+  printf '%s\n200' '{"success":true,"comment":{"id":4}}'
+  exit 0
+fi
 case "$url" in
   *'/mcp/tasks?'*) cat "$TASKS_JSON"; printf '\n200' ;;
   *'/mcp/comments?'*)
@@ -157,13 +170,25 @@ printf 'TEST-1\t%s\n' "$(date +%s)" > "$TMP/state/agent-board-poll/test.owner-me
 PROMPT_CAPTURE="$TMP/prompt" TIMEOUT_CAPTURE="$TMP/timeout" HAX_CAPTURE="$TMP/hax" \
   REPLY_CWD_CAPTURE="$TMP/reply-cwd" REPLY_MODE_CAPTURE="$TMP/reply-mode" \
   REPLY_CONTENT_CAPTURE="$TMP/reply-content" BOARD_POST_CAPTURE="$TMP/answer.post" \
-  REPLY_HAX_BIN="$TMP/bin/hax-stub" \
+  REPLY_POST_CAPTURE="$TMP/answer-request.json" REPLY_HAX_BIN="$TMP/bin/hax-stub" \
   REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
   HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
   XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
   TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
   PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test >/dev/null
-if grep -qF 'You are Test Bot in a read-only reply run for TEST-1.' "$TMP/prompt" \
+stamp_ok=no
+if python3 - "$TMP/answer-request.json" <<'PYEOF'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["ticket_number"] == "TEST-1"
+assert row["reply_to_comment_id"] == 3
+assert row["text"].startswith("<p><strong>Answer:")
+PYEOF
+then
+  stamp_ok=yes
+fi
+if [ "$stamp_ok" = yes ] \
+   && grep -qF 'You are Test Bot in a read-only reply run for TEST-1.' "$TMP/prompt" \
    && grep -qF 'Full ticket thread, verbatim normalized JSON.' "$TMP/prompt" \
    && grep -qF '"id": 3' "$TMP/prompt" \
    && grep -qF 'GLOBAL TERMINAL RULE' "$TMP/prompt" \
