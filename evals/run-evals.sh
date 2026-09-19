@@ -415,3 +415,8 @@ if [ -z "$ONLY" ] && [ -x "$HERE/learned-rules.test.sh" ]; then
   echo "-- learned-rules behavioural checks --"
   bash "$HERE/learned-rules.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/owner-rule-proposal.test.sh" ]; then
+  echo ""
+  echo "-- one comment per owner message and rule proposal filing --"
+  bash "$HERE/owner-rule-proposal.test.sh"
+fi
