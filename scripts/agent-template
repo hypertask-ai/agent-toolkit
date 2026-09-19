@@ -1937,6 +1937,7 @@ PYEOF
           --state=enabled --no-legend --plain 2>/dev/null | awk '{print $1}' || true
       } | sort -u | while IFS= read -r timer; do
         [ -n "$timer" ] || continue
+        [ "$timer" = "agent-board-poll@.timer" ] && continue
         systemctl --user is-enabled "$timer" >/dev/null 2>&1 || continue
         systemctl --user restart "$timer" \
           || die "systemd could not restart $timer" \

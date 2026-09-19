@@ -29,7 +29,7 @@ fi
 mkdir -p "$AGENT_SYSTEMD_DIR"
 printf '[Timer]\nOnBootSec=1m\n[Install]\nWantedBy=timers.target\n' > "$AGENT_SYSTEMD_DIR/fresh-update.timer"
 printf '[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/true\n[Install]\nWantedBy=default.target\n' > "$AGENT_SYSTEMD_DIR/fresh-update.service"
-printf '%s\n' fresh-update.timer fresh-update.service agent-chat.service >> "$AGENT_TEMPLATE_INSTALLED_UNITS_FILE"
+printf '%s\n' fresh-update.timer fresh-update.service agent-chat.service agent-board-poll@.timer >> "$AGENT_TEMPLATE_INSTALLED_UNITS_FILE"
 EOF
 cat > "$TEMPLATE/scripts/sync-project.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -74,9 +74,9 @@ cat > "$TMP/bin/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
 case "$*" in
-  '--user list-unit-files agent-board-poll@*.timer --state=enabled --no-legend --plain') echo 'agent-board-poll@worker.timer enabled'; exit 0 ;;
-  '--user is-enabled agent-board-poll@worker.timer'|'--user is-enabled fresh-update.timer') exit 0 ;;
-  '--user daemon-reload'|'--user enable fresh-update.service'|'--user start fresh-update.service'|'--user enable --now fresh-update.timer'|'--user enable agent-chat.service'|'--user start agent-chat.service'|'--user restart agent-chat.service'|'--user restart fresh-update.timer'|'--user restart agent-board-poll@worker.timer') exit 0 ;;
+  '--user list-unit-files agent-board-poll@*.timer --state=enabled --no-legend --plain') printf '%s\n' 'agent-board-poll@.timer enabled' 'agent-board-poll@qa.timer enabled' 'agent-board-poll@worker.timer enabled'; exit 0 ;;
+  '--user is-enabled agent-board-poll@.timer'|'--user is-enabled agent-board-poll@qa.timer'|'--user is-enabled agent-board-poll@worker.timer'|'--user is-enabled fresh-update.timer') exit 0 ;;
+  '--user daemon-reload'|'--user enable fresh-update.service'|'--user start fresh-update.service'|'--user enable --now fresh-update.timer'|'--user enable agent-chat.service'|'--user start agent-chat.service'|'--user restart agent-chat.service'|'--user restart fresh-update.timer'|'--user restart agent-board-poll@qa.timer'|'--user restart agent-board-poll@worker.timer') exit 0 ;;
   '--user is-active fresh-update.service'|'--user is-active fresh-update.timer'|'--user is-active agent-chat.service') echo active; exit 0 ;;
   *) exit 1 ;;
 esac
@@ -169,7 +169,8 @@ else
   bad installed-units-active "output=$(cat "$TMP/stable.out") systemctl=$(cat "$TMP/systemctl.log")"
 fi
 
-# A passing timer update restarts chat and enabled timers, then posts Board health.
+# A passing timer update restarts chat and every enabled timer instance, never
+# the bare poll template, then posts Board health.
 SUCCESS_INSTALLED="$TMP/success-installed"
 mkdir -p "$SUCCESS_INSTALLED"
 printf 'old-version\n' > "$SUCCESS_INSTALLED/VERSION"
@@ -182,11 +183,13 @@ set -e
 if [ "$status" -eq 0 ] \
    && grep -q '^--user restart agent-chat.service$' "$TMP/systemctl.log" \
    && grep -q '^--user restart fresh-update.timer$' "$TMP/systemctl.log" \
+   && grep -q '^--user restart agent-board-poll@qa.timer$' "$TMP/systemctl.log" \
    && grep -q '^--user restart agent-board-poll@worker.timer$' "$TMP/systemctl.log" \
+   && ! grep -q '^--user restart agent-board-poll@\.timer$' "$TMP/systemctl.log" \
    && grep -q '^comment add HEALTH-1 .*Toolkit test-version passed evals and is now installed' "$TMP/update-board.log"; then
-  ok timer-update-restarts-and-reports "green timer update restarts chat and timers, then posts Board health"
+  ok timer-update-restarts-instances "green update restarts every poll instance, never the bare template, then posts Board health"
 else
-  bad timer-update-restarts-and-reports "status=$status output=$(cat "$TMP/timer-green.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
+  bad timer-update-restarts-instances "status=$status output=$(cat "$TMP/timer-green.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
 fi
 
 # An unchanged commit still reconciles webhooks without running evals, install, restarts, or another post.
