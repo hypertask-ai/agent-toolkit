@@ -1,0 +1,1 @@
+- AGTE-105 makes poll runners read the full ticket and classify the board owner's newest comment before any claim. Holds now unassign the agent, move the ticket to Review, and block work on every board and lane. Go, question, and feedback comments resume work, use the reply lane, or continue the normal run, with a visible classification acknowledgement.

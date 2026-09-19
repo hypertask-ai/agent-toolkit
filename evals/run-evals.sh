@@ -340,6 +340,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/board-state-lifecycle.test.sh" ]; then
   echo "-- board state lifecycle behavioural checks --"
   bash "$HERE/board-state-lifecycle.test.sh"
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/owner-comment-classification.test.sh" ]; then
+  echo ""
+  echo "-- owner comment classification behavioural checks --"
+  bash "$HERE/owner-comment-classification.test.sh"
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/manager-actions.test.sh" ]; then
   echo ""
   echo "-- manager action behavioural checks --"
