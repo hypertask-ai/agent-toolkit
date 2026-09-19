@@ -172,8 +172,9 @@ against the installed manifest, stages the complete target template, and runs th
 staged eval suite. A red suite leaves the installed tree untouched, names the first three
 failing cases in the refusal, keeps the complete eval output beside the update-failure
 record under `~/.local/state/agent-template/`, and files one toolkit bug for that exact
-commit. A passing timer update restarts chat and enabled timers, then records the
-installed version on Board health.
+commit. A passing timer update restarts chat and every enabled
+`agent-board-poll@<slug>.timer` instance without restarting the bare template unit,
+then records the installed version on Board health.
 `--force` skips the eval gate. A normal install evaluates its source before its first
 copy as well. Use `agent-template update --keep-timers` when deployment must leave
 every runner timer in its current started or stopped state.
