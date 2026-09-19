@@ -109,7 +109,8 @@ import json, os
 value = os.environ["TASK_ID"]
 row = {"taskId": int(value) if value.isdigit() else value, "source": "runtime", "graft": os.environ["GRAFT"]}
 for env, key in (("AGENT_RUN_AGENT", "agent"), ("AGENT_RUN_MODEL", "model"),
-                 ("AGENT_RUN_STARTED_AT", "startedAt"), ("AGENT_RUN_LOG_LINK", "logUrl")):
+                 ("AGENT_RUN_PROVIDER", "provider"), ("AGENT_RUN_STARTED_AT", "startedAt"),
+                 ("AGENT_RUN_LOG_LINK", "logUrl")):
     if os.environ.get(env):
         row[key] = os.environ[env]
 print(json.dumps(row))')"
@@ -153,7 +154,7 @@ adapter_run_activity() {
   started="${AGENT_RUN_STARTED_EPOCH:-$now}"
   [[ "$started" =~ ^[0-9]+$ ]] || started="$now"
   duration=$((now - started)); [ "$duration" -ge 0 ] || duration=0
-  _adapter_run_log "$log_file" "$type $message agent=${AGENT_RUN_AGENT:-unknown} model=${AGENT_RUN_MODEL:-unknown} started=${AGENT_RUN_STARTED_AT:-unknown} duration=${duration}s outcome=${AGENT_RUN_OUTCOME:-running} log=${AGENT_RUN_LOG_LINK:-unavailable}"
+  _adapter_run_log "$log_file" "$type $message agent=${AGENT_RUN_AGENT:-unknown} provider=${AGENT_RUN_PROVIDER:-unknown} model=${AGENT_RUN_MODEL:-unknown} started=${AGENT_RUN_STARTED_AT:-unknown} duration=${duration}s outcome=${AGENT_RUN_OUTCOME:-running} log=${AGENT_RUN_LOG_LINK:-unavailable}"
   [ -n "$run_id" ] && [ "$run_id" != "local" ] || return 0
   payload="$(ACTIVITY_TYPE="$type" MESSAGE="$message" NOW="$(date +%s)" python3 -c '
 import json, os
@@ -163,6 +164,7 @@ except ValueError:
     duration = 0
 print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"],
                   "agent": os.environ.get("AGENT_RUN_AGENT", "unknown"),
+                  "provider": os.environ.get("AGENT_RUN_PROVIDER", "unknown"),
                   "model": os.environ.get("AGENT_RUN_MODEL", "unknown"),
                   "startedAt": os.environ.get("AGENT_RUN_STARTED_AT", ""),
                   "durationSeconds": duration,
@@ -187,6 +189,7 @@ except ValueError:
     duration = 0
 print(json.dumps({"status": os.environ["RUN_STATUS"], "outcome": os.environ["RUN_STATUS"],
                   "agent": os.environ.get("AGENT_RUN_AGENT", "unknown"),
+                  "provider": os.environ.get("AGENT_RUN_PROVIDER", "unknown"),
                   "model": os.environ.get("AGENT_RUN_MODEL", "unknown"),
                   "startedAt": os.environ.get("AGENT_RUN_STARTED_AT", ""),
                   "durationSeconds": duration,
@@ -381,9 +384,9 @@ _run_activity() {
   started="\${AGENT_RUN_STARTED_EPOCH:-\$now}"
   [[ "\$started" =~ ^[0-9]+$ ]] || started="\$now"
   duration=\$((now - started)); [ "\$duration" -ge 0 ] || duration=0
-  printf '%s run-activity: %s %s agent=%s model=%s started=%s duration=%ss outcome=%s log=%s\n' \
+  printf '%s run-activity: %s %s agent=%s provider=%s model=%s started=%s duration=%ss outcome=%s log=%s\n' \
     "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" "\$type" "\$message" \
-    "\${AGENT_RUN_AGENT:-unknown}" "\${AGENT_RUN_MODEL:-unknown}" \
+    "\${AGENT_RUN_AGENT:-unknown}" "\${AGENT_RUN_PROVIDER:-unknown}" "\${AGENT_RUN_MODEL:-unknown}" \
     "\${AGENT_RUN_STARTED_AT:-unknown}" "\$duration" "\${AGENT_RUN_OUTCOME:-running}" \
     "\${AGENT_RUN_LOG_LINK:-unavailable}" >> "\$RUN_LOG" 2>/dev/null || true
   [ -n "\${AGENT_RUN_ID:-}" ] && [ "\$AGENT_RUN_ID" != "local" ] && [ -n "\${AGENT_RUN_API_BASE:-}" ] || return 0
@@ -395,6 +398,7 @@ except ValueError:
     duration = 0
 print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"],
                   "agent": os.environ.get("AGENT_RUN_AGENT", "unknown"),
+                  "provider": os.environ.get("AGENT_RUN_PROVIDER", "unknown"),
                   "model": os.environ.get("AGENT_RUN_MODEL", "unknown"),
                   "startedAt": os.environ.get("AGENT_RUN_STARTED_AT", ""),
                   "durationSeconds": duration,

@@ -316,19 +316,25 @@ agent posts exactly one `Decision:` comment shaped as a numbered guide and
 nothing else: what is live, what he must do (page URL and button name), what
 needs rights he may lack, and what the bots do next.
 
-At ticket-run start the adapter posts `{taskId, source: "runtime"}` to
-`/api/mcp/agents/runs`. Claimed, started, PR opened, red check, fix pushed,
-retrying, blocked, and done are activities, and the final status closes the run.
+At ticket-run start the adapter posts the task, agent, provider, model, and
+`source: "runtime"` to `/api/mcp/agents/runs`. Claimed, started, provider
+fallback, PR opened, red check, fix pushed, retrying, blocked, and done are
+activities, and the final status closes the run with the provider that served it.
 HTTP 404 means the app route is not deployed yet; open, activity, and close stay
 in the local run log and ticket work continues.
 
 ## The conf decides the provider
 
-For build runs, the conf is the command policy. Core treats those commands as
-opaque strings and neither allows nor rejects providers, models or harnesses.
-Reply-only runs use the fixed route above.
+For build runs, the conf sets full provider commands and their subscription
+order. Reply-only runs use the fixed route above.
 
-- `MODEL_CLI` is normal ticket work.
+- `MODEL_CLI` is normal ticket work when no provider order is configured.
+- `PROVIDER_ORDER` is an optional comma-separated order such as `codex,cursor`.
+- `PROVIDER_<NAME>_CLI` is the full command for each ordered provider. The
+  runner skips commands that are not installed.
+- A quota error retries the same run on the next provider. Other errors do not.
+  If every provider is out, the ticket states the earliest reported reset and
+  becomes eligible again after that time without spending a normal attempt.
 - `LADDER` optionally lists full commands separated by `|`. Three failed
   attempts stay on `MODEL_CLI`; each later attempt takes the next rung. No
   value means no escalation.

@@ -135,6 +135,17 @@ LADDER="${LADDER:-}"
 LADDER_AFTER_FAILURES=3
 LADDER_COUNT="$(core_ladder_count "$LADDER")"
 RETRY_LIMIT="${RETRY_LIMIT:-$((LADDER_AFTER_FAILURES + LADDER_COUNT))}"
+# PROVIDER_ORDER handles subscription exhaustion inside one run. Each name maps
+# to PROVIDER_<NAME>_CLI, so agents keep control of both order and model choice.
+PROVIDER_ORDER="${PROVIDER_ORDER:-}"
+if [ -n "$PROVIDER_ORDER" ] && ! PROVIDER_ORDER_VALUE="$PROVIDER_ORDER" python3 -c '
+import os, re, sys
+names = [item.strip() for item in os.environ["PROVIDER_ORDER_VALUE"].split(",")]
+sys.exit(0 if names and all(re.fullmatch(r"[a-z][a-z0-9_-]*", item) for item in names) and len(names) == len(set(names)) else 1)
+'; then
+  die "PROVIDER_ORDER must be a comma-separated list of unique provider names" \
+      "use a value such as codex,cursor"
+fi
 RETRY_WINDOW_SECONDS="${RETRY_WINDOW_SECONDS:-21600}"
 RUN_COOLDOWN_SECONDS="${RUN_COOLDOWN_SECONDS:-1800}"
 RUN_STALL_SECONDS="${RUN_STALL_SECONDS:-1200}"
@@ -711,6 +722,73 @@ resolve_ticket_command() {
   fi
 }
 
+provider_command() {
+  local provider="$1" suffix key
+  suffix="$(printf '%s' "$provider" | tr '[:lower:]-' '[:upper:]_')"
+  key="PROVIDER_${suffix}_CLI"
+  printf '%s' "${!key:-}"
+}
+
+select_first_configured_provider() {
+  local provider command
+  [ -n "$PROVIDER_ORDER" ] || return 0
+  case "$RUN_MODEL_RUNG" in override|ladder-*) return 0 ;; esac
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    command="$(provider_command "$provider")"
+    if [ -n "$command" ]; then
+      RUN_MODEL_CLI="$command"
+      return 0
+    fi
+  done < <(printf '%s\n' "$PROVIDER_ORDER" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+}
+
+configured_provider_for_command() {
+  local command="$1" provider configured
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    configured="$(provider_command "$provider")"
+    if [ -n "$configured" ] && [ "$configured" = "$command" ]; then
+      printf '%s' "$provider"
+      return 0
+    fi
+  done < <(printf '%s\n' "$PROVIDER_ORDER" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  core_command_provider "$command"
+}
+
+provider_routes() {
+  local command="$1" current provider configured found=no
+  current="$(configured_provider_for_command "$command")"
+  printf '%s\t%s\n' "${current:-unknown}" "$command"
+  [ -n "$PROVIDER_ORDER" ] && [ -n "$current" ] || return 0
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    if [ "$found" = "no" ]; then
+      [ "$provider" = "$current" ] && found=yes
+      continue
+    fi
+    configured="$(provider_command "$provider")"
+    [ -n "$configured" ] && printf '%s\t%s\n' "$provider" "$configured"
+  done < <(printf '%s\n' "$PROVIDER_ORDER" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+}
+
+set_run_model_context() {
+  local command="$1" rung="$2" provider="${3:-}"
+  AGENT_RUN_MODEL="$(MODEL_COMMAND="$command" MODEL_RUNG="$rung" python3 -c '
+import os, shlex
+parts = shlex.split(os.environ["MODEL_COMMAND"])
+model = ""
+for index, part in enumerate(parts):
+    if part == "--model" and index + 1 < len(parts):
+        model = parts[index + 1]
+    elif part.startswith("--model="):
+        model = part.split("=", 1)[1]
+print(model or os.environ["MODEL_RUNG"])')"
+  AGENT_RUN_PROVIDER="${provider:-$(configured_provider_for_command "$command")}"
+  [ -n "$AGENT_RUN_PROVIDER" ] || AGENT_RUN_PROVIDER=unknown
+  export AGENT_RUN_MODEL AGENT_RUN_PROVIDER
+}
+
 # write_failure_status <ref> <exit-or-kind> <detail>
 write_failure_status() {
   REF="$1" FAILURE_EXIT="$2" DETAIL="$3" SLUG="$SLUG" python3 - "$STATUS" <<'PYEOF'
@@ -733,6 +811,52 @@ with open(temporary, "w", encoding="utf-8") as handle:
     json.dump(row, handle, sort_keys=True)
     handle.write("\n")
 os.replace(temporary, path)
+PYEOF
+}
+
+write_provider_wait_status() {
+  REF="$1" RESET_AT="$2" SLUG="$SLUG" python3 - "$STATUS" <<'PYEOF'
+import datetime
+import json
+import os
+import sys
+
+row = {
+    "agent": os.environ["SLUG"],
+    "state": "waiting-provider-reset",
+    "ticket": os.environ["REF"],
+    "reset_at": os.environ["RESET_AT"] or None,
+    "detail": "all available providers are out of quota",
+    "at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+path = sys.argv[1]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+}
+
+provider_wait_ready() {
+  REF="$1" python3 - "$STATUS" <<'PYEOF'
+import datetime
+import json
+import os
+import sys
+
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+    reset_at = str(row.get("reset_at") or "")
+    reset = datetime.datetime.fromisoformat(reset_at.replace("Z", "+00:00"))
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+ready = (
+    row.get("state") == "waiting-provider-reset"
+    and row.get("ticket") == os.environ["REF"]
+    and reset <= datetime.datetime.now(datetime.timezone.utc)
+)
+raise SystemExit(0 if ready else 1)
 PYEOF
 }
 
@@ -2504,9 +2628,15 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
   fi
 
   key="$task_id:$comment_id"
+  provider_reset_ready=no
   if [ "$is_pr_fix" = "no" ] && [ "$stale_qa" = "no" ] && grep -qxF "$key" "$SEEN"; then
-    explain "skip  $ref: already handled at this point in its history ($key)"
-    continue
+    if provider_wait_ready "$ref"; then
+      provider_reset_ready=yes
+      explain "retry $ref: the earliest reported provider reset has passed"
+    else
+      explain "skip  $ref: already handled at this point in its history ($key)"
+      continue
+    fi
   fi
 
   last_run="$(ticket_run_state "$ref")"
@@ -2518,7 +2648,8 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     if [ "$comment_id" != "0" ] && [ "$comment_id" != "${last_run_comment:-0}" ]; then
       fresh_external="yes"
     fi
-    if [ "$stale_qa" = "no" ] && [ "$age" -lt "$RUN_COOLDOWN_SECONDS" ] && [ "$fresh_external" = "no" ]; then
+    if [ "$stale_qa" = "no" ] && [ "$provider_reset_ready" = "no" ] \
+       && [ "$age" -lt "$RUN_COOLDOWN_SECONDS" ] && [ "$fresh_external" = "no" ]; then
       explain "skip  $ref: last run was ${age}s ago; no new human or other-agent comment bypasses the ${RUN_COOLDOWN_SECONDS}s ticket cooldown"
       continue
     fi
@@ -3000,22 +3131,14 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
   else
     resolve_ticket_command "$ref" "$TRIAGE_THIS" "$tries"
   fi
+  [ "$is_reply_only" = "yes" ] || select_first_configured_provider
   AGENT_RUN_AGENT="$SLUG"
-  AGENT_RUN_MODEL="$(MODEL_COMMAND="$RUN_MODEL_CLI" MODEL_RUNG="$RUN_MODEL_RUNG" python3 -c '
-import os, shlex
-parts = shlex.split(os.environ["MODEL_COMMAND"])
-model = ""
-for index, part in enumerate(parts):
-    if part == "--model" and index + 1 < len(parts):
-        model = parts[index + 1]
-    elif part.startswith("--model="):
-        model = part.split("=", 1)[1]
-print(model or os.environ["MODEL_RUNG"])')"
+  set_run_model_context "$RUN_MODEL_CLI" "$RUN_MODEL_RUNG"
   AGENT_RUN_STARTED_AT="$run_started_at"
   AGENT_RUN_STARTED_EPOCH="$run_started_epoch"
   AGENT_RUN_OUTCOME="running"
   AGENT_RUN_LOG_LINK="file://$LOG"
-  export AGENT_RUN_AGENT AGENT_RUN_MODEL AGENT_RUN_STARTED_AT AGENT_RUN_STARTED_EPOCH \
+  export AGENT_RUN_AGENT AGENT_RUN_MODEL AGENT_RUN_PROVIDER AGENT_RUN_STARTED_AT AGENT_RUN_STARTED_EPOCH \
     AGENT_RUN_OUTCOME AGENT_RUN_LOG_LINK
   runtime_run_id="local"
   if declare -F adapter_run_open >/dev/null 2>&1; then
@@ -3064,6 +3187,9 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
   if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
     OPEN_PRS_BEFORE="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
   fi
+  quota_exhausted=no
+  quota_reset_epoch=""
+  quota_reset_at=""
   set +e
   WATCHDOG_REASON=""
   # Reply runs have one fixed model and no board capability. The model writes a
@@ -3187,11 +3313,8 @@ $(cat "$ORIGINAL_REPLY_FILE")"
     else
       resolve_ticket_command "$ref" "$TRIAGE_THIS" "$tries"
     fi
+    select_first_configured_provider
     log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI)"
-    read -r -a MODEL_ARGV <<< "$RUN_MODEL_CLI"
-    if [ "$GRAFT" = "on" ] && [ "$(basename "${MODEL_ARGV[0]}")" = "claude" ]; then
-      MODEL_ARGV=("${MODEL_ARGV[0]}" --mcp-config "$GRAFT_MCP_CONFIG" "${MODEL_ARGV[@]:1}")
-    fi
     # What agent-advisor needs to answer a question about this ticket, and the
     # counter that caps it at two. Written per run, not per ticket.
     mkdir -p "$ADVISOR_DIR"
@@ -3208,37 +3331,89 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
                   "slug": os.environ["SLUG"], "adapter": os.environ["ADAPTER"]}))' > "$ADVISOR_CONTEXT"
     printf '0\n' > "$ADVISOR_COUNTER"
 
-    MODEL_PID_FILE="$RUN_OUTPUT_DIR/$SLUG-$ref.pid"
-    rm -f "$MODEL_PID_FILE"
-    (
-      if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
-      export PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}"
-      export AGENT_NAME AGENT_ID AGENT_BOARD_CLI="$BOARD_CLI"
-      export AGENT_QA_MOVE="$([ "$AGENT_KIND" = "qa" ] && printf yes || printf no)"
-      export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
-      export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
-      export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
-      export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
-      export AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER"
-      export AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI"
-      exec setsid --wait bash -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' \
-        bash "$MODEL_PID_FILE" "${MODEL_ARGV[@]}" "$PROMPT"
-    ) >"$RUN_OUTPUT" 2>"$ERRFILE" &
-    model_wait_pid=$!
-    for _ in $(seq 1 100); do
-      [ ! -s "$MODEL_PID_FILE" ] || break
-      kill -0 "$model_wait_pid" 2>/dev/null || break
-      sleep 0.05
-    done
-    if [ -s "$MODEL_PID_FILE" ]; then
-      read -r model_process_group < "$MODEL_PID_FILE"
-    else
-      model_process_group="$model_wait_pid"
+    quota_count=0
+    route_count=0
+    available_count=0
+    rc=127
+    while IFS=$'\t' read -r route_provider route_command; do
+      [ -n "$route_command" ] || continue
+      route_count=$((route_count + 1))
+      provider_err="$ERRFILE.provider-$route_count"
+      : > "$provider_err"
+      if ! core_command_available "$route_command"; then
+        printf 'provider %s is configured but its command is not installed; skipping it\n' "$route_provider" >> "$provider_err"
+        cat "$provider_err" >> "$ERRFILE"
+        if declare -F adapter_run_activity >/dev/null 2>&1; then
+          adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "skipped unavailable provider $route_provider"
+        fi
+        continue
+      fi
+      available_count=$((available_count + 1))
+      set_run_model_context "$route_command" "$RUN_MODEL_RUNG" "$route_provider"
+      log "provider route for $ref: $route_provider ($route_command)"
+      if [ "$route_count" -gt 1 ] && declare -F adapter_run_activity >/dev/null 2>&1; then
+        adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "resumed $ref with provider $route_provider"
+      fi
+      read -r -a MODEL_ARGV <<< "$route_command"
+      if [ "$GRAFT" = "on" ] && [ "$(basename "${MODEL_ARGV[0]}")" = "claude" ]; then
+        MODEL_ARGV=("${MODEL_ARGV[0]}" --mcp-config "$GRAFT_MCP_CONFIG" "${MODEL_ARGV[@]:1}")
+      fi
+      MODEL_PID_FILE="$RUN_OUTPUT_DIR/$SLUG-$ref-$route_count.pid"
+      rm -f "$MODEL_PID_FILE"
+      (
+        if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
+        export PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}"
+        export AGENT_NAME AGENT_ID AGENT_BOARD_CLI="$BOARD_CLI"
+        export AGENT_QA_MOVE="$([ "$AGENT_KIND" = "qa" ] && printf yes || printf no)"
+        export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
+        export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
+        export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
+        export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
+        export AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER"
+        export AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI"
+        exec setsid --wait bash -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' \
+          bash "$MODEL_PID_FILE" "${MODEL_ARGV[@]}" "$PROMPT"
+      ) >>"$RUN_OUTPUT" 2>"$provider_err" &
+      model_wait_pid=$!
+      for _ in $(seq 1 100); do
+        [ ! -s "$MODEL_PID_FILE" ] || break
+        kill -0 "$model_wait_pid" 2>/dev/null || break
+        sleep 0.05
+      done
+      if [ -s "$MODEL_PID_FILE" ]; then
+        read -r model_process_group < "$MODEL_PID_FILE"
+      else
+        model_process_group="$model_wait_pid"
+      fi
+      watch_model_process "$model_wait_pid" "$model_process_group" "$run_record" \
+        "$RUN_OUTPUT" "$provider_err" "$ref"
+      rc=$?
+      rm -f "$MODEL_PID_FILE"
+      cat "$provider_err" >> "$ERRFILE"
+      if [ "$rc" -eq 0 ]; then
+        break
+      fi
+      if ! core_provider_quota_error "$provider_err"; then
+        break
+      fi
+      quota_count=$((quota_count + 1))
+      reset="$(core_provider_quota_reset "$provider_err")"
+      if [ -n "$reset" ]; then
+        IFS=$'\t' read -r reset_epoch reset_at <<< "$reset"
+        if [ -z "$quota_reset_epoch" ] || [ "$reset_epoch" -lt "$quota_reset_epoch" ]; then
+          quota_reset_epoch="$reset_epoch"
+          quota_reset_at="$reset_at"
+        fi
+      fi
+      log "provider quota exhausted for $ref: $route_provider${reset:+ reset=$reset_at}"
+      if declare -F adapter_run_activity >/dev/null 2>&1; then
+        adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "provider $route_provider quota exhausted"
+      fi
+    done < <(provider_routes "$RUN_MODEL_CLI")
+    if [ "$rc" -ne 0 ] && [ "$quota_count" -gt 0 ] && [ "$quota_count" -eq "$available_count" ]; then
+      quota_exhausted=yes
     fi
-    watch_model_process "$model_wait_pid" "$model_process_group" "$run_record" \
-      "$RUN_OUTPUT" "$ERRFILE" "$ref"
-    rc=$?
-    rm -f "$MODEL_PID_FILE"
+    rm -f "$ERRFILE".provider-*
   fi
   set -e
   if [ -n "$WATCHDOG_REASON" ]; then printf '%s\n' "$WATCHDOG_REASON" >> "$ERRFILE"; fi
@@ -3255,7 +3430,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     write_run_record "$run_record" FAILED "$origin_section" "$ref" "$task_id" "$board" \
       "$run_started_at" "$RUN_OUTPUT" "$WATCHDOG_REASON"
   else
-  if [ "$AGENT_KIND" = "qa" ] && [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
+  if [ "$quota_exhausted" = "no" ] && [ "$AGENT_KIND" = "qa" ] && [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
     qa_posted_ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
     if [ -z "$qa_posted_ids" ]; then
       printf 'QA run ended without one verdict comment\n' >> "$ERRFILE"
@@ -3310,7 +3485,16 @@ if rows:
       run_verdict="$(run_verdict_marker "$ref" "$task_id" "$board")"
     fi
     run_record_status="completed"
-    if [ "$rc" -ne 0 ]; then
+    if [ "$quota_exhausted" = "yes" ]; then
+      run_record_status="waiting-provider-reset"
+      if [ -n "$quota_reset_at" ]; then
+        quota_wait_comment="<p><strong>Decision: Every available provider is out of quota, so this run is waiting for the earliest reset at $quota_reset_at.</strong></p><p>Next: The runner can continue after that reset.</p>"
+      else
+        quota_wait_comment="<p><strong>Decision: Every available provider is out of quota, so this run is waiting for the earliest reset.</strong></p><p>No provider reported a reset time.</p><p>Next: The runner can continue when a subscription resets.</p>"
+      fi
+      post_ticket_comment "$ref" text "$quota_wait_comment" || log "provider reset wait comment failed for $ref"
+      move_ticket_or_report "$ref" "$origin_section" "$board" "provider reset wait" || true
+    elif [ "$rc" -ne 0 ]; then
       run_record_status="blocked"
       move_ticket_or_report "$ref" "$QA_BLOCKED_SECTION" "$board" "blocked run" || true
     elif [ "$opened_this_run" = "yes" ] || [ "$is_pr_fix" = "yes" ]; then
@@ -3352,7 +3536,24 @@ if rows:
   # no "run done" line, no seen-key write, so the next tick saw the same
   # newest-comment key as untouched and reprocessed a ticket this agent had
   # already answered, over and over until the attempt budget stopped it.
-  if [ "$rc" -ne 0 ]; then
+  if [ "$quota_exhausted" = "yes" ]; then
+    printf '%s\n' "$key" >> "$SEEN"
+    if [ -s "$POSTED" ]; then
+      while read -r posted_ref posted_id; do
+        [ "$posted_ref" = "$ref" ] || continue
+        [ -n "$posted_id" ] || continue
+        printf '%s:%s\n' "$task_id" "$posted_id" >> "$SEEN"
+      done < "$POSTED"
+    fi
+    write_provider_wait_status "$ref" "$quota_reset_at"
+    log "run WAITING $ref: all available providers are out of quota${quota_reset_at:+; earliest reset $quota_reset_at}"
+    AGENT_RUN_OUTCOME="waiting"
+    export AGENT_RUN_OUTCOME
+    if declare -F adapter_run_activity >/dev/null 2>&1; then
+      adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "waiting for the earliest provider reset${quota_reset_at:+ at $quota_reset_at}"
+      adapter_run_stop "$TOKEN_FILE" "$runtime_run_id" "$LOG" waiting
+    fi
+  elif [ "$rc" -ne 0 ]; then
     if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
       printf '%s %s %s failed\n' "$task_id" "$(date +%s)" "$RUN_MODEL_RUNG" >> "$ATTEMPTS"
     fi

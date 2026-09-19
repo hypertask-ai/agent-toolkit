@@ -105,17 +105,19 @@ fi
 printf 'token\n' > "$TMP/token"
 RUN_OPEN_PAYLOAD="$TMP/run-open-payload"
 _ht_run_post() { printf '%s' "$3" > "$RUN_OPEN_PAYLOAD"; printf '404\n{}'; }
-run_id="$(adapter_run_open "$TMP/token" task-1 "$TMP/run.log" on)"
-AGENT_RUN_AGENT=dev-1 AGENT_RUN_MODEL=gpt-test AGENT_RUN_STARTED_AT=2026-01-01T00:00:00Z \
+run_id="$(AGENT_RUN_AGENT=dev-1 AGENT_RUN_PROVIDER=codex AGENT_RUN_MODEL=gpt-test \
+  AGENT_RUN_STARTED_AT=2026-01-01T00:00:00Z AGENT_RUN_LOG_LINK=file:///tmp/run.log \
+  adapter_run_open "$TMP/token" task-1 "$TMP/run.log" on)"
+AGENT_RUN_AGENT=dev-1 AGENT_RUN_PROVIDER=codex AGENT_RUN_MODEL=gpt-test AGENT_RUN_STARTED_AT=2026-01-01T00:00:00Z \
 AGENT_RUN_STARTED_EPOCH="$(date +%s)" AGENT_RUN_OUTCOME=running \
 AGENT_RUN_LOG_LINK=file:///tmp/run.log \
   adapter_run_activity "$TMP/token" "$run_id" "$TMP/run.log" action 'started TEST-1'
 adapter_run_stop "$TMP/token" "$run_id" "$TMP/run.log" completed
 if [ "$run_id" = local ] \
    && grep -qF 'opened local-only run for task task-1 graft=on' "$TMP/run.log" \
-   && grep -q 'action started TEST-1 agent=dev-1 model=gpt-test started=2026-01-01T00:00:00Z duration=[0-9]\+s outcome=running log=file:///tmp/run.log' "$TMP/run.log" \
+   && grep -q 'action started TEST-1 agent=dev-1 provider=codex model=gpt-test started=2026-01-01T00:00:00Z duration=[0-9]\+s outcome=running log=file:///tmp/run.log' "$TMP/run.log" \
    && grep -qF 'closed run local with status completed' "$TMP/run.log" \
-   && RUN_OPEN_PAYLOAD="$RUN_OPEN_PAYLOAD" python3 -c 'import json,os; assert json.load(open(os.environ["RUN_OPEN_PAYLOAD"])) == {"taskId":"task-1","source":"runtime","graft":"on"}'; then
+   && RUN_OPEN_PAYLOAD="$RUN_OPEN_PAYLOAD" python3 -c 'import json,os; assert json.load(open(os.environ["RUN_OPEN_PAYLOAD"])) == {"taskId":"task-1","source":"runtime","graft":"on","agent":"dev-1","provider":"codex","model":"gpt-test","startedAt":"2026-01-01T00:00:00Z","logUrl":"file:///tmp/run.log"}'; then
   ok run-api-404-local-only 'a missing runs route keeps graft, open, activity, and close in the local record'
 else
   bad run-api-404-local-only "id=$run_id log=$(cat "$TMP/run.log")"
@@ -137,7 +139,7 @@ _ht_run_post() {
   printf '201\n{}'
 }
 technical='<p>Question: Should runThing() in src/app.ts ship?</p>'
-AGENT_RUN_AGENT=dev-1 AGENT_RUN_MODEL=gpt-test AGENT_RUN_STARTED_AT=2026-01-01T00:00:00Z \
+AGENT_RUN_AGENT=dev-1 AGENT_RUN_PROVIDER=cursor AGENT_RUN_MODEL=gpt-test AGENT_RUN_STARTED_AT=2026-01-01T00:00:00Z \
 AGENT_RUN_STARTED_EPOCH="$(date +%s)" AGENT_RUN_OUTCOME=running \
 AGENT_RUN_LOG_LINK=https://app.hypertask.ai/agents/runs/run-1 \
 QUIET=on COMMENT_REWRITE_CLI="$TMP/rewrite-model" \
@@ -151,7 +153,7 @@ with open(os.environ["PAYLOAD"], encoding="utf-8") as handle:
     payload = json.load(handle)
 assert payload["type"] == "action"
 assert payload["text"] == "Question held: did not pass the plain-language shape check"
-assert payload["agent"] == "dev-1" and payload["model"] == "gpt-test"
+assert payload["agent"] == "dev-1" and payload["provider"] == "cursor" and payload["model"] == "gpt-test"
 assert payload["startedAt"] == "2026-01-01T00:00:00Z"
 assert payload["durationSeconds"] >= 0 and payload["outcome"] == "running"
 assert payload["logUrl"] == "https://app.hypertask.ai/agents/runs/run-1"
@@ -164,7 +166,7 @@ fi
 
 STOP_PAYLOAD="$TMP/stop-payload"
 RUN_PAYLOAD="$STOP_PAYLOAD"
-AGENT_RUN_AGENT=dev-1 AGENT_RUN_MODEL=gpt-test AGENT_RUN_STARTED_AT=2026-01-01T00:00:00Z \
+AGENT_RUN_AGENT=dev-1 AGENT_RUN_PROVIDER=cursor AGENT_RUN_MODEL=gpt-test AGENT_RUN_STARTED_AT=2026-01-01T00:00:00Z \
 AGENT_RUN_STARTED_EPOCH="$(date +%s)" AGENT_RUN_OUTCOME=failed \
 AGENT_RUN_LOG_LINK=https://app.hypertask.ai/agents/runs/run-1 \
   adapter_run_stop "$TMP/token" run-1 "$TMP/stop.log" failed
@@ -172,7 +174,7 @@ if STOP_PAYLOAD="$STOP_PAYLOAD" python3 - <<'PYEOF'
 import json, os
 payload = json.load(open(os.environ["STOP_PAYLOAD"]))
 assert payload["status"] == payload["outcome"] == "failed"
-assert payload["agent"] == "dev-1" and payload["model"] == "gpt-test"
+assert payload["agent"] == "dev-1" and payload["provider"] == "cursor" and payload["model"] == "gpt-test"
 assert payload["startedAt"] == "2026-01-01T00:00:00Z"
 assert payload["durationSeconds"] >= 0
 assert payload["logUrl"].endswith("/run-1")
