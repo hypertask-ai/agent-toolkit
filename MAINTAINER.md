@@ -14,8 +14,9 @@ until you do it.
   every 60 seconds in poll mode. Events mode uses the same runner every five
   minutes as a safety net, while `agent-events.service` starts exact-ticket ticks immediately.
 - **Reconciler timer** — `agent-board-reconcile.timer` checks every five minutes.
-  It moves tickets with linked merged pull requests to Done and restores tickets
-  left in In Progress after a run stops without a pull request.
+  It moves tickets with linked merged pull requests or matching direct base-branch
+  commits to Done and restores tickets left in In Progress after a run stops
+  without a pull request.
 - **Update timer** — `agent-template-update.timer` checks every five minutes.
   It fetches the configured release and stops when `VERSION` has not changed.
   A changed version must pass its staged evals before installation. A passing
@@ -112,7 +113,9 @@ the slug and branch are discovered from each checkout's `origin` and
 whose current origin differs from its allowlist row, and build and merge
 refuse anything outside the file. The shipped file contains the six approved
 repositories and is installed only when the host has no allowlist, so host
-policy is never overwritten by an update.
+policy is never overwritten by an update. The reconciler fetches each listed
+base branch without changing the checkout and keeps a per-repository commit
+cursor under its state directory; its first pass reads the previous 48 hours.
 
 A build writes its guarded prompt and output under
 `~/.local/state/agent-board-poll/<slug>-builds/`, launches a memory-capped
