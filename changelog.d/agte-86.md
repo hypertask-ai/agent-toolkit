@@ -1,0 +1,1 @@
+- AGTE-86 makes each agent poll its pending room feed once, routes history and replies through each message's room, and records the board CLI reason when an acknowledgement cannot be posted.

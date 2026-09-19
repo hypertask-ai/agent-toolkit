@@ -409,15 +409,16 @@ with a chat lane wired.
 ## Chat lane
 
 `agent-chat.service` is shared by every agent on the host whose conf says
-`CHAT="on"`. It polls the agent-authenticated private inbox and each configured
-board's agent room every three seconds by default, so it works behind
-Cloudflare and without a public port. Agents answer a room turn only when named
+`CHAT="on"`. It polls the agent-authenticated private inbox and global pending
+room feed every three seconds by default, so it works behind Cloudflare and
+without a public port. Each pending turn's room id selects the transcript and
+reply destination. Agents answer a room turn only when named
 in its text or target metadata. Product Bot is chief of staff and can wake
 another bot by naming it. Unaddressed bots stay silent.
 
 A room answer reads the shared transcript and is posted with its related ticket
 so the app writes the same turn as a run note. After three bot-to-bot turns on
-one topic, the next answer is a `Handoff:` to that ticket. The shared per-board
+one topic, the next answer is a `Handoff:` to that ticket. The shared per-room
 UTC-day count is in `~/.local/state/agent-chat/room-budget.json`; configure its
 limit with `ROOM_DAILY_TURN_BUDGET` (default 20, 0 disables room replies).
 
@@ -459,7 +460,8 @@ Once `<slug>.lock` no longer names that ticket, the next tick asks `CHAT_CLI`
 (falling back to `MODEL_CLI`) to answer from the ticket and the run log alone,
 then runs `BOARD_CLI comment update` on the acknowledgement's own id, never a
 new comment. A provider or board-write failure is logged and retried on the
-next tick; the acknowledgement stays visible either way.
+next tick. Board-write failures include the CLI error text, and the
+acknowledgement stays visible either way.
 
 ## Agent page
 

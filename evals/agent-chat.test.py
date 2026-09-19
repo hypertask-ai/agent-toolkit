@@ -10,6 +10,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 module = runpy.run_path(str(root / "scripts/agent-chat"))
 Agent = module["Agent"]
+AgentApi = module["AgentApi"]
 ChatDaemon = module["ChatDaemon"]
 prompt_for = module["prompt_for"]
 ERROR_REPLY = module["ERROR_REPLY"]
@@ -56,6 +57,21 @@ def agent(slug):
         api_url="https://example.invalid/api",
         webhook_secret_file=None,
     )
+
+
+room_id = "18c7b6ec-ff09-4899-82f7-88b765203397"
+route_calls = []
+room_api = AgentApi(agent("routes"))
+room_api.request = lambda method, path, body=None: route_calls.append((method, path, body)) or {"messages": []}
+room_api.room_pending()
+room_api.room_history(room_id)
+room_api.room_reply(room_id, "message-1", "reply", "AGTE-86", "topic-1")
+assert [call[:2] for call in route_calls] == [
+    ("GET", "/mcp/chat/rooms/pending"),
+    ("GET", f"/mcp/chat/rooms/{room_id}/messages"),
+    ("POST", f"/mcp/chat/rooms/{room_id}/messages"),
+]
+print("PASS agent-room-global-pending-and-message-room-routes")
 
 
 message = {"userName": "Valentin", "text": "stop dev 1"}
@@ -145,13 +161,15 @@ with tempfile.TemporaryDirectory() as temporary:
 class FakeRoomApi:
     def __init__(self, history):
         self.history_rows = history
+        self.history_requests = []
         self.replies = []
 
-    def room_history(self, board_id):
+    def room_history(self, room_id):
+        self.history_requests.append(room_id)
         return self.history_rows
 
-    def room_reply(self, board_id, message_id, text, ticket, topic_id):
-        self.replies.append((board_id, message_id, text, ticket, topic_id))
+    def room_reply(self, room_id, message_id, text, ticket, topic_id):
+        self.replies.append((room_id, message_id, text, ticket, topic_id))
 
     def ticket(self, _reference):
         return {}
@@ -167,6 +185,7 @@ with tempfile.TemporaryDirectory() as temporary:
     current = replace(agent("dev-one"), name="Dev One", board_ids=(5500,), room_daily_turn_budget=5)
     addressed = {
         "id": "room-addressed",
+        "roomId": "18c7b6ec-ff09-4899-82f7-88b765203397",
         "topicId": "topic-1",
         "ticketNumber": "AGTE-22",
         "text": "Dev One, can you check AGTE-22?",
@@ -174,16 +193,53 @@ with tempfile.TemporaryDirectory() as temporary:
         "authorAgentId": "product-bot-id",
     }
     api = FakeRoomApi([addressed])
-    daemon.handle_room(current, 5500, addressed, api)
-    daemon.handle_room(current, 5500, addressed, api)
+    daemon.handle_room(current, addressed, api)
+    daemon.handle_room(current, addressed, api)
     assert room_calls == ["dev-one"]
-    assert api.replies == [(5500, "room-addressed", "I will check it.", "AGTE-22", "topic-1")]
+    assert api.history_requests == [addressed["roomId"]]
+    assert api.replies == [(
+        addressed["roomId"], "room-addressed", "I will check it.", "AGTE-22", "topic-1",
+    )]
 
     unaddressed = dict(addressed, id="room-unaddressed", text="QA One, can you check AGTE-22?")
-    daemon.handle_room(current, 5500, unaddressed, api)
+    daemon.handle_room(current, unaddressed, api)
     assert room_calls == ["dev-one"]
     assert len(api.replies) == 1
     print("PASS agent-room-addressed-once-unaddressed-silent")
+
+
+class FakeRoomPollApi:
+    calls = 0
+
+    def __init__(self, _agent):
+        pass
+
+    def pending(self):
+        return []
+
+    def room_pending(self):
+        self.__class__.calls += 1
+        return [{"id": "global-room-message", "roomId": room_id}]
+
+
+with tempfile.TemporaryDirectory() as temporary:
+    temporary = Path(temporary)
+    daemon = ChatDaemon(temporary / "conf", temporary / "state")
+    current = replace(agent("multi-board"), board_ids=(15, 5500))
+    submissions = []
+    daemon.agents = lambda: [current]
+    daemon.submit_room = lambda selected, pending: submissions.append((selected.slug, pending))
+    poll_globals = ChatDaemon.poll_once.__globals__
+    original_api = poll_globals["AgentApi"]
+    poll_globals["AgentApi"] = FakeRoomPollApi
+    try:
+        daemon.poll_once()
+    finally:
+        poll_globals["AgentApi"] = original_api
+    assert FakeRoomPollApi.calls == 1
+    assert submissions == [("multi-board", {"id": "global-room-message", "roomId": room_id})]
+    print("PASS agent-room-global-pending-polled-once")
+
 
 with tempfile.TemporaryDirectory() as temporary:
     temporary = Path(temporary)
@@ -191,6 +247,7 @@ with tempfile.TemporaryDirectory() as temporary:
     current = replace(agent("dev-one"), name="Dev One", board_ids=(5500,), room_daily_turn_budget=5)
     fourth = {
         "id": "turn-4",
+        "roomId": "30da584e-3fec-487e-9b58-6a94a8b21db6",
         "topicId": "topic-limit",
         "ticketNumber": "AGTE-22",
         "text": "Dev One, one more thought on AGTE-22?",
@@ -202,7 +259,7 @@ with tempfile.TemporaryDirectory() as temporary:
         for number in range(1, 4)
     ]
     api = FakeRoomApi(history)
-    daemon.handle_room(current, 5500, fourth, api)
+    daemon.handle_room(current, fourth, api)
     assert len(api.replies) == 1
     assert api.replies[0][2].startswith("Handoff:")
     assert "AGTE-22" in api.replies[0][2]
