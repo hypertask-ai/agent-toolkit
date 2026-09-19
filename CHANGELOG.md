@@ -1,8 +1,3 @@
-## 3.55.1 - 2026-09-19
-
-- AGTE-121 closes non-terminal tickets when any merged pull request title starts with the ticket reference, even when the ticket has no comments or the pull request was opened by a person.
-- Merged pull request completion leaves live runs alone, clears assignees, and records one shipping comment with the pull request link.
-
 ## 3.55.0 - 2026-09-18
 
 - AGTE-38 makes ordinary poll ticks page task lists, rank only tickets changed since the prior tick, cap ranking at 60 seconds, and run no more than one full safety scan per hour.
