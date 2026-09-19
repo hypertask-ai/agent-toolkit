@@ -1,1 +1,2 @@
 - AGTE-121 closes and unassigns tickets shipped by ticket-prefixed commits on allowlisted base branches, links the commit once, and prevents completed tickets from being picked up again.
+- AGTE-121 also closes zero-comment tickets from merged pull request titles, regardless of who opened the pull request, while preserving live runs and terminal tickets.

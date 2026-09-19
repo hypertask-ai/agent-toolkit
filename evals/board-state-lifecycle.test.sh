@@ -24,11 +24,22 @@ if [ "${1:-} ${2:-}" = "pr view" ]; then
   exit 0
 fi
 if [ "${1:-} ${2:-}" = "pr list" ]; then
-  if [ -s "$MOCK_PR_OPEN" ]; then
-    printf '[{"number":9,"state":"OPEN","url":"https://github.com/example/repo/pull/9","title":"TEST-1: change","body":"","headRefName":"agent/dev-TEST-1","createdAt":"2026-01-01T00:00:00Z","author":{"login":"bot"}}]\n'
-  else
-    printf '[]\n'
-  fi
+  case " $* " in
+    *' --state merged '*)
+      if [ -n "${MOCK_MERGED_PR_TITLE:-}" ]; then
+        printf '[{"number":999,"url":"https://github.com/example/repo/pull/999","title":"%s"}]\n' "$MOCK_MERGED_PR_TITLE"
+      else
+        printf '[]\n'
+      fi
+      ;;
+    *)
+      if [ -s "$MOCK_PR_OPEN" ]; then
+        printf '[{"number":9,"state":"OPEN","url":"https://github.com/example/repo/pull/9","title":"TEST-1: change","body":"","headRefName":"agent/dev-TEST-1","createdAt":"2026-01-01T00:00:00Z","author":{"login":"bot"}}]\n'
+      else
+        printf '[]\n'
+      fi
+      ;;
+  esac
   exit 0
 fi
 printf '[]\n'
@@ -197,6 +208,53 @@ if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]
   echo 'PASS merged-pr-reconciled               one pass moves a Review ticket with a linked merged PR to Done'
 else
   echo "FAIL merged-pr-reconciled               tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
+fi
+
+reset_case
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-999","ticketNumber":"AGTE-999","projectId":15,"section":"Review","title":"Change it","description":"Opened and merged by a human","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+env "${run_env[@]}" MOCK_MERGED_PR_TITLE='AGTE-999: shipped by a human' "$ROOT/scripts/agent-board-reconcile"
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+   && grep -qxF 'unassign AGTE-999 agent-dev' "$TMP/board.log" \
+   && [ "$(grep -cF 'comment AGTE-999 Shipped by merged pull request https://github.com/example/repo/pull/999, moved to Done.' "$TMP/board.log")" -eq 1 ]; then
+  echo 'PASS title-matched-merged-pr            a zero-comment ticket closes from a merged PR title and records shipping once'
+else
+  echo "FAIL title-matched-merged-pr            tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
+fi
+
+reset_case
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-999","ticketNumber":"AGTE-999","projectId":15,"section":"Archived","title":"Change it","description":"Already archived","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+env "${run_env[@]}" MOCK_MERGED_PR_TITLE='AGTE-999: shipped by a human' "$ROOT/scripts/agent-board-reconcile"
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Archived ] \
+   && ! grep -q '^move AGTE-999 ' "$TMP/board.log" \
+   && ! grep -q '^unassign AGTE-999 ' "$TMP/board.log" \
+   && ! grep -q '^comment AGTE-999 ' "$TMP/board.log"; then
+  echo 'PASS merged-pr-terminal-skip           a terminal ticket stays untouched despite a matching merged PR'
+else
+  echo "FAIL merged-pr-terminal-skip           tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
+fi
+
+reset_case
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-999","ticketNumber":"AGTE-999","projectId":15,"section":"In Progress","title":"Change it","description":"A run is still active","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+bash -c 'exec -a agent-board-poll sleep 60' &
+live_pid=$!
+mkdir -p "$TMP/state/agent-board-poll/run-records"
+printf '{"status":"running","pid":%s,"ref":"AGTE-999","board":"15","origin_section":"Review"}\n' "$live_pid" > "$TMP/state/agent-board-poll/run-records/dev-AGTE-999.json"
+env "${run_env[@]}" MOCK_MERGED_PR_TITLE='AGTE-999: shipped by a human' "$ROOT/scripts/agent-board-reconcile"
+kill "$live_pid" 2>/dev/null || true
+wait "$live_pid" 2>/dev/null || true
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = 'In Progress' ] \
+   && ! grep -q '^move AGTE-999 Done$' "$TMP/board.log" \
+   && ! grep -q '^unassign AGTE-999 ' "$TMP/board.log" \
+   && ! grep -q '^comment AGTE-999 ' "$TMP/board.log"; then
+  echo 'PASS merged-pr-live-run-skip           a live run prevents merged-PR completion'
+else
+  echo "FAIL merged-pr-live-run-skip           tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
 fi
 
 reset_case
