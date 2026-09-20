@@ -16,6 +16,10 @@ set -euo pipefail
 [ -z "${BOARD_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$BOARD_CALL_LOG"
 if [ "${1:-}" = "--token" ] && [ "$#" -ge 2 ]; then shift 2; fi
 [ -z "${ACTION_LOG:-}" ] || printf 'board %s\n' "$*" >> "$ACTION_LOG"
+if [ "${1:-} ${2:-}" = "task create" ]; then
+  printf '{"task":{"ticketNumber":"AGTE-999"}}\n'
+  exit 0
+fi
 if [ "${1:-}" = "--json" ] && [ "${2:-} ${3:-}" = "task get" ]; then
   printf '{"task":{"ticketNumber":"%s","section":"Bugs","assignees":[{"agent":{"id":"agent-1"}}]}}\n' "${4:-HTPR-1}"
 fi
@@ -40,7 +44,12 @@ cat > "$TMP/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 [ -z "${MODEL_OPEN_MARKER:-}" ] || touch "$MODEL_OPEN_MARKER"
 [ -z "${WORKER_LOG:-}" ] || printf '%s\n' "${*: -1}" >> "$WORKER_LOG"
-exit 0
+if [ "${WORKER_COMMIT:-no}" = yes ]; then
+  printf 'worker change\n' >> app
+  git add app
+  git -c user.name=Eval -c user.email=eval@example.test commit -qm 'worker fix'
+fi
+exit "${WORKER_EXIT:-0}"
 EOF
 cat > "$TMP/bin/reviewer" <<'EOF'
 #!/usr/bin/env bash
@@ -52,8 +61,15 @@ cat > "$TMP/bin/gh" <<'EOF'
 set -euo pipefail
 scenario="${PR_TEST_SCENARIO:-pending}"
 [ -z "${GH_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$GH_CALL_LOG"
-if [ "$1 $2" = "pr comment" ] || [ "$1 $2" = "pr close" ]; then
+if [ "$1 $2" = "pr comment" ] || [ "$1 $2" = "pr close" ] \
+   || [ "$1 $2" = "run rerun" ]; then
   [ -z "${ACTION_LOG:-}" ] || printf 'gh %s\n' "$*" >> "$ACTION_LOG"
+  exit 0
+fi
+if [ "$1" = api ] && printf ' %s ' "$*" | grep -q ' -X POST ' \
+   && printf ' %s ' "$*" | grep -q ' labels\[\]=intentional-revert '; then
+  [ -z "${ACTION_LOG:-}" ] || printf 'gh %s\n' "$*" >> "$ACTION_LOG"
+  printf '[]\n'
   exit 0
 fi
 if [ "$1 $2" = "pr diff" ]; then
@@ -112,6 +128,10 @@ JSON
     cat <<JSON
 [{"number":11,"state":"OPEN","url":"https://github.test/pull/11","title":"HTPR-11 fix","body":"","headRefName":"legacy/fix-11","author":{"login":"dev-one"},"createdAt":"2026-01-01T00:00:00Z"}]
 JSON
+  elif [ "$scenario" = "slug-prefix" ]; then
+    cat <<JSON
+[{"number":12,"state":"OPEN","url":"https://github.test/pull/12","title":"HTPR-12 fix","body":"","headRefName":"dev-1/htpr-12-fix","author":{"login":"shared-bot"},"createdAt":"2026-01-01T00:00:00Z"}]
+JSON
   elif [ "$scenario" = "record-open" ]; then
     printf '[]\n'
   else
@@ -125,6 +145,12 @@ JSON
 fi
 if [ "$1 $2" = "pr view" ]; then
   number="$3"
+  if printf ' %s ' "$*" | grep -q ' baseRefName,headRefName '; then
+    base=production
+    [ "$scenario" != "prep-fail" ] || base=missing-production
+    printf '{"baseRefName":"%s","headRefName":"agent/dev-1-htpr-1"}\n' "$base"
+    exit 0
+  fi
   if [ "$scenario" = "deployed" ] || [ "$scenario" = "undeployed" ] || [ "$scenario" = "fallback" ] || [ "$scenario" = "base-missing" ] || [ "$scenario" = "qa-fail" ] || [ "$scenario" = "qa-passed" ]; then
     printf '{"state":"MERGED","baseRefName":"production","mergedAt":"2026-01-02T00:00:00Z","mergeCommit":{"oid":"merge%s"}}\n' "$number"
     exit 0
@@ -137,15 +163,23 @@ if [ "$1 $2" = "pr view" ]; then
     cat "$PR_FIXTURE"
     exit 0
   fi
+  if printf ' %s ' "$*" | grep -q ' baseRefName,headRefName '; then
+    base=production
+    [ "$scenario" != "prep-fail" ] || base=missing-production
+    printf '{"baseRefName":"%s","headRefName":"agent/dev-1-htpr-1"}\n' "$base"
+    exit 0
+  fi
   checks='[{"name":"ci-tests","status":"IN_PROGRESS","conclusion":"","detailsUrl":"https://github.test/actions/runs/77/job/1"}]'
   reviews='[]'
   comments='[]'
   if [ "$scenario" = "green" ] || [ "$scenario" = "two-green" ] \
      || { [ "$scenario" = "stale-red-green" ] && [ "$number" = "10" ]; }; then
     checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.test/actions/runs/77/job/1"}]'
-  elif [ "$scenario" = "red" ] || [ "$scenario" = "stale-red" ] || [ "$scenario" = "stale-red-green" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "qa-claim" ] || [ "$scenario" = "orphan" ] || [ "$scenario" = "author-owned" ] || [ "$scenario" = "custom-prefix" ]; then
+  elif [ "$scenario" = "red" ] || [ "$scenario" = "stale-red" ] || [ "$scenario" = "stale-red-green" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "qa-claim" ] || [ "$scenario" = "orphan" ] || [ "$scenario" = "author-owned" ] || [ "$scenario" = "custom-prefix" ] || [ "$scenario" = "slug-prefix" ] || [ "$scenario" = "prep-fail" ]; then
     checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/1"},{"name":"revert-guard","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/2"},{"name":"pr-title","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/3"}]'
     comments='[{"author":{"login":"claude-review"},"body":"CONCERNS: preserve the existing authorization check."}]'
+  elif [ "$scenario" = "revert-only" ]; then
+    checks='[{"name":"revert-guard","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/88/job/1"}]'
   fi
   printf '{"state":"OPEN","url":"https://github.test/pull/%s","title":"HTPR-%s fix","body":"","headRefName":"agent/dev-1-htpr-%s","headRefOid":"head%s","baseRefName":"production","createdAt":"2026-01-01T00:00:00Z","statusCheckRollup":%s,"reviews":%s,"comments":%s}\n' "$number" "$number" "$number" "$number" "$checks" "$reviews" "$comments"
   exit 0
@@ -153,6 +187,7 @@ fi
 if [ "$1" = "api" ]; then
   endpoint="$2"
   case "$endpoint" in
+    user) printf 'dev-one\n' ;;
     */pulls/*/comments*) printf '[]\n' ;;
     */compare/*)
       if [ "$scenario" = "base-missing" ]; then
@@ -191,13 +226,17 @@ elif [[ "$url" == *'/mcp/tasks?'* ]]; then
   [ "${BOARD_TEST_SCENARIO:-}" != "no-emergency" ] || emergency_labels='[]'
   ticket_section='Bugs'
   [ "${PR_TEST_SCENARIO:-}" != "qa-passed" ] || ticket_section='Done'
+  [ "${BOARD_TEST_SCENARIO:-}" != "blocked" ] || ticket_section='Agent Blocked (Infra)'
   task1_assignees='[{"agent":{"id":"agent-1"}}]'
+  [ "${BOARD_TEST_SCENARIO:-}" != "human" ] || task1_assignees='[{"agent":{"id":"agent-1"}},{"id":"6","displayName":"Owner"}]'
+  task1_labels='[]'
+  [ "${BOARD_TEST_SCENARIO:-}" != "owner-hold" ] || task1_labels='[{"name":"valentin"}]'
   if [ -n "${UNASSIGNED_MARKER:-}" ] && [ -e "$UNASSIGNED_MARKER" ]; then
     ticket_section='Review'
     task1_assignees='[]'
   fi
   cat <<JSON
-{"tasks":[{"id":"task-1","ticketNumber":"HTPR-1","projectId":"15","section":"$ticket_section","title":"PR ticket","description":"fix it","assignees":$task1_assignees,"labels":[],"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0},{"id":"task-5","ticketNumber":"HTPR-5","section":"Bugs","title":"Legacy branch ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
+{"tasks":[{"id":"task-1","ticketNumber":"HTPR-1","projectId":"15","section":"$ticket_section","title":"PR ticket","description":"fix it","assignees":$task1_assignees,"labels":$task1_labels,"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0},{"id":"task-5","ticketNumber":"HTPR-5","section":"Bugs","title":"Legacy branch ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
 JSON
 elif [[ "$url" == *'task_id=task-1'* ]] && [ "${PR_TEST_SCENARIO:-}" = "qa-fail" ]; then
   printf '{"comments":[{"id":"qa-77","agent":{"id":"agent-qa"},"createdAt":"2026-01-03T00:00:00Z","text":"<p>Handoff: Dev One, checkout fails after deploy.</p>"}]}\n'
@@ -215,17 +254,23 @@ git init --bare -q "$TMP/remote.git"
 git init -q "$TMP/seed"
 git -C "$TMP/seed" config user.name Eval
 git -C "$TMP/seed" config user.email eval@example.test
-printf 'base\n' > "$TMP/seed/app"
+printf 'base one\nbase two\nbase three\nbase four\n' > "$TMP/seed/app"
 git -C "$TMP/seed" add app
 git -C "$TMP/seed" commit -qm base
 git -C "$TMP/seed" branch -M production
 git -C "$TMP/seed" remote add origin "$TMP/remote.git"
 git -C "$TMP/seed" push -q -u origin production
 git -C "$TMP/seed" checkout -qb agent/dev-1-htpr-1
+printf 'base four\n' > "$TMP/seed/app"
+git -C "$TMP/seed" add app
+git -C "$TMP/seed" commit -qm 'delete recent code'
 git -C "$TMP/seed" push -q -u origin agent/dev-1-htpr-1
 git --git-dir="$TMP/remote.git" symbolic-ref HEAD refs/heads/production
 git clone -q "$TMP/remote.git" "$TMP/repo"
 git -C "$TMP/repo" checkout -q production
+git init --bare -q "$TMP/wrong-origin.git"
+git -C "$TMP/repo" remote set-url origin "$TMP/wrong-origin.git"
+git config --file "$TMP/home/.gitconfig" url."file://$TMP/remote.git".insteadOf https://github.com/example/repo.git
 
 # Source only the adapter for focused LIVE and feedback tests. The fake board
 # API above is used through the real _ht_get parser.
@@ -393,8 +438,13 @@ state_owned="$(run_gate state-owned)"
 echo 'PASS runner state attributes a legacy branch PR'
 
 shared_author="$(run_gate shared-author 2>/dev/null)"
-[[ -z "$shared_author" ]]
-echo 'PASS shared GitHub authorship does not transfer PR ownership'
+[[ "$shared_author" == *'"number": 11'* ]]
+echo 'PASS PR author login from the agent gh identity attributes ownership'
+
+slug_prefix="$(run_gate slug-prefix)"
+[[ "$slug_prefix" == *'"number": 12'* ]]
+[[ -z "$(run_gate slug-prefix dev-2 'Dev Two' 'cursor-dev-2/' 2>/dev/null)" ]]
+echo 'PASS slug branch prefix attributes only its matching agent'
 
 orphan_log="$TMP/orphan.log"
 run_gate orphan >/dev/null 2>"$orphan_log"
@@ -491,27 +541,53 @@ red_run="$(PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home
 echo 'PASS one red PR starts only its structured repair path'
 
 run_actual() {
-  local scenario="$1"
-  PR_TEST_SCENARIO="$scenario" BOARD_TEST_SCENARIO=no-emergency RUN_COOLDOWN_SECONDS=0 \
+  local scenario="$1" board_scenario="${2:-no-emergency}"
+  PR_TEST_SCENARIO="$scenario" BOARD_TEST_SCENARIO="$board_scenario" RUN_COOLDOWN_SECONDS=0 \
     HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" \
     BOARD_CALL_LOG="$TMP/board-calls" BOARD_COMMENT_LOG="$TMP/board-comments" \
     WORKER_LOG="$TMP/worker-prompts" REVIEWER_LOG="$TMP/reviewer-prompts" \
-    ACTION_LOG="$TMP/actions" UNASSIGNED_MARKER="$TMP/unassigned" \
-    SECOND_OPINION_RESULT="${SECOND_OPINION_RESULT:-}" \
+    GH_CALL_LOG="$TMP/gh-calls" ACTION_LOG="$TMP/actions" UNASSIGNED_MARKER="$TMP/unassigned" \
+    SECOND_OPINION_RESULT="${SECOND_OPINION_RESULT:-}" WORKER_COMMIT="${WORKER_COMMIT:-no}" \
+    WORKER_EXIT="${WORKER_EXIT:-0}" \
     "$ROOT/scripts/agent-board-poll" --once dev-1 >/dev/null
 }
+
+for hold_case in blocked human owner-hold; do
+  rm -rf "$state/pr-live-cache"
+  rm -f "$TMP/worker-prompts"
+  log_before="$(wc -l < "$state/dev-1.log")"
+  run_actual red "$hold_case"
+  [ ! -s "$TMP/worker-prompts" ]
+  tail -n "+$((log_before + 1))" "$state/dev-1.log" | grep -qF 'is not eligible for a fix round:'
+done
+echo 'PASS blocked, human-assigned, and owner-held tickets start no fix or new-ticket run'
+
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$state/dev-1.released-prs" "$state/dev-1.runs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/actions" "$state/host-alarms.json"
+run_actual prep-fail
+run_actual prep-fail
+run_actual prep-fail
+record="$state/run-records/dev-1-HTPR-1.json"
+RECORD="$record" python3 -c 'import json,os; r=json.load(open(os.environ["RECORD"])); assert r["consecutive_infra_errors"] == 3 and "fix_rounds" not in r'
+[ ! -s "$TMP/worker-prompts" ]
+! grep -q '^Fix round' "$TMP/board-comments" 2>/dev/null
+[[ "$(grep -c 'explain: infra error preparing PR #1 for HTPR-1' "$state/dev-1.log")" -ge 3 ]]
+STATE="$state/host-alarms.json" python3 -c 'import json,os; s=json.load(open(os.environ["STATE"])); a=s["alarms"]["pr-fix-infra-example-repo-1"]; assert a["active"] is True and a["bug_ticket"] == "AGTE-999"'
+echo 'PASS three preparation failures count as infra errors, alarm once, and start no work'
 
 rm -rf "$state/run-records" "$state/pr-live-cache"
 rm -f "$state/dev-1.released-prs" "$state/dev-1.runs" "$TMP/board-comments" "$TMP/worker-prompts"
 run_actual qa-fail
 record="$state/run-records/dev-1-HTPR-1.json"
 RECORD="$record" python3 -c 'import json,os; r=json.load(open(os.environ["RECORD"])); assert r["fix_rounds"] == 1 and r["last_qa_failure_id"] == "qa-77"'
-grep -qF 'Fix round 1: QA fail | Handoff: Dev One, checkout fails after deploy.' "$TMP/board-comments"
+grep -qF 'Fix round 1: no push: worker made no commit. Trigger: QA fail | Handoff: Dev One, checkout fails after deploy.' "$TMP/board-comments"
 grep -qF 'The original PR is already merged because QA found this failure.' "$TMP/worker-prompts"
 run_actual qa-fail
 RECORD="$record" python3 -c 'import json,os; assert json.load(open(os.environ["RECORD"]))["fix_rounds"] == 1'
 [[ "$(grep -c '^Fix round' "$TMP/board-comments")" = 1 ]]
-echo 'PASS QA failure increments the same durable counter once per verdict'
+grep -qF 'pr view 1 --repo example/repo --json baseRefName,headRefName' "$TMP/gh-calls"
+[ -z "$(git ls-remote --heads "$TMP/wrong-origin.git" production)" ]
+echo 'PASS QA failure increments only after the worker exits and fetches GitHub refs instead of origin'
 
 rm -rf "$state/run-records" "$state/pr-live-cache"
 rm -f "$state/dev-1.released-prs" "$state/dev-1.runs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/reviewer-prompts" "$TMP/actions" "$TMP/unassigned"
@@ -544,6 +620,44 @@ released_run="$(PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP
 [[ "$released_run" != *'bound to PR #1'* ]]
 echo 'PASS released PR state prevents eventual GitHub results from rebinding'
 
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$state/dev-1.released-prs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/actions"
+WORKER_EXIT=42 run_actual red
+record="$state/run-records/dev-1-HTPR-1.json"
+RECORD="$record" python3 -c 'import json,os; assert json.load(open(os.environ["RECORD"]))["fix_rounds"] == 1'
+grep -qF 'Fix round 1: no push: worker exited 42.' "$TMP/board-comments"
+echo 'PASS an exited failing worker counts one round and reports why nothing was pushed'
+
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/actions"
+old_head="$(git --git-dir="$TMP/remote.git" rev-parse refs/heads/agent/dev-1-htpr-1)"
+WORKER_COMMIT=yes run_actual red
+new_head="$(git --git-dir="$TMP/remote.git" rev-parse refs/heads/agent/dev-1-htpr-1)"
+[ "$new_head" != "$old_head" ]
+grep -Eq 'Fix round 1: pushed commit [0-9a-f]{12}\.' "$TMP/board-comments"
+echo 'PASS a completed worker round pushes through the PR repository URL and reports its commit'
+
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/reviewer-prompts" "$TMP/actions"
+SECOND_OPINION_RESULT='deletion intended' run_actual revert-only
+record="$state/run-records/dev-1-HTPR-1.json"
+RECORD="$record" python3 -c 'import json,os; r=json.load(open(os.environ["RECORD"])); assert r["revert_guard_verdict"] == "deletion intended" and "fix_rounds" not in r'
+[ ! -s "$TMP/worker-prompts" ]
+grep -qF 'Second opinion: deletion intended' "$TMP/board-comments"
+grep -qF 'Deleted hunks:' "$TMP/reviewer-prompts"
+grep -qF 'Origin commits:' "$TMP/reviewer-prompts"
+grep -qF 'gh api -X POST repos/example/repo/issues/1/labels -f labels[]=intentional-revert' "$TMP/actions"
+grep -qF 'gh run rerun 88 --repo example/repo --failed' "$TMP/actions"
+echo 'PASS lone revert-guard failure gets immediate deletion review, label, and rerun without a fix round'
+
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/reviewer-prompts" "$TMP/actions"
+SECOND_OPINION_RESULT='deletion not intended' run_actual revert-only
+grep -qF 'Second opinion: restore app, do not delete them' "$TMP/board-comments"
+grep -qF 'Second-opinion verdict: restore app, do not delete them' "$TMP/worker-prompts"
+grep -qF 'Fix round 1: no push: worker made no commit.' "$TMP/board-comments"
+echo 'PASS unintended deletion verdict becomes the next fix brief and ticket comment'
+
 rm -f "$state/dev-1.released-prs" "$TMP/unassigned" "$TMP/opened-marker"
 rm -rf "$state/pr-live-cache"
 PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency RUN_COOLDOWN_SECONDS=0 MODEL_OPEN_MARKER="$TMP/opened-marker" \
@@ -552,4 +666,4 @@ PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency RUN_COOLDOWN_SECON
 [[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "8" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.opened-prs")" = yes ]]
 echo 'PASS runner persists a PR first seen after its ticket run'
 
-echo '37 one-ticket-until-live checks passed'
+echo '44 one-ticket-until-live checks passed'

@@ -390,36 +390,50 @@ pr-hygiene check merges a green PR that could not get auto-merge.
 ## One ticket until live
 
 Before any normal or event-ticket ranking, the runner lists PRs owned by this
-agent. Ownership is proved by its `PR_BRANCH_PREFIX` (default
-`agent/<slug>-`), by a current board assignment for the ticket in the PR title
-when no other agent prefix is on the branch, or by `<slug>.opened-prs`
-recording that the runner first saw the PR during this agent's run. Shared
-GitHub authorship and comments do not transfer ownership.
+agent. Ownership is proved by `<slug>/`, its configured `PR_BRANCH_PREFIX`
+(default `agent/<slug>-`), `<slug>.opened-prs`, or the PR author's login matching
+the agent's `GITHUB_LOGIN` (falling back to the identity authenticated by `gh`).
+A current board assignment remains a fallback when no other agent prefix is on
+the branch.
 
 One owned PR is a hard binding. Pending checks, a green PR awaiting review or
 merge, and a merged PR awaiting QA all consume the tick; neither a normal poll
-nor `--ticket` event starts unrelated work. The binding ends only when QA moves
-the ticket to `DONE_SECTION` (default `Done`). An open PR with no active owner
-is ignored. Once per UTC day, a tick logs `orphaned PR #<n> (<branch>) has no
-owning agent` so the supervisor can decide who should take it.
+nor `--ticket` event starts unrelated work. A PR whose ticket is in the blocked
+section, has any human assignee, or is held by the owner remains bound but starts
+no fix round. The binding ends only when QA moves the ticket to `DONE_SECTION`
+(default `Done`). An open PR with no active owner is ignored. Once per UTC day,
+a tick logs `orphaned PR #<n> (<branch>) has no owning agent` so the supervisor
+can decide who should take it.
 
-A red PR starts a structured fix round on its existing branch after fetching
-and rebasing the PR base. The ticket receives the literal `Fix round N:` marker,
-the durable run record increments `fix_rounds`, and the prompt includes exact
-failed check names, reviewer concerns, and the last 80 failed-log lines for each
-failing check and run. PR fix runs bypass the attempts ladder and manager
-handoff, but retain the per-ticket cooldown. A QA agent's `Handoff:` after merge
-is another red round on the same counter; an already-counted QA comment cannot
-increment it twice. A QA repair opens a follow-up PR from the same branch.
+A red PR resolves its current base and head with `gh pr view`, then fetches both
+from the `PR_REPO` GitHub URL instead of the checkout's `origin`. Fetch or
+checkout failure logs one infrastructure explanation and starts neither a fix
+nor a new ticket. Three consecutive preparation failures on the same PR raise
+the normal Board health alarm introduced by AGTE-118.
+
+A successful preparation rebases the PR branch and runs the worker. A round is
+recorded only after that worker process exits. Its later `Fix round N:` ticket
+comment reports either the pushed commit or `no push: <reason>`. The prompt
+includes exact failed check names, reviewer concerns, and the last 80 failed-log
+lines for each failing check and run. PR fix runs bypass the attempts ladder and
+manager handoff, but retain the per-ticket cooldown. A QA agent's `Handoff:`
+after merge is another red round on the same counter; an already-counted QA
+comment cannot increment it twice. A QA repair opens a follow-up PR from the
+same branch.
 
 Before round three, or after three hours from the first red round, the runner
-asks `SECOND_OPINION_CLI` for one independent diagnosis. It refuses a reviewer
-from the development worker's provider family and posts the literal
-`Second opinion:` marker. A concrete diagnosis is included in one final fix
-round. A `not fixable here because ...` verdict, or a red result after that
-final round, releases the ticket without another development run: comment on
-and close the PR while preserving its branch, add `needs-human`, move the ticket
-to `OWNER_REVIEW_SECTION` (default `Review`), unassign the agent, and record the
+asks `SECOND_OPINION_CLI` for one independent diagnosis. A lone `revert-guard`
+failure runs that review immediately with deleted hunks and their origin
+commits. An intended deletion adds `intentional-revert` through `gh api` and
+reruns the failed check. Otherwise the next brief says which files to restore.
+Every verdict is posted with the literal `Second opinion:` marker.
+
+The runner refuses a reviewer from the development worker's provider family. A
+concrete general diagnosis is included in one final fix round. A `not fixable
+here because ...` verdict, or a red result after that final round, releases the
+ticket without another development run: comment on and close the PR while
+preserving its branch, add `needs-human`, move the ticket to
+`OWNER_REVIEW_SECTION` (default `Review`), unassign the agent, and record the
 release. Every step must succeed before normal pickup resumes.
 
 The owner-facing binding state is one JSON line at

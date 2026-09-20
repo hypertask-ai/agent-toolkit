@@ -2001,14 +2001,18 @@ for pr in json.loads(os.environ["ROWS"] or "[]"):
 
 # adapter_agent_has_open_pr <repo> <ref> <branch-prefix> <opened-prs>
 adapter_agent_has_open_pr() {
-  local repo="$1" ref="$2" prefix="$3" opened_prs="$4" rows
+  local repo="$1" ref="$2" prefix="$3" opened_prs="$4" rows login
   [ -n "$repo" ] && command -v gh >/dev/null 2>&1 || return 2
   rows="$(gh pr list --repo "$repo" --state open --search "$ref" --limit 100 \
-    --json number,title,body,headRefName 2>/dev/null)" || return 2
-  ROWS="$rows" REF="$ref" PREFIX="$prefix" REPO="$repo" OPENED="$opened_prs" python3 -c '
+    --json number,title,body,headRefName,author 2>/dev/null)" || return 2
+  login="${GITHUB_LOGIN:-$(gh api user --jq .login 2>/dev/null || true)}"
+  ROWS="$rows" REF="$ref" PREFIX="$prefix" SLUG="${AGENT_SLUG:-}" LOGIN="$login" \
+    REPO="$repo" OPENED="$opened_prs" python3 -c '
 import json, os, re, sys
 ref = os.environ["REF"].casefold()
 prefix = os.environ["PREFIX"].casefold()
+slug_prefix = (os.environ["SLUG"] + "/").casefold() if os.environ["SLUG"] else ""
+login = os.environ["LOGIN"].casefold()
 owned = set()
 try:
     with open(os.environ["OPENED"], encoding="utf-8") as handle:
@@ -2023,7 +2027,12 @@ for pr in json.loads(os.environ["ROWS"] or "[]"):
     if ref not in haystack:
         continue
     branch = str(pr.get("headRefName") or "").casefold()
-    if (prefix and branch.startswith(prefix)) or str(pr.get("number")) in owned:
+    author = pr.get("author") or {}
+    author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
+    if ((prefix and branch.startswith(prefix)) or
+            (slug_prefix and branch.startswith(slug_prefix)) or
+            str(pr.get("number")) in owned or
+            (login and author_login == login)):
         raise SystemExit(0)
 raise SystemExit(1)
 '
@@ -2092,11 +2101,10 @@ print(",".join(ids))')" || {
 # ---------- one ticket until live ----------
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
 # Prints one JSON object per pull request still owned by this agent, open PRs
-# before merged PRs awaiting QA. Ownership comes from the agent's branch prefix,
-# a current assignment
-# of the title's ticket when no other agent prefix is present, or the runner's
-# record that this agent opened the PR. Comments and shared GitHub authorship
-# do not transfer ownership.
+# before merged PRs awaiting QA. Ownership comes from the configured or
+# <slug>/ branch prefix, the opened-PR ledger, the agent's GitHub author login,
+# or a current assignment of the title's ticket when no other agent prefix is
+# present. Comments do not transfer ownership.
 #
 # An open PR with no owner among the living conf files is ignored and logged
 # once per UTC day through stderr, which core appends to the tick log.
@@ -2108,7 +2116,8 @@ adapter_pr_gate() (
   local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
   local config_dir="${7:-}" opened_prs="${8:-}" repo="${PR_REPO:-}" prefix="${PR_BRANCH_PREFIX:-agent/$slug-}"
   local state_dir released_prs tmp pr number live branch marker today owner_conf owner_slug one board_json pr_state
-  local offset path returned
+  local offset path returned github_login
+
   [ -n "$repo" ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
   mkdir -p "$cache_dir"
@@ -2143,9 +2152,11 @@ PYEOF
     return 0
   fi
 
-  # Keep the active identity and branch prefix together. Assignment ownership
-  # is only valid for an identity represented by a current schema conf.
-  printf '%s\t%s\t%s\t%s\n' "$slug" "$prefix" "$agent_id" "$opened_prs" > "$tmp/owners.tsv"
+  # Keep every active identity with all ownership signals. GITHUB_LOGIN can pin
+  # an agent-specific gh identity; the current runner otherwise uses gh's own
+  # authenticated login.
+  github_login="${GITHUB_LOGIN:-$(gh api user --jq .login 2>/dev/null || true)}"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$slug" "$prefix" "$agent_id" "$opened_prs" "$github_login" > "$tmp/owners.tsv"
   if [ -n "$config_dir" ] && [ -d "$config_dir" ]; then
     for owner_conf in "$config_dir"/*.conf; do
       [ -f "$owner_conf" ] || continue
@@ -2155,14 +2166,14 @@ PYEOF
         continue
       fi
       (
-        unset AGENT_SLUG AGENT_ID PR_BRANCH_PREFIX PR_REPO
+        unset AGENT_SLUG AGENT_ID PR_BRANCH_PREFIX PR_REPO GITHUB_LOGIN
         # shellcheck disable=SC1090
         . "$owner_conf"
         [ "${PR_REPO:-}" = "$repo" ] || exit 0
         owner_slug="${AGENT_SLUG:-$(basename "$owner_conf" .conf)}"
-        printf '%s\t%s\t%s\t%s\n' "$owner_slug" \
+        printf '%s\t%s\t%s\t%s\t%s\n' "$owner_slug" \
           "${PR_BRANCH_PREFIX:-agent/$owner_slug-}" "${AGENT_ID:-}" \
-          "$state_dir/$owner_slug.opened-prs"
+          "$state_dir/$owner_slug.opened-prs" "${GITHUB_LOGIN:-}"
       ) >> "$tmp/owners.tsv"
     done
   fi
@@ -2197,8 +2208,8 @@ repo = os.environ["REPO"]
 owners = []
 with open(owners_path, encoding="utf-8") as handle:
     for line in handle:
-        owner_slug, owner_prefix, owner_id, state_path = line.rstrip("\n").split("\t", 3)
-        row = (owner_slug, owner_prefix.casefold(), owner_id, state_path)
+        owner_slug, owner_prefix, owner_id, state_path, login = line.rstrip("\n").split("\t", 4)
+        row = (owner_slug, owner_prefix.casefold(), owner_id, state_path, login.casefold())
         if row not in owners:
             owners.append(row)
 assigned = {}
@@ -2245,10 +2256,12 @@ def display_ticket(pr):
     haystack = " ".join(str(pr.get(key) or "") for key in ("body", "headRefName"))
     match = ticket_pattern.search(haystack)
     return match.group(1).upper() if match else "PR-%s" % pr["number"]
+def owned_prefixes(owner_slug, owner_prefix):
+    return tuple(value for value in (owner_prefix, (owner_slug + "/").casefold()) if value)
 def has_other_prefix(branch):
     folded = branch.casefold()
-    for owner_slug, owner_prefix, _, _ in owners:
-        if owner_slug != slug and owner_prefix and folded.startswith(owner_prefix):
+    for owner_slug, owner_prefix, _, _, _ in owners:
+        if owner_slug != slug and any(folded.startswith(value) for value in owned_prefixes(owner_slug, owner_prefix)):
             return True
     return folded.startswith("agent/") and not folded.startswith(prefix)
 with open(prs_path, encoding="utf-8") as handle:
@@ -2261,10 +2274,16 @@ for pr in sorted(prs, key=lambda row: (str(row.get("state") or "").upper() != "O
     ref = title_ticket(pr)
     if ref in released_tickets or (state == "MERGED" and ref not in tasks):
         continue
-    by_prefix = branch.casefold().startswith(prefix)
+    current = next((owner for owner in owners if owner[0] == slug and owner[4]),
+                   next((owner for owner in owners if owner[0] == slug),
+                        (slug, prefix, agent_id, "", "")))
+    author = pr.get("author") or {}
+    author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
+    by_prefix = any(branch.casefold().startswith(value) for value in owned_prefixes(current[0], current[1]))
     by_state = str(pr.get("number")) in opened
+    by_author = bool(current[4] and author_login == current[4] and not has_other_prefix(branch))
     by_assignment = bool(ref and agent_id in assigned.get(ref, set()) and not has_other_prefix(branch))
-    if not (by_prefix or by_state or by_assignment):
+    if not (by_prefix or by_state or by_author or by_assignment):
         continue
     pr["ticket"] = display_ticket(pr)
     task = tasks.get(ref, {})
@@ -2292,8 +2311,8 @@ owners = []
 active_ids = set()
 with open(owners_path, encoding="utf-8") as handle:
     for line in handle:
-        slug, prefix, agent_id, state_path = line.rstrip("\n").split("\t", 3)
-        row = (slug, prefix.casefold(), agent_id, state_path)
+        slug, prefix, agent_id, state_path, login = line.rstrip("\n").split("\t", 4)
+        row = (slug, prefix.casefold(), agent_id, state_path, login.casefold())
         if row not in owners:
             owners.append(row)
         if agent_id:
@@ -2309,7 +2328,7 @@ with open(tasks_path, encoding="utf-8") as handle:
                 if isinstance(agent, dict) and agent.get("id"):
                     ids.add(str(agent["id"]))
 opened = set()
-for _, _, _, path in owners:
+for _, _, _, path, _ in owners:
     try:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
@@ -2323,12 +2342,17 @@ for pr in json.load(open(open_path)):
     branch = str(pr.get("headRefName") or "")
     folded = branch.casefold()
     number = str(pr.get("number"))
-    prefix_owner = any(prefix and folded.startswith(prefix) for _, prefix, _, _ in owners)
+    prefix_owner = any(
+        any(folded.startswith(value) for value in (prefix, (slug + "/").casefold()) if value)
+        for slug, prefix, _, _, _ in owners)
+    author = pr.get("author") or {}
+    author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
+    author_owner = any(login and author_login == login for _, _, _, _, login in owners)
     match = pattern.search(str(pr.get("title") or ""))
     ref = match.group(1).upper() if match else ""
     another_prefix = folded.startswith("agent/") and not prefix_owner
     assigned_active = bool(ref and assigned.get(ref, set()) & active_ids and not another_prefix)
-    if prefix_owner or number in opened or assigned_active:
+    if prefix_owner or number in opened or author_owner or assigned_active:
         continue
     print("%s\t%s" % (number, branch))
 PYEOF
