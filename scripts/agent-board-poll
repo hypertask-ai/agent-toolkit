@@ -3816,6 +3816,8 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
           bash "$MODEL_PID_FILE" "${MODEL_ARGV[@]}" "$PROMPT"
       ) >>"$RUN_OUTPUT" 2>"$provider_err" &
       model_wait_pid=$!
+      ACTIVE_MODEL_WAIT_PID="$model_wait_pid"
+      ACTIVE_MODEL_PROCESS_GROUP="$model_wait_pid"
       for _ in $(seq 1 100); do
         [ ! -s "$MODEL_PID_FILE" ] || break
         kill -0 "$model_wait_pid" 2>/dev/null || break
