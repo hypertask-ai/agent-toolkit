@@ -1980,9 +1980,9 @@ adapter_ticket_merged_pr() {
       direct_failed="yes"
     elif ! url="$(ROWS="$rows" REF="$ref" python3 -c '
 import json, os, re
-pattern = re.compile(r"^" + re.escape(os.environ["REF"]) + r"(?:$|[\s:])", re.I)
+pattern = re.compile(r"(?<![A-Z0-9-])" + re.escape(os.environ["REF"]) + r"(?![0-9])", re.I)
 for pr in json.loads(os.environ["ROWS"] or "[]"):
-    if str(pr.get("state") or "").upper() == "MERGED" and pattern.match(str(pr.get("title") or "")) and pr.get("url"):
+    if str(pr.get("state") or "").upper() == "MERGED" and pattern.search(str(pr.get("title") or "")) and pr.get("url"):
         print(pr["url"])
         break
 ')"; then

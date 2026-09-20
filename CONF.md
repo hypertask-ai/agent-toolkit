@@ -71,7 +71,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `IN_PROGRESS_SECTION` | Destination while a model run is live, default `In Progress`. |
 | `REVIEW_SECTION` | Destination after the run opens a pull request, default `AI Review`. |
 | `OWNER_REVIEW_SECTION` | Destination when structured PR repair concludes that only a human can resolve the failure, default `Review`. |
-| `DONE_SECTION` | Destination when the reconciler finds a merged pull request whose title starts with the ticket reference, a linked merged pull request, or a matching direct base-branch commit. Defaults to `Done`. |
+| `DONE_SECTION` | Destination when the reconciler finds a merged pull request whose title contains the ticket reference as a whole token, a linked merged pull request, or a matching direct base-branch commit. Defaults to `Done`. |
 | `QA_FAIL_SECTION` | QA failure destination. Defaults to the board's first intake column. Failed QA also clears every assignee. |
 | `QA_BLOCKED_SECTION` | Blocked or cannot-test destination, default `Agent Blocked (Infra)`. |
 | `QA_TURNAROUND_HOURS` | Hours a ticket may remain in QA without an agent verdict before it becomes eligible again, default `4`. |

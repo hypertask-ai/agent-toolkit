@@ -1,0 +1,1 @@
+- AGTE-150 recognizes whole ticket references anywhere in merged pull request titles and links runner-opened pull requests on their tickets.

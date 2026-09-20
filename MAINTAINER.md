@@ -14,10 +14,11 @@ until you do it.
   every 60 seconds in poll mode. Events mode uses the same runner every five
   minutes as a safety net, while `agent-events.service` starts exact-ticket ticks immediately.
 - **Reconciler timer** — `agent-board-reconcile.timer` checks every five minutes.
-  It moves tickets with merged pull requests whose titles start with the ticket
-  reference, linked merged pull requests, or matching direct base-branch commits
-  to Done and restores tickets left in In Progress after a run stops without a
-  pull request.
+  It moves tickets with merged pull requests whose titles contain the ticket
+  reference as a whole token, linked merged pull requests, or matching direct
+  base-branch commits to Done and restores tickets left in In Progress after a
+  run stops without a pull request. The runner comments with every pull request
+  URL it opens before moving the ticket to review.
 - **Update timer** — `agent-template-update.timer` checks every five minutes.
   It fetches the configured release and stops when `VERSION` has not changed.
   A changed version must pass its staged evals before installation. A passing

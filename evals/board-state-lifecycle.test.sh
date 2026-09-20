@@ -210,8 +210,9 @@ fi
 
 reset_case
 env "${run_env[@]}" MOCK_MODEL_MODE=pr "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/pr.out" 2>&1
-if tail -n1 "$TMP/board.log" | grep -qxF 'move TEST-1 AI Review'; then
-  echo 'PASS pr-outcome-review                  a newly opened PR moves the ticket to AI Review'
+if tail -n1 "$TMP/board.log" | grep -qxF 'move TEST-1 AI Review' \
+   && [ "$(grep -cF 'comment TEST-1 <p><strong>Handoff: The review team can review the opened pull request.</strong></p><p><a href="https://github.com/example/repo/pull/9">https://github.com/example/repo/pull/9</a></p><p>Next: Review the linked change.</p>' "$TMP/board.log")" -eq 1 ]; then
+  echo 'PASS pr-outcome-review                  a newly opened PR is linked on the ticket and moves it to AI Review'
 else
   echo "FAIL pr-outcome-review                  log=$(cat "$TMP/board.log") output=$(cat "$TMP/pr.out")"; exit 1
 fi
@@ -233,15 +234,29 @@ fi
 
 reset_case
 cat > "$TMP/tasks.json" <<'EOF'
-{"tasks":[{"id":"task-999","ticketNumber":"AGTE-999","projectId":15,"section":"Review","title":"Change it","description":"Opened and merged by a human","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+{"tasks":[{"id":"task-9","ticketNumber":"AGTE-9","projectId":15,"section":"Review","title":"Change it","description":"Opened and merged by a human","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
 EOF
-env "${run_env[@]}" MOCK_MERGED_PR_TITLE='AGTE-999: shipped by a human' "$ROOT/scripts/agent-board-reconcile"
+env "${run_env[@]}" MOCK_MERGED_PR_TITLE='Agent template: AGTE-9 x' "$ROOT/scripts/agent-board-reconcile"
 if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
-   && grep -qxF 'unassign AGTE-999 agent-dev' "$TMP/board.log" \
-   && [ "$(grep -cF 'comment AGTE-999 Shipped by merged pull request https://github.com/example/repo/pull/999, moved to Done.' "$TMP/board.log")" -eq 1 ]; then
-  echo 'PASS title-matched-merged-pr            a zero-comment ticket closes from a merged PR title and records shipping once'
+   && grep -qxF 'unassign AGTE-9 agent-dev' "$TMP/board.log" \
+   && [ "$(grep -cF 'comment AGTE-9 Shipped by merged pull request https://github.com/example/repo/pull/999, moved to Done.' "$TMP/board.log")" -eq 1 ]; then
+  echo 'PASS title-matched-merged-pr            a prefixed merged PR title closes its zero-comment ticket'
 else
   echo "FAIL title-matched-merged-pr            tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
+fi
+
+reset_case
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-9","ticketNumber":"AGTE-9","projectId":15,"section":"Review","title":"Change it","description":"A different ticket has merged","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+env "${run_env[@]}" MOCK_MERGED_PR_TITLE='AGTE-90 y' "$ROOT/scripts/agent-board-reconcile"
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Review ] \
+   && ! grep -q '^move AGTE-9 ' "$TMP/board.log" \
+   && ! grep -q '^unassign AGTE-9 ' "$TMP/board.log" \
+   && ! grep -q '^comment AGTE-9 ' "$TMP/board.log"; then
+  echo 'PASS title-ticket-token-boundary        AGTE-90 does not match ticket AGTE-9'
+else
+  echo "FAIL title-ticket-token-boundary        tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
 fi
 
 reset_case

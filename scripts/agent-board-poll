@@ -4504,6 +4504,10 @@ if rows:
       opened_url="https://github.com/$PR_REPO/pull/$opened_number"
       progress_event --event pr-opened --pr "$opened_number" --pr-url "$opened_url" \
         --ticket "$ref" --ticket-url "$url"
+      pr_link_comment="<p><strong>Handoff: The review team can review the opened pull request.</strong></p><p><a href=\"$opened_url\">$opened_url</a></p><p>Next: Review the linked change.</p>"
+      if ! post_ticket_comment "$ref" text "$pr_link_comment"; then
+        report_board_health "$board" "The runner opened $opened_url for $ref, but could not link it on the ticket."
+      fi
       log "recorded PR #$opened_number as opened by $SLUG during the $ref run"
       if declare -F adapter_run_activity >/dev/null 2>&1; then
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "PR opened $opened_url"
