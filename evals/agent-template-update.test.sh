@@ -226,21 +226,25 @@ else
   bad unchanged-commit-noop "status=$status output=$(cat "$TMP/timer-same.out") systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/update-board.log")"
 fi
 
-# A newer commit installs even when the author did not change VERSION.
+# A newer commit is retried after a red suite and installs even when the author
+# did not change VERSION.
 printf 'version=test-version\ncommit=oldcommit\ninstalled_at=1\n' > "$TMP/state/agent-template/install-state"
-rm -f "$TMP/installed"
+rm -f "$TMP/installed" "$TMP/update-board-state.json"
 : > "$TMP/systemctl.log"
 : > "$TMP/update-board.log"
 set +e
+AGENT_TEMPLATE_INSTALL_DIR="$SUCCESS_INSTALLED" EVAL_MODE=red run_update --timer >"$TMP/timer-new-commit-red.out" 2>"$TMP/timer-new-commit-red.err"
+red_status=$?
 AGENT_TEMPLATE_INSTALL_DIR="$SUCCESS_INSTALLED" run_update --timer >"$TMP/timer-new-commit.out" 2>"$TMP/timer-new-commit.err"
 status=$?
 set -e
-if [ "$status" -eq 0 ] && [ -e "$TMP/installed" ] \
+if [ "$red_status" -eq 0 ] && [ "$status" -eq 0 ] && [ -e "$TMP/installed" ] \
+   && grep -q '^update to test-version refused: 4 evals red:' "$TMP/timer-new-commit-red.out" \
    && grep -q '^== 2\. stage and evaluate test-version ==$' "$TMP/timer-new-commit.out" \
    && grep -q '^comment add HEALTH-1 .*Toolkit test-version passed evals and is now installed' "$TMP/update-board.log"; then
-  ok same-version-new-commit "a newer latest-channel commit reaches the host without a version bump"
+  ok same-version-new-commit-retry "a newer same-version commit retries after failed evals and reaches the host once green"
 else
-  bad same-version-new-commit "status=$status output=$(cat "$TMP/timer-new-commit.out") board=$(cat "$TMP/update-board.log")"
+  bad same-version-new-commit-retry "red_status=$red_status status=$status red_output=$(cat "$TMP/timer-new-commit-red.out") output=$(cat "$TMP/timer-new-commit.out") board=$(cat "$TMP/update-board.log")"
 fi
 
 # A red staged suite refuses without invoking install and files one board ticket
