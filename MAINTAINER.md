@@ -220,6 +220,12 @@ A failed ticket run writes its normal host status and leaves the board trigger
 eligible for the five-minute safety scan. Event delivery never bypasses the existing
 claim, cooldown, pull request, identity, or comment rules.
 
+Event and poll pickups share the same claim handshake. The adapter waits a random
+one to five seconds, checks assignees again, assigns the runner, then checks again
+after two seconds. If two agents landed, the lower agent id keeps the ticket and
+the other unassigns itself without commenting. The runner posts `Claimed.` and
+moves to In Progress only after that handshake holds.
+
 ## Fleet progress contract
 
 Every real runner tick atomically rewrites

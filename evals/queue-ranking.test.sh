@@ -68,6 +68,18 @@ cat > "$TMP/bin/hypertask" <<'EOF'
 case " $* " in
   *' --json project show '*) printf '{"project":{"ownerId":6}}\n' ;;
   *' --json comment list '*) printf '{"comments":[]}\n' ;;
+  *' task assign '*)
+    REF="$5" python3 - "$TASKS_JSON" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+for task in doc["tasks"]:
+    if task["ticketNumber"] == os.environ["REF"]:
+        task["assignees"] = [{"agent": {"id": "agent-1", "displayName": "Dev Bot"}}]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(doc, handle)
+PYEOF
+    ;;
   *) printf '{}\n' ;;
 esac
 EOF

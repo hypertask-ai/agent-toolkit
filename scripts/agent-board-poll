@@ -3498,6 +3498,7 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
   fi
   [ -n "$origin_section" ] || origin_section="$IN_PROGRESS_SECTION"
   claim_check_gate=""
+  atomic_claim="no"
   if [ "$AGENT_KIND" != "dev" ]; then
     claim_check_gate="agent kind $AGENT_KIND"
   elif [ "$is_pr_fix" = "yes" ]; then
@@ -3527,14 +3528,50 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
       continue
     fi
     explain "claim-check $ref: no claimant"
+    if ! declare -F adapter_claim >/dev/null 2>&1; then
+      explain "claim $ref: error (adapter has no atomic claim)"
+      post_run_cleanup
+      continue
+    fi
+    set +e
+    claim_result="$(adapter_claim "$TOKEN_FILE" "$BOARD_CLI" "$board" "$ref" "$AGENT_ID" 2>>"$LOG")"
+    claim_rc=$?
+    set -e
+    if [ "$claim_rc" -ne 0 ]; then
+      explain "claim $ref: error (claim handshake failed)"
+      post_run_cleanup
+      continue
+    fi
+    if [[ "$claim_result" == backoff$'\t'* ]]; then
+      explain "claim $ref: backed off (${claim_result#*$'\t'})"
+      post_run_cleanup
+      continue
+    fi
+    if [ "$claim_result" != "held" ]; then
+      explain "claim $ref: error (unknown adapter result)"
+      post_run_cleanup
+      continue
+    fi
+    atomic_claim="yes"
+    explain "claim $ref: held"
   fi
   record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
   if [ "$is_reply_only" = "no" ]; then
     write_run_record "$run_record" running "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
-    if ! adapter_assign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
+    if [ "$atomic_claim" != "yes" ] \
+       && ! adapter_assign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
       report_board_health "$board" "Run start could not assign $ref to $SLUG after two attempts."
       write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
       write_failure_status "$ref" assignment "could not assign the ticket before model invocation"
+      post_run_cleanup
+      continue
+    fi
+    if [ "$atomic_claim" = "yes" ] \
+       && ! AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$ref" --raw \
+         --text '<p><strong>Claimed.</strong> A session is working this ticket now.</p>' >>"$LOG" 2>&1; then
+      report_board_health "$board" "Run start could not post the claim on $ref."
+      write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
+      write_failure_status "$ref" comment "could not post Claimed. before model invocation"
       post_run_cleanup
       continue
     fi
