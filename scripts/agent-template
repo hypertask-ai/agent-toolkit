@@ -1295,16 +1295,72 @@ print(ref)
   }
 
   update_file_eval_failure() {
-    local marker project_json section_result section title description output
+    local marker project_json section_result section done_result done_section title description output
+    local task_json refs existing_ref ref failing_evals
+    local failure_refs=()
     mkdir -p "$UPDATE_STATE_DIR"
     marker="$UPDATE_FAILURE_MARKER"
-    [ ! -f "$marker" ] || { echo "eval failure ticket already filed for $TARGET_VERSION at ${TARGET_COMMIT:0:7}"; return 0; }
     [ -x "$UPDATE_BOARD_CLI" ] || return 1
     project_json="$("$UPDATE_BOARD_CLI" --json project show "$FEEDBACK_BOARD_ID" 2>/dev/null)" || return 1
     section_result="$(board_section_or_first "$project_json" "$FEEDBACK_BOARD_SECTION")" || return 1
     section="$(printf '%s\n' "$section_result" | sed -n '1p')"
     title="Restore automatic host update to $TARGET_VERSION"
-    description="<p><strong>Toolkit $TARGET_VERSION failed its host evals, so the host kept $INSTALLED_VERSION.</strong></p><h2>What went wrong</h2><p>$RED_COUNT evals failed during the automatic update.</p><h2>What changes</h2><ol><li><p>Fix the failing toolkit evals.</p></li><li><p>Let the host retry the same version.</p></li></ol><h2>Done when</h2><p>The eval suite passes and the host installs toolkit $TARGET_VERSION.</p>"
+    failing_evals="$(python3 - "$EVAL_FAILURE_OUTPUT" <<'PYEOF'
+import html
+import sys
+
+names = []
+with open(sys.argv[1], encoding="utf-8") as output:
+    for line in output:
+        if not line.startswith("FAIL "):
+            continue
+        name = line.split(maxsplit=2)[1]
+        if name not in names:
+            names.append(name)
+if not names:
+    names.append("runner (no FAIL line)")
+print("<ul>" + "".join(f"<li><code>{html.escape(name)}</code></li>" for name in names) + "</ul>")
+PYEOF
+)" || return 1
+    description="<p><strong>Toolkit $TARGET_VERSION failed its host evals, so the host kept $INSTALLED_VERSION.</strong></p><h2>What went wrong</h2><p>$RED_COUNT evals failed during the automatic update.</p><p>Failing evals:</p>$failing_evals<h2>What changes</h2><ol><li><p>Fix the failing toolkit evals.</p></li><li><p>Let the host retry the same version.</p></li></ol><h2>Done when</h2><p>The eval suite passes and the host installs toolkit $TARGET_VERSION.</p>"
+    task_json="$("$UPDATE_BOARD_CLI" task list --project "$FEEDBACK_BOARD_ID" --search "$title" --limit 100 --json 2>/dev/null)" || return 1
+    refs="$(TITLE="$title" TASK_JSON="$task_json" python3 - <<'PYEOF'
+import json
+import os
+
+doc = json.loads(os.environ["TASK_JSON"])
+for task in doc.get("tasks") or []:
+    if str(task.get("title") or "").strip().casefold() != os.environ["TITLE"].casefold():
+        continue
+    section = task.get("section") or ""
+    if isinstance(section, dict):
+        section = section.get("title") or section.get("name") or ""
+    status = str(task.get("status") or "")
+    if str(section).casefold() in ("done", "archived") or status.casefold() in ("done", "closed", "archive", "archived"):
+        continue
+    ref = task.get("ticketNumber") or task.get("ref") or ""
+    if ref:
+        print(ref)
+PYEOF
+)" || return 1
+    while IFS= read -r ref; do
+      [ -z "$ref" ] || failure_refs+=("$ref")
+    done <<< "$refs"
+    if [ "${#failure_refs[@]}" -gt 0 ]; then
+      existing_ref="${failure_refs[0]}"
+      "$UPDATE_BOARD_CLI" task update "$existing_ref" --description "$description" >/dev/null 2>&1 || return 1
+      if [ "${#failure_refs[@]}" -gt 1 ]; then
+        done_result="$(board_section_or_first "$project_json" Done)" || return 1
+        [ "$(printf '%s\n' "$done_result" | sed -n '2p')" = exact ] || return 1
+        done_section="$(printf '%s\n' "$done_result" | sed -n '1p')"
+        for ref in "${failure_refs[@]:1}"; do
+          "$UPDATE_BOARD_CLI" task move "$ref" --section "$done_section" >/dev/null 2>&1 || return 1
+        done
+      fi
+      printf '%s\n' "$existing_ref" > "$marker"
+      echo "eval failure ticket updated for $TARGET_VERSION"
+      return 0
+    fi
     output="$("$UPDATE_BOARD_CLI" task create --raw --project "$FEEDBACK_BOARD_ID" \
       --section "$section" --title "$title" --description "$description" --json 2>/dev/null)" || return 1
     printf '%s' "$output" | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null || return 1

@@ -171,8 +171,8 @@ installed commit even when their version numbers match. It detects local changes
 against the installed manifest, stages the complete target template, and runs the
 staged eval suite. A red suite leaves the installed tree untouched, names the first three
 failing cases in the refusal, keeps the complete eval output beside the update-failure
-record under `~/.local/state/agent-template/`, and files one toolkit bug for that exact
-commit. A passing timer update restarts chat and every enabled
+record under `~/.local/state/agent-template/`, and updates one open toolkit bug for that
+version with every failing eval name. A passing timer update restarts chat and every enabled
 `agent-board-poll@<slug>.timer` instance without restarting the bare template unit,
 then records the installed version on Board health.
 `--force` skips the eval gate. A normal install evaluates its source before its first

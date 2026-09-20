@@ -88,10 +88,15 @@ cat > "$TMP/bin/update-board" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$UPDATE_BOARD_LOG"
 case "$*" in
-  '--json project show '*) printf '%s\n' '{"sections":[{"title":"Backlog"},{"title":"Bugs"}]}' ;;
+  '--json project show '*) printf '%s\n' '{"sections":[{"title":"Backlog"},{"title":"Bugs"},{"title":"Done"}]}' ;;
   'task list --project 15 --limit 100 --json') printf '%s\n' '{"tasks":[{"ticketNumber":"HEALTH-1","title":"Board health"}]}' ;;
+  'task list --project 5500 --search Restore automatic host update to test-version --limit 100 --json')
+    if [ -f "$UPDATE_BOARD_STATE" ]; then cat "$UPDATE_BOARD_STATE"; else printf '%s\n' '{"tasks":[]}'; fi ;;
   'comment add HEALTH-1 '*) printf '%s\n' '{"success":true}' ;;
-  'task create --raw --project 5500 '*) printf '%s\n' '{"task":{"ticketNumber":"AGTE-999","projectId":5500,"uniqueIndex":999}}' ;;
+  'task create --raw --project 5500 '*)
+    printf '%s\n' '{"tasks":[{"ticketNumber":"AGTE-999","title":"Restore automatic host update to test-version","section":"Bugs"}]}' > "$UPDATE_BOARD_STATE"
+    printf '%s\n' '{"task":{"ticketNumber":"AGTE-999","projectId":5500,"uniqueIndex":999}}' ;;
+  'task update AGTE-'*|'task move AGTE-'*) printf '%s\n' '{"success":true}' ;;
   *) printf 'unexpected board command: %s\n' "$*" >&2; exit 1 ;;
 esac
 EOF
@@ -122,8 +127,8 @@ run_update() {
     AGENT_TEMPLATE_HOST_CONFIG="$HOST_CONFIG" AGENT_TEMPLATE_REPO="$FAKE_REPO" \
     AGENT_SYSTEMD_DIR="$TMP/units" XDG_STATE_HOME="$TMP/state" \
     PATH="$TMP/bin:/usr/bin:/bin" GIT_LOG="$TMP/git.log" SYSTEMCTL_LOG="$TMP/systemctl.log" \
-    UPDATE_BOARD_LOG="$TMP/update-board.log" WEBHOOK_LOG="$TMP/webhook.log" \
-    AGENT_TEMPLATE_UPDATE_BOARD_CLI="$TMP/bin/update-board" \
+    UPDATE_BOARD_LOG="$TMP/update-board.log" UPDATE_BOARD_STATE="$TMP/update-board-state.json" \
+    WEBHOOK_LOG="$TMP/webhook.log" AGENT_TEMPLATE_UPDATE_BOARD_CLI="$TMP/bin/update-board" \
     AGENT_TEMPLATE_UPDATE_HEALTH_BOARD=15 INSTALL_MARKER="$TMP/installed" \
     "$ROOT/scripts/agent-template" update "$@"
 }
@@ -238,8 +243,9 @@ else
   bad same-version-new-commit "status=$status output=$(cat "$TMP/timer-new-commit.out") board=$(cat "$TMP/update-board.log")"
 fi
 
-# A red staged suite refuses without invoking install and files one board ticket.
-rm -f "$TMP/installed"
+# A red staged suite refuses without invoking install and files one board ticket
+# whose description records every failing eval name.
+rm -f "$TMP/installed" "$TMP/update-board-state.json"
 : > "$TMP/git.log"
 : > "$TMP/update-board.log"
 set +e
@@ -250,20 +256,38 @@ failure_log="$TMP/state/agent-template/update-failure-test-version-deadbeefdeadb
 if [ "$status" -eq 0 ] && [ ! -e "$TMP/installed" ] \
    && grep -q '^update to test-version refused: 4 evals red: FAIL staged-release staged failure; FAIL command-policy.test.sh exited 124; FAIL third-case another failure$' "$TMP/red.out" \
    && grep -q '^FAIL fourth-case omitted from refusal$' "$failure_log" \
+   && grep -qF '<code>staged-release</code>' "$TMP/update-board.log" \
+   && grep -qF '<code>command-policy.test.sh</code>' "$TMP/update-board.log" \
+   && grep -qF '<code>third-case</code>' "$TMP/update-board.log" \
+   && grep -qF '<code>fourth-case</code>' "$TMP/update-board.log" \
    && [ "$(grep -c '^task create --raw --project 5500 ' "$TMP/update-board.log")" -eq 1 ]; then
-  ok red-evals-refuse-swap "red staged evals name three failures, preserve the log, and file one toolkit bug"
+  ok red-evals-refuse-swap "red staged evals name every failure on one toolkit bug and preserve the log"
 else
   bad red-evals-refuse-swap "status=$status installed=$([ -e "$TMP/installed" ] && echo yes || echo no) output=$(cat "$TMP/red.out") log=$(cat "$failure_log" 2>/dev/null || true) board=$(cat "$TMP/update-board.log")"
 fi
 
+cat > "$TMP/update-board-state.json" <<'EOF'
+{"tasks":[
+  {"ticketNumber":"AGTE-116","title":"Restore automatic host update to test-version","section":"Bugs"},
+  {"ticketNumber":"AGTE-119","title":"Restore automatic host update to test-version","section":"Bugs"},
+  {"ticketNumber":"AGTE-120","title":"Restore automatic host update to test-version","section":"In Progress"},
+  {"ticketNumber":"AGTE-113","title":"Restore automatic host update to test-version","section":"Review"},
+  {"ticketNumber":"AGTE-88","title":"Restore automatic host update to test-version","section":"Done"}
+]}
+EOF
 set +e
 EVAL_MODE=red run_update --timer >"$TMP/red-repeat.out" 2>"$TMP/red-repeat.err"
 repeat_status=$?
 set -e
 if [ "$repeat_status" -eq 0 ] \
    && [ "$(grep -c '^task create --raw --project 5500 ' "$TMP/update-board.log")" -eq 1 ] \
-   && grep -q '^eval failure ticket already filed for test-version at deadbee$' "$TMP/red-repeat.out"; then
-  ok red-evals-ticket-deduplicated "the five-minute retry does not file another bug for the same commit"
+   && [ "$(grep -c '^task update AGTE-116 ' "$TMP/update-board.log")" -eq 1 ] \
+   && [ "$(grep -c '^task move AGTE-' "$TMP/update-board.log")" -eq 3 ] \
+   && grep -q '^task move AGTE-119 --section Done$' "$TMP/update-board.log" \
+   && grep -q '^task move AGTE-120 --section Done$' "$TMP/update-board.log" \
+   && grep -q '^task move AGTE-113 --section Done$' "$TMP/update-board.log" \
+   && grep -q '^eval failure ticket updated for test-version$' "$TMP/red-repeat.out"; then
+  ok red-evals-ticket-deduplicated "later runs update one version ticket and close its open duplicates"
 else
   bad red-evals-ticket-deduplicated "status=$repeat_status output=$(cat "$TMP/red-repeat.out") board=$(cat "$TMP/update-board.log")"
 fi
