@@ -625,8 +625,8 @@ Per-run temporary files and temporary directories are removed at the same time.
 Disk use is checked after cleanup. Above 85 percent, the runner creates one
 high-priority toolkit alarm through the same Review, agent-room, Telegram, and
 Board health path as pull request alarms. Above 95 percent, the tick starts no
-new run. When use returns to 85 percent or below, the alarm is cleared and moved
-to Done.
+new run. The alarm stays open until use falls below 80 percent, then it is
+cleared and moved to Done.
 
 ## Running it by hand
 
