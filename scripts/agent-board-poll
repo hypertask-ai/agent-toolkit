@@ -163,6 +163,8 @@ done
 AGENT_KIND="${AGENT_KIND:-dev}"
 IN_PROGRESS_SECTION="${IN_PROGRESS_SECTION:-In Progress}"
 REVIEW_SECTION="${REVIEW_SECTION:-AI Review}"
+OWNER_REVIEW_SECTION="${OWNER_REVIEW_SECTION:-Review}"
+DONE_SECTION="${DONE_SECTION:-Done}"
 QA_FAIL_SECTION="${QA_FAIL_SECTION:-}"
 QA_BLOCKED_SECTION="${QA_BLOCKED_SECTION:-Agent Blocked (Infra)}"
 QA_TURNAROUND_HOURS="${QA_TURNAROUND_HOURS:-4}"
@@ -178,6 +180,7 @@ TRIAGE_MODEL_CLI="${TRIAGE_MODEL_CLI:-$MODEL_CLI}"
 OWNER_COMMENT_CLASSIFIER_CLI="${OWNER_COMMENT_CLASSIFIER_CLI:-$TRIAGE_MODEL_CLI}"
 RESEARCH_CLI="${RESEARCH_CLI:-}"
 CHAT_CLI="${CHAT_CLI:-}"
+SECOND_OPINION_CLI="${SECOND_OPINION_CLI:-claude --print --model opus}"
 COMMENT_REWRITE_CLI="${CHAT_CLI:-$RESEARCH_CLI}"
 ADVISOR_MAX="${ADVISOR_MAX:-2}"
 ADVISOR_CLI="$RESEARCH_CLI"
@@ -400,6 +403,7 @@ BLOCKED="$STATE_DIR/$SLUG.blocked"
 # Pull requests first opened during this agent's runs remain attributable even
 # when an old or manually chosen branch name does not identify the agent.
 OPENED_PRS="$STATE_DIR/$SLUG.opened-prs"
+RELEASED_PRS="$STATE_DIR/$SLUG.released-prs"
 RUN_RECORD_DIR="$STATE_DIR/run-records"
 RUN_OUTPUT_DIR="$STATE_DIR/run-output"
 mkdir -p "$RUN_RECORD_DIR" "$RUN_OUTPUT_DIR"
@@ -442,7 +446,7 @@ PROGRESS_ELIGIBLE_COUNT=0
 PROGRESS_ELIGIBLE_TICKET=""
 PROGRESS_ELIGIBLE_URL=""
 PROGRESS_COLLECTION_COMPLETE="no"
-touch "$SEEN" "$ATTEMPTS" "$POSTED" "$MOVED" "$OPENED_PRS" "$RUNS" "$OWNER_CLASSIFICATIONS"
+touch "$SEEN" "$ATTEMPTS" "$POSTED" "$MOVED" "$OPENED_PRS" "$RELEASED_PRS" "$RUNS" "$OWNER_CLASSIFICATIONS"
 
 owner_classification_state() {
   awk -F '\t' -v board="$1" -v ref="$2" \
@@ -913,11 +917,18 @@ import json, os, sys
 path = sys.argv[1]
 status = os.environ["RECORD_STATUS"]
 row = {}
+try:
+    prior = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    prior = {}
 if status != "running":
-    try:
-        row = json.load(open(path, encoding="utf-8"))
-    except (OSError, ValueError):
-        pass
+    row = prior
+else:
+    for key in ("fix_rounds", "first_red_at", "last_failure_signature",
+                "last_qa_failure_id", "second_opinion", "second_opinion_at",
+                "second_opinion_round"):
+        if key in prior:
+            row[key] = prior[key]
 row.update({
     "slug": os.environ["RECORD_SLUG"], "agent_id": os.environ["RECORD_AGENT"],
     "pid": int(os.environ["RECORD_PID"]), "status": status,
@@ -1944,10 +1955,159 @@ if run_advisor_instruction; then
 fi
 check_maintainer_builds
 
-# Open pull requests are a two-slot pickup cap, not a one-PR freeze. The
-# adapter proves LIVE and marks red or pending PRs older than two hours as
-# unfixable, so they remain reportable without consuming a slot. Merged but
-# undeployed work keeps its existing hard gate.
+# ---------- owned pull-request binding (AGTE-130) ----------
+# An owned PR is the agent's only development work until the PR is merged and
+# QA has passed. This runs before both normal and exact-ticket event ranking.
+pr_fix_state() {
+  local path="$1"
+  python3 - "$path" <<'PYEOF'
+import json, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+print(int(row.get("fix_rounds") or 0))
+print(str(row.get("first_red_at") or ""))
+print(str(row.get("last_qa_failure_id") or ""))
+print(str(row.get("second_opinion") or ""))
+print(int(row.get("second_opinion_round") or 0))
+PYEOF
+}
+
+record_pr_fix_round() {
+  local path="$1" signature="$2" qa_failure_id="$3"
+  SIGNATURE="$signature" QA_FAILURE_ID="$qa_failure_id" NOW="$(date -Is)" python3 - "$path" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+try:
+    row = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+row["fix_rounds"] = int(row.get("fix_rounds") or 0) + 1
+row.setdefault("first_red_at", os.environ["NOW"])
+row["last_failure_signature"] = os.environ["SIGNATURE"]
+if os.environ["QA_FAILURE_ID"]:
+    row["last_qa_failure_id"] = os.environ["QA_FAILURE_ID"]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+print(row["fix_rounds"])
+PYEOF
+}
+
+record_second_opinion() {
+  local path="$1" diagnosis="$2" round="$3"
+  DIAGNOSIS="$diagnosis" ROUND="$round" NOW="$(date -Is)" python3 - "$path" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+try:
+    row = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+row["second_opinion"] = os.environ["DIAGNOSIS"]
+row["second_opinion_at"] = os.environ["NOW"]
+row["second_opinion_round"] = int(os.environ["ROUND"])
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+}
+
+command_family() {
+  COMMAND_VALUE="$1" python3 -c '
+import os, shlex
+from pathlib import Path
+try:
+    argv = shlex.split(os.environ["COMMAND_VALUE"])
+except ValueError:
+    argv = []
+family = Path(argv[0]).name.casefold() if argv else ""
+for index, value in enumerate(argv):
+    if value == "--provider" and index + 1 < len(argv):
+        family = argv[index + 1].casefold()
+    elif value.startswith("--provider="):
+        family = value.split("=", 1)[1].casefold()
+if family in {"hax", "pi"}:
+    family = ""
+print(family)'
+}
+
+run_second_opinion() {
+  local gate="$1" record="$2" number ref feedback diff history prompt output diagnosis
+  local dev_family dev_families reviewer_family provider command reviewer_argv=()
+  number="$(row_field "$gate" number)"
+  ref="$(row_field "$gate" ticket)"
+  feedback="$(row_field "$gate" feedback)"
+  dev_families="$(command_family "$MODEL_CLI")"
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    command="$(provider_command "$provider")"
+    [ -n "$command" ] || continue
+    dev_family="$(command_family "$command")"
+    [ -z "$dev_family" ] || dev_families="${dev_families}${dev_families:+$'\n'}${dev_family}"
+  done < <(printf '%s\n' "$PROVIDER_ORDER" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  reviewer_family="$(command_family "$SECOND_OPINION_CLI")"
+  if [ -n "$reviewer_family" ] && printf '%s\n' "$dev_families" | grep -qxF "$reviewer_family"; then
+    log "second opinion for PR #$number refused: reviewer family $reviewer_family matches a development worker"
+    return 1
+  fi
+  core_command_available "$SECOND_OPINION_CLI" || {
+    log "second opinion for PR #$number could not run: SECOND_OPINION_CLI is unavailable"
+    return 1
+  }
+  diff="$(gh pr diff "$number" --repo "$PR_REPO" 2>>"$LOG")" || return 1
+  history="$(cat "$record" 2>/dev/null || printf '{}')"
+  prompt="Review PR #$number for $ref as an independent second opinion. You are a different model family from the development worker.
+
+Return one line only. Either give the concrete fix, or write exactly: not fixable here because <reason>.
+
+PR diff:
+$diff
+
+CI and QA failure evidence:
+$feedback
+
+Fix-round history:
+$history"
+  read -r -a reviewer_argv <<< "$SECOND_OPINION_CLI"
+  output="$(timeout 900 "${reviewer_argv[@]}" "$prompt" 2>>"$LOG")" || return 1
+  diagnosis="$(OUTPUT="$output" python3 -c 'import os; print(" ".join(os.environ["OUTPUT"].split())[:1200])')"
+  [ -n "$diagnosis" ] || return 1
+  opinion_file="$STATE_DIR/.second-opinion-$SLUG-$number.$$"
+  printf 'Second opinion: %s\n' "$diagnosis" > "$opinion_file"
+  if ! post_ticket_comment "$ref" raw-file "$opinion_file"; then
+    rm -f "$opinion_file"
+    return 1
+  fi
+  rm -f "$opinion_file"
+  record_second_opinion "$record" "$diagnosis" "$PR_FIX_ROUNDS"
+  SECOND_OPINION_DIAGNOSIS="$diagnosis"
+  case "${diagnosis,,}" in
+    'not fixable here because '*) return 10 ;;
+  esac
+  return 0
+}
+
+release_owned_pr() {
+  local gate="$1" diagnosis="$2" number ref board checks body
+  number="$(row_field "$gate" number)"
+  ref="$(row_field "$gate" ticket)"
+  board="$(row_field "$gate" board)"; [ -n "$board" ] || board="${BOARD_ID%%,*}"
+  checks="$(ROW="$gate" python3 -c 'import json,os; print(", ".join(json.loads(os.environ["ROW"]).get("failed_checks") or ["QA fail"]))')"
+  body="Closing after the structured repair rounds. Failing checks: $checks. Second-opinion diagnosis: $diagnosis"
+  gh pr comment "$number" --repo "$PR_REPO" --body "$body" >>"$LOG" 2>&1 || return 1
+  adapter_add_label "$BOARD_CLI" "$TOKEN_FILE" "$board" "$ref" needs-human >>"$LOG" 2>&1 || return 1
+  move_ticket_or_report "$ref" "$OWNER_REVIEW_SECTION" "$board" "PR release" || return 1
+  adapter_unassign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1 || return 1
+  gh pr close "$number" --repo "$PR_REPO" >>"$LOG" 2>&1 || return 1
+  printf '%s\t%s\t%s\n' "$PR_REPO" "$number" "$ref" >> "$RELEASED_PRS" || return 1
+  log "released $ref from PR #$number after second opinion; branch kept"
+}
+
 PR_GATES=""
 PR_GATE=""
 PR_REPORT_GATE=""
@@ -1963,51 +2123,18 @@ PR_GATE_SINCE=""
 PR_GATE_REASON=""
 PR_GATE_MERGED_AT=""
 PR_OPEN_TICKETS=""
+PR_FIX_DIAGNOSIS=""
 if declare -F adapter_pr_gate >/dev/null 2>&1; then
   PR_GATES="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
               "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" "$OPENED_PRS" 2>>"$LOG")" || die \
-    "cannot determine whether $SLUG has a pull request that is not live" \
+    "cannot determine whether $SLUG owns a pull request" \
     "read $LOG and restore GitHub or board access; no ticket was claimed"
 fi
 if [ -n "$PR_GATES" ]; then
-  PR_GATE="$(printf '%s\n' "$PR_GATES" | python3 -c '
-import json, sys
-rows = [json.loads(line) for line in sys.stdin if line.strip()]
-deploy = [row for row in rows if str(row.get("state") or "").startswith("merged-")]
-slots = [row for row in rows if row.get("pickup_slot") is True]
-actionable = [row for row in slots if row.get("action") == "fix"]
-if deploy:
-    chosen = deploy[0]
-elif len(slots) >= 2:
-    chosen = (actionable or slots)[0]
-else:
-    chosen = rows[0]
-print(json.dumps(chosen))
-')"
-  PR_REPORT_GATE="$(printf '%s\n' "$PR_GATES" | python3 -c '
-import json, sys
-rows = [json.loads(line) for line in sys.stdin if line.strip()]
-unfixable = [row for row in rows if row.get("unfixable") is True]
-print(json.dumps((unfixable or rows)[0]))
-')"
-  PR_GATE_COUNT="$(printf '%s\n' "$PR_GATES" | python3 -c '
-import json, sys
-print(sum(json.loads(line).get("pickup_slot") is True for line in sys.stdin if line.strip()))
-')"
-  PR_DEPLOY_GATE_COUNT="$(printf '%s\n' "$PR_GATES" | python3 -c '
-import json, sys
-print(sum(str(json.loads(line).get("state") or "").startswith("merged-") for line in sys.stdin if line.strip()))
-')"
-  if [ "$PR_GATE_COUNT" -ge 2 ] || [ "$PR_DEPLOY_GATE_COUNT" -gt 0 ]; then
-    PR_PICKUP_BLOCKED="yes"
-  fi
-  PR_OPEN_TICKETS="$(printf '%s\n' "$PR_GATES" | python3 -c '
-import json, sys
-for line in sys.stdin:
-    row = json.loads(line)
-    if not str(row.get("state") or "").startswith("merged-"):
-        print(row.get("ticket") or "")
-')"
+  PR_GATE="$(printf '%s\n' "$PR_GATES" | sed -n '1p')"
+  PR_REPORT_GATE="$PR_GATE"
+  PR_GATE_COUNT=1
+  PR_PICKUP_BLOCKED="yes"
   PR_GATE_ACTION="$(row_field "$PR_GATE" action)"
   PR_GATE_NUMBER="$(row_field "$PR_GATE" number)"
   PR_GATE_STATE="$(row_field "$PR_GATE" state)"
@@ -2016,68 +2143,126 @@ for line in sys.stdin:
   PR_GATE_SINCE="$(row_field "$PR_GATE" since)"
   PR_GATE_REASON="$(row_field "$PR_GATE" wait_reason)"
   PR_GATE_MERGED_AT="$(row_field "$PR_GATE" merged_at)"
-  case "$PR_GATE_STATE" in
-    merged-*)
-      progress_event --event merge --pr "$PR_GATE_NUMBER" --pr-url "$PR_GATE_URL" \
-        --ticket "$PR_GATE_TICKET" --occurred-at "$PR_GATE_MERGED_AT"
-      ;;
-  esac
-  gate_rows="$BLOCKED.gates.$$"
-  printf '%s\n' "$PR_GATES" > "$gate_rows"
-  if [ "$PR_PICKUP_BLOCKED" = "yes" ]; then
-    python3 - "$gate_rows" "$BLOCKED" <<'PYEOF'
+  if [ -n "$PR_GATE_MERGED_AT" ]; then
+    progress_event --event merge --pr "$PR_GATE_NUMBER" --pr-url "$PR_GATE_URL" \
+      --ticket "$PR_GATE_TICKET" --occurred-at "$PR_GATE_MERGED_AT"
+  fi
+  PR_OPEN_TICKETS="$(printf '%s\n' "$PR_GATES" | python3 -c 'import json,sys; [print(json.loads(line).get("ticket") or "") for line in sys.stdin if line.strip()]')"
+  explain "bound to PR #$PR_GATE_NUMBER for $PR_GATE_TICKET: $PR_GATE_STATE"
+
+  gate_board="$(row_field "$PR_GATE" board)"; [ -n "$gate_board" ] || gate_board="${BOARD_ID%%,*}"
+  gate_labels=",$(ROW="$PR_GATE" python3 -c 'import json,os; print(",".join(json.loads(os.environ["ROW"]).get("labels") or []))'),"
+  gate_owner="$(qa_config_field "$gate_board" owner_id)"
+  gate_humans=",$(ROW="$PR_GATE" python3 -c 'import json,os; print(",".join(json.loads(os.environ["ROW"]).get("human_assignee_ids") or []))'),"
+  gate_classification="$(owner_classification_state "$gate_board" "$PR_GATE_TICKET")"
+  read -r _ gate_owner_state <<< "$gate_classification"
+  if [[ "$gate_labels" == *,valentin,* ]] || { [ -n "$gate_owner" ] && [[ "$gate_humans" == *",$gate_owner,"* ]]; } \
+     || [ "${gate_owner_state:-}" = "hold" ]; then
+    log "owned PR #$PR_GATE_NUMBER is held by the owner; no fix or new-ticket ranking ran"
+    exit 0
+  fi
+
+  mkdir -p "$(dirname "$BLOCKED")"
+  ROW="$PR_GATE" python3 - "$BLOCKED" <<'PYEOF'
 import json, os, sys
-source, path = sys.argv[1:]
-with open(source, encoding="utf-8") as handle:
-    rows = [json.loads(line) for line in handle if line.strip()]
-deploy = [row for row in rows if str(row.get("state") or "").startswith("merged-")]
-slots = [row for row in rows if row.get("pickup_slot") is True]
-blocking = [row for row in rows if row in deploy or (len(slots) >= 2 and row in slots)]
-items = [{"pr": row["number"], "state": row["state"], "since": row["since"],
-          "ticket": row["ticket"]} for row in blocking]
-oldest = dict(items[0])
-oldest["prs"] = items
+row = json.loads(os.environ["ROW"])
+value = {"pr": row["number"], "state": row["state"], "since": row["since"],
+         "ticket": row["ticket"], "prs": [{"pr": row["number"], "state": row["state"],
+         "since": row["since"], "ticket": row["ticket"]}]}
+path = sys.argv[1]
 temporary = path + ".new"
 with open(temporary, "w", encoding="utf-8") as handle:
-    json.dump(oldest, handle)
+    json.dump(value, handle)
     handle.write("\n")
 os.replace(temporary, path)
 PYEOF
-  else
-    rm -f "$BLOCKED"
+
+  PROGRESS_WAIT_TICKET="$PR_GATE_TICKET"
+  PROGRESS_WAIT_PR="$PR_GATE_NUMBER"
+  PROGRESS_WAIT_PR_URL="$PR_GATE_URL"
+  PROGRESS_WAIT_SINCE="$PR_GATE_SINCE"
+  case "$PR_GATE_STATE" in
+    pending) PROGRESS_WAIT_STATE="checks-pending" ;;
+    awaiting-review) PROGRESS_WAIT_STATE="awaiting-merge" ;;
+    *) PROGRESS_WAIT_STATE="blocked"; PROGRESS_WAIT_REASON="$PR_GATE_REASON" ;;
+  esac
+
+  if [ "$PR_GATE_STATE" != "red" ] || [ "$PR_GATE_ACTION" != "fix" ]; then
+    [ "$DRY_RUN" = "no" ] || echo "bound to PR #$PR_GATE_NUMBER ($PR_GATE_STATE); no new ticket was ranked."
+    exit 0
   fi
-  rm -f "$gate_rows"
-  PR_GATE_SUMMARY="$(printf '%s\n' "$PR_GATES" | python3 -c '
-import json, sys
-parts = []
-for rank, line in enumerate(sys.stdin, 1):
-    row = json.loads(line)
-    parts.append("rank %d #%s %s (%s)" % (rank, row["number"], row["ticket"], row["state"]))
-print("owned non-live PRs oldest first: " + ", ".join(parts))
-')"
-  explain "$PR_GATE_SUMMARY"
+  if [ "$DRY_RUN" = "yes" ]; then
+    echo "would run a structured fix round for PR #$PR_GATE_NUMBER; no new ticket was ranked."
+    exit 0
+  fi
+
+  pr_record="$RUN_RECORD_DIR/$SLUG-$PR_GATE_TICKET.json"
+  pr_state="$(pr_fix_state "$pr_record")"
+  { IFS= read -r PR_FIX_ROUNDS; IFS= read -r PR_FIRST_RED_AT; IFS= read -r PR_LAST_QA_FAILURE; \
+    IFS= read -r PR_SECOND_OPINION; IFS= read -r PR_SECOND_OPINION_ROUND; } <<< "$pr_state"
+  qa_failure_id="$(row_field "$PR_GATE" qa_failure_id)"
+  if [ -n "$qa_failure_id" ] && [ "$qa_failure_id" = "$PR_LAST_QA_FAILURE" ]; then
+    log "QA fail $qa_failure_id on $PR_GATE_TICKET already counted; waiting for a new QA verdict"
+    exit 0
+  fi
+  if [ -n "$PR_SECOND_OPINION" ]; then
+    PR_FIX_DIAGNOSIS="$PR_SECOND_OPINION"
+    if [[ "${PR_SECOND_OPINION,,}" == 'not fixable here because '* ]] \
+       || [ "$PR_FIX_ROUNDS" -gt "$PR_SECOND_OPINION_ROUND" ]; then
+      release_owned_pr "$PR_GATE" "$PR_SECOND_OPINION" || {
+        log "release of PR #$PR_GATE_NUMBER failed; binding remains"
+        exit 0
+      }
+      PR_GATES=""; PR_GATE=""; PR_REPORT_GATE=""; PR_GATE_COUNT=0
+      PR_PICKUP_BLOCKED="no"; PR_OPEN_TICKETS=""; rm -f "$BLOCKED"
+    fi
+  else
+    opinion_due="no"
+    [ "$PR_FIX_ROUNDS" -ge 2 ] && opinion_due="yes"
+    if [ -n "$PR_FIRST_RED_AT" ] && FIRST_RED="$PR_FIRST_RED_AT" python3 -c '
+import datetime, os, sys
+try:
+    first = datetime.datetime.fromisoformat(os.environ["FIRST_RED"].replace("Z", "+00:00"))
+    if first.tzinfo is None: first = first.replace(tzinfo=datetime.timezone.utc)
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if (datetime.datetime.now(datetime.timezone.utc) - first).total_seconds() >= 10800 else 1)
+'; then opinion_due="yes"; fi
+    if [ "$opinion_due" = "yes" ]; then
+      set +e
+      run_second_opinion "$PR_GATE" "$pr_record"
+      opinion_rc=$?
+      set -e
+      if [ "$opinion_rc" -eq 10 ]; then
+        release_owned_pr "$PR_GATE" "$SECOND_OPINION_DIAGNOSIS" || {
+          log "release of PR #$PR_GATE_NUMBER failed; binding remains"
+          exit 0
+        }
+        PR_GATES=""; PR_GATE=""; PR_REPORT_GATE=""; PR_GATE_COUNT=0
+        PR_PICKUP_BLOCKED="no"; PR_OPEN_TICKETS=""; rm -f "$BLOCKED"
+      elif [ "$opinion_rc" -ne 0 ]; then
+        log "second opinion for PR #$PR_GATE_NUMBER failed; binding remains"
+        exit 0
+      else
+        PR_FIX_DIAGNOSIS="$SECOND_OPINION_DIAGNOSIS"
+      fi
+    fi
+  fi
+
+  if [ -n "$PR_GATE" ]; then
+    failure_signature="$(ROW="$PR_GATE" python3 -c 'import json,os; row=json.loads(os.environ["ROW"]); print(", ".join(row.get("failed_checks") or ["review feedback"]) + " | " + str(row.get("first_error_line") or "no error line reported"))')"
+    fix_round=$((PR_FIX_ROUNDS + 1))
+  fi
 else
   rm -f "$BLOCKED"
 fi
-if [ -n "$PR_REPORT_GATE" ]; then
-  report_action="$(row_field "$PR_REPORT_GATE" action)"
-  report_state="$(row_field "$PR_REPORT_GATE" state)"
-  if [ "$report_action" = "wait" ] || [ "$report_action" = "fix" ] || [ "$report_action" = "observe" ]; then
-    PROGRESS_WAIT_TICKET="$(row_field "$PR_REPORT_GATE" ticket)"
-    PROGRESS_WAIT_PR="$(row_field "$PR_REPORT_GATE" number)"
-    PROGRESS_WAIT_PR_URL="$(row_field "$PR_REPORT_GATE" url)"
-    PROGRESS_WAIT_SINCE="$(row_field "$PR_REPORT_GATE" since)"
-    case "$report_state" in
-      checks-pending|awaiting-merge) PROGRESS_WAIT_STATE="$report_state" ;;
-      *)
-        PROGRESS_WAIT_STATE="blocked"
-        PROGRESS_WAIT_REASON="$(row_field "$PR_REPORT_GATE" wait_reason)"
-        [ -n "$PROGRESS_WAIT_REASON" ] || PROGRESS_WAIT_REASON="$report_state"
-        ;;
-    esac
-  fi
-fi
 
+# A red binding supplies the only candidate this tick. Do not list or rank new
+# tickets first: poll and exact-ticket event entry points share this path.
+if [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$PR_GATE_ACTION" = "fix" ]; then
+  OWNED_ROWS=""
+  CANDIDATES=""
+else
 # A third source of candidates, alongside the board's own list: tickets this
 # agent already owns, wherever they now sit. A ticket claimed here can move to
 # a review column outside WATCH_SECTIONS, and a reply there is invisible to
@@ -2127,18 +2312,24 @@ fi
 if [ -z "$TARGET_TICKET" ] && declare -F adapter_persist_tick_candidates >/dev/null 2>&1; then
   printf '%s\n' "$CANDIDATES" | adapter_persist_tick_candidates
 fi
+fi
 # A red owed PR is represented as a candidate so it uses the normal isolated
 # workdir and model launch. It is never a board claim or part of the failure
 # retry ladder, but it shares the per-ticket run cooldown.
 if [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$PR_GATE_ACTION" = "fix" ]; then
-  pr_row="$(GATE="$PR_GATE" AID="$AGENT_ID" BOARD="${BOARD_ID%%,*}" python3 -c '
+  pr_row="$(GATE="$PR_GATE" AID="$AGENT_ID" BOARD="${BOARD_ID%%,*}" DIAGNOSIS="$PR_FIX_DIAGNOSIS" \
+    ROUND="${fix_round:-}" SIGNATURE="${failure_signature:-}" QA_FAILURE_ID="${qa_failure_id:-}" python3 -c '
 import json, os
 p = json.loads(os.environ["GATE"])
 print(json.dumps({"id":"pr-%s" % p["number"], "ref":p["ticket"], "section":"Pull request",
                   "title":p["title"], "description":p.get("feedback") or "",
                   "agent_ids":[os.environ["AID"]], "assignee_count":1, "labels":[],
-                  "comment_count":0, "board":os.environ["BOARD"], "url":p["url"],
+                  "comment_count":0, "board":p.get("board") or os.environ["BOARD"], "url":p["url"],
                   "trigger":"pr_fix", "pr_number":p["number"], "pr_branch":p["branch"],
+                  "pr_base":p.get("base") or "main", "pr_merged":bool(p.get("merged_at")),
+                  "pr_fix_round":os.environ["ROUND"], "pr_diagnosis":os.environ["DIAGNOSIS"],
+                  "pr_failure_signature":os.environ["SIGNATURE"],
+                  "pr_qa_failure_id":os.environ["QA_FAILURE_ID"],
                   "pr_feedback":p.get("feedback") or ""}))
 ')"
   CANDIDATES="$(printf '%s\n%s\n' "$CANDIDATES" "$pr_row")"
@@ -2798,6 +2989,26 @@ print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:120
   fi
   key="$task_id:$comment_id"
 
+  if [ "$is_pr_fix" = "yes" ]; then
+    pr_fix_round="$(row_field "$row" pr_fix_round)"
+    pr_failure_signature="$(row_field "$row" pr_failure_signature)"
+    pr_qa_failure_id="$(row_field "$row" pr_qa_failure_id)"
+    fix_comment="$STATE_DIR/.fix-round-$SLUG-$(row_field "$row" pr_number).$$"
+    printf 'Fix round %s: %s\n' "$pr_fix_round" "$pr_failure_signature" > "$fix_comment"
+    if ! post_ticket_comment "$ref" raw-file "$fix_comment"; then
+      rm -f "$fix_comment"
+      log "fix round $pr_fix_round for $ref could not be announced; binding remains"
+      continue
+    fi
+    rm -f "$fix_comment"
+    recorded_round="$(record_pr_fix_round "$RUN_RECORD_DIR/$SLUG-$ref.json" \
+      "$pr_failure_signature" "$pr_qa_failure_id")"
+    if [ "$recorded_round" != "$pr_fix_round" ]; then
+      log "fix round state changed for $ref: announced $pr_fix_round but recorded $recorded_round; binding remains"
+      continue
+    fi
+  fi
+
   # Scored before the run starts, because both things the score decides (which
   # model, and whether the agent has to plan first) have to be settled before
   # the first token is spent.
@@ -2881,17 +3092,28 @@ post the verdict but miss the move, the runner applies the move from the marker.
 
   if [ "$is_pr_fix" = "yes" ]; then
     pr_branch="$(row_field "$row" pr_branch)"
+    pr_fix_round="$(row_field "$row" pr_fix_round)"
+    pr_diagnosis="$(row_field "$row" pr_diagnosis)"
+    pr_merged="$(row_field "$row" pr_merged)"
+    if [ "$pr_merged" = "True" ]; then
+      pr_delivery="The original PR is already merged because QA found this failure. Commit and push the fix on $pr_branch, then open a follow-up PR for $ref from that branch."
+    else
+      pr_delivery="Commit and push the focused fix to this same PR branch."
+    fi
     PROMPT="Read $SKILLS_INDEX_SENTENCE first, in that order, then fix the existing pull request $url for $ref.
 
-This is the only work you may do this tick. Continue on branch $pr_branch. Do not claim or start another ticket, do not hand this PR to a manager, and do not stop because an attempts or cooldown file says to stop. Push a focused fix to this same PR, then re-read its checks and review feedback if time permits.
+This is fix round ${pr_fix_round:-unknown}. This is the only work you may do this tick. The runner checked out branch $pr_branch and rebased it on the PR base before this run. Resolve any rebase conflict. $pr_delivery Do not claim or start another ticket and do not hand this PR to a manager.
 
-Current failing feedback follows. Check names and reviewer text are exact; use the attached failed-run logs to find the root cause.
+Current failing feedback follows. Check names are exact. Each failing job includes only its last 80 failed-log lines.
 
 $comment_text
 
-$AGENT_ADVISOR_GUIDANCE
+${pr_diagnosis:+Second-opinion diagnosis to apply in this one final round:
+$pr_diagnosis
 
-Keep fixing this PR until it merges and is live."
+}$AGENT_ADVISOR_GUIDANCE
+
+Keep ownership of this PR until it merges and QA passes."
   fi
 
   if [ "$is_reply_only" = "yes" ]; then
@@ -3056,6 +3278,20 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
       write_failure_status "$ref" workdir "could not create a working directory under $WORKDIR_ROOT"
       continue
     }
+  fi
+
+  if [ "$is_pr_fix" = "yes" ]; then
+    pr_branch="$(row_field "$row" pr_branch)"
+    pr_base="$(row_field "$row" pr_base)"; [ -n "$pr_base" ] || pr_base="main"
+    if ! git -C "$RUN_DIR" fetch origin "$pr_base" "$pr_branch" >>"$LOG" 2>&1 \
+       || ! git -C "$RUN_DIR" checkout -B "$pr_branch" "origin/$pr_branch" >>"$LOG" 2>&1; then
+      log "PR fix preparation failed for $ref: could not check out $pr_branch"
+      [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+      continue
+    fi
+    if ! git -C "$RUN_DIR" rebase "origin/$pr_base" >>"$LOG" 2>&1; then
+      log "PR fix preparation left a rebase conflict for $ref; the worker must resolve it"
+    fi
   fi
 
   if [ "$GRAFT" = "on" ] && [ "$is_reply_only" = "no" ]; then
@@ -3424,6 +3660,12 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "provider $route_provider quota exhausted"
       fi
     done < <(provider_routes "$RUN_MODEL_CLI")
+    if [ "$rc" -eq 0 ] && [ "$is_pr_fix" = "yes" ]; then
+      if ! git -C "$RUN_DIR" push --force-with-lease origin "HEAD:refs/heads/$pr_branch" >>"$LOG" 2>&1; then
+        printf 'PR fix push failed for %s\n' "$pr_branch" >> "$ERRFILE"
+        rc=74
+      fi
+    fi
     if [ "$rc" -ne 0 ] && [ "$quota_count" -gt 0 ] && [ "$quota_count" -eq "$available_count" ]; then
       quota_exhausted=yes
     fi
