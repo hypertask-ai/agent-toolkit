@@ -51,10 +51,17 @@ elif any("/pulls?" in arg for arg in args):
 else:
     raise SystemExit(2)
 PYEOF
-chmod +x "$BIN/board" "$BIN/gh"
+cat > "$BIN/systemctl" <<'PYEOF'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+with pathlib.Path(os.environ["SYSTEMCTL_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\n")
+PYEOF
+chmod +x "$BIN/board" "$BIN/gh" "$BIN/systemctl"
 printf 'fixture-token\n' > "$TMP/token"
 : > "$TMP/board.log"
 : > "$TMP/gh.log"
+: > "$TMP/systemctl.log"
 
 cat > "$CONF/product-bot.conf" <<EOF
 AGENT_SLUG="product-bot"
@@ -124,7 +131,8 @@ watch() {
   local tasks="$1" mode="$2" disk="$3"
   HOME="$TMP/home" PATH="$BIN:$PATH" BOARD_LOG="$TMP/board.log" \
     BOARD_COUNTER="$TMP/board-counter" GH_LOG="$TMP/gh.log" GH_MODE="$mode" \
-    FLEET_WATCH_TASKS_FILE="$tasks" "$WATCH" --config-dir "$CONF" --state-dir "$STATE" \
+    SYSTEMCTL_LOG="$TMP/systemctl.log" FLEET_WATCH_TASKS_FILE="$tasks" \
+    "$WATCH" --config-dir "$CONF" --state-dir "$STATE" \
       --now 2026-09-20T12:00:00Z --disk-pct "$disk"
 }
 
@@ -145,7 +153,8 @@ PYEOF
   fi
 done
 
-if STATE="$STATE" BOARD="$TMP/board.log" GHLOG="$TMP/gh.log" python3 - <<'PYEOF'
+if STATE="$STATE" BOARD="$TMP/board.log" GHLOG="$TMP/gh.log" \
+   SYSLOG="$TMP/systemctl.log" python3 - <<'PYEOF'
 import json, os
 health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
 assert health["ok"] is False
@@ -154,6 +163,10 @@ assert health["metrics"]["live_runs"]["dev-1"] == 0
 assert health["metrics"]["failed_ticks"]["dev-1"] == 3
 assert health["metrics"]["disk_pct"] == 86
 assert health["metrics"]["github_remaining"] == 20
+assert [(row["agent"], row["action"], row["status"]) for row in health["actions"]] == [
+    ("dev-1", "start", "started"), ("dev-2", "start", "started")]
+state = json.load(open(os.path.join(os.environ["STATE"], "fleet-watch-state.json")))
+assert state["rules"]["R2"]["actions"] == health["actions"]
 board = [json.loads(line) for line in open(os.environ["BOARD"])]
 creates = [row for row in board if row[:2] == ["task", "create"]]
 comments = [row for row in board if row[:2] == ["comment", "add"]]
@@ -162,11 +175,22 @@ for create in creates:
     assert create[create.index("--project") + 1] == "5500"
     assert create[create.index("--section") + 1] == "Review"
     assert create[create.index("--priority") + 1] == "high"
+r2 = next(row for row in creates if row[row.index("--title") + 1].startswith("R2:"))
+r2_body = r2[r2.index("--description") + 1]
+assert "started an immediate poll for agent dev-1" in r2_body
+assert "started an immediate poll for agent dev-2" in r2_body
 for comment in comments:
     body = comment[comment.index("--text") + 1]
     assert body.startswith("<p><strong>R") and "</strong></p><p>Action: " in body
 calls = [json.loads(line) for line in open(os.environ["GHLOG"])]
 assert len(calls) == 2
+starts = [json.loads(line) for line in open(os.environ["SYSLOG"])]
+assert starts == [
+    ["--user", "--no-block", "start", "agent-board-poll@dev-1.service"],
+    ["--user", "--no-block", "start", "agent-board-poll@dev-2.service"],
+]
+log = open(os.path.join(os.environ["STATE"], "fleet-watch.log")).read().splitlines()
+assert "actions=dev-1:start-started,dev-2:start-started" in log[-1]
 PYEOF
 then
   ok fleet-watch-contract 'health metrics, alarm shape, and two-call GitHub budget are enforced'

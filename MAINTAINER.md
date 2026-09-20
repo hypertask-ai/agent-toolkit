@@ -230,7 +230,7 @@ moves to In Progress only after that handshake holds.
 ## Fleet throughput watch
 
 `agent-fleet-watch.timer` runs every 15 minutes, starting five minutes after boot.
-It is a deterministic host check and never starts a model. It reads runner state
+It is a deterministic host check and never invokes a model itself. It reads runner state
 and agent confs locally, reads each board separately through Product Bot's
 existing Hypertask adapter and token, and uses at most two GitHub REST calls per
 repository per run. An unreadable board is listed in `fleet-health.json` while
@@ -246,7 +246,10 @@ The seven rules cover: three hours without a merge while unassigned intake work
 waits during local daytime; an eligible agent with no completed run for one hour;
 three failed runner ticks in a row; duplicate agent bindings to one pull request;
 host disk use above 85 percent; exhausted GitHub REST capacity; and an agent left
-in manual claiming mode for two hours while unassigned intake work waits.
+in manual claiming mode for two hours while unassigned intake work waits. The
+one-hour idle-agent rule queues an immediate poll for every affected agent. Its
+alarm, durable rule state, health snapshot, and summary log record each start
+and whether systemd accepted it.
 
 Every pass atomically writes
 `~/.local/state/agent-board-poll/fleet-health.json`. The Agents page can read its
