@@ -230,10 +230,12 @@ moves to In Progress only after that handshake holds.
 
 `agent-fleet-watch.timer` runs every 15 minutes, starting five minutes after boot.
 It is a deterministic host check and never starts a model. It reads runner state
-and agent confs locally, reads board tickets through Product Bot's existing
-Hypertask adapter and token, and uses at most two GitHub REST calls per repository
-per run. A GitHub rate-limit response pauses the GitHub-dependent checks for that
-run instead of retrying.
+and agent confs locally, reads each board separately through Product Bot's
+existing Hypertask adapter and token, and uses at most two GitHub REST calls per
+repository per run. An unreadable board is listed in `fleet-health.json` while
+readable boards continue; the service fails only when no board can be read. A
+GitHub rate-limit response pauses the GitHub-dependent checks for that run instead
+of retrying.
 
 The watch raises one High ticket in toolkit `Review` per rule, with a six-hour
 per-rule cooldown. It sends no toast, chat-room message, or Telegram message.

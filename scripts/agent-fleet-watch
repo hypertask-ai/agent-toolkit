@@ -109,18 +109,20 @@ def run(command: list[str], *, environment: dict[str, str] | None = None) -> sub
         return subprocess.CompletedProcess(command, 127, "", str(error))
 
 
-def read_tasks(root: Path, product: dict[str, str], boards: list[str], state_dir: Path) -> tuple[list[dict[str, Any]], str]:
+def read_tasks(root: Path, product: dict[str, str], boards: list[str], state_dir: Path) -> tuple[
+        list[dict[str, Any]], list[str], list[dict[str, str]], str]:
     fixture = os.environ.get("FLEET_WATCH_TASKS_FILE", "")
     if fixture:
         try:
-            return [json.loads(line) for line in Path(fixture).read_text(encoding="utf-8").splitlines()
-                    if line.strip()], ""
+            tasks = [json.loads(line) for line in Path(fixture).read_text(encoding="utf-8").splitlines()
+                     if line.strip()]
+            return tasks, boards, [], ""
         except (OSError, ValueError) as error:
-            return [], f"task fixture failed: {error}"
+            return [], [], [], f"task fixture failed: {error}"
     adapter = product.get("BOARD_ADAPTER", "")
     token_file = product.get("TOKEN_FILE", "")
     if not adapter or not token_file:
-        return [], "Product Bot adapter or token file is not configured"
+        return [], [], [], "Product Bot adapter or token file is not configured"
     script = r'''
 set -euo pipefail
 CORE_ROOT="$1"
@@ -131,15 +133,25 @@ core_load_adapter "$3"
 adapter_require_tools
 adapter_list_candidates "$4" "$5" "*"
 '''
-    result = run(["bash", "-c", script, "fleet-watch-read", str(root), str(state_dir),
-                  adapter, token_file, ",".join(boards)])
-    if result.returncode != 0:
-        message = " ".join((result.stderr or result.stdout).split())[:240]
-        return [], f"Hypertask read failed: {message or 'adapter exited non-zero'}"
-    try:
-        return [json.loads(line) for line in result.stdout.splitlines() if line.strip()], ""
-    except ValueError:
-        return [], "Hypertask read returned invalid task data"
+    tasks: list[dict[str, Any]] = []
+    readable_boards: list[str] = []
+    skipped_boards: list[dict[str, str]] = []
+    for board in boards:
+        result = run(["bash", "-c", script, "fleet-watch-read", str(root), str(state_dir),
+                      adapter, token_file, board])
+        if result.returncode != 0:
+            message = " ".join((result.stderr or result.stdout).split())[:240]
+            skipped_boards.append({
+                "board": board,
+                "reason": f"Hypertask read failed: {message or 'adapter exited non-zero'}",
+            })
+            continue
+        try:
+            tasks.extend(json.loads(line) for line in result.stdout.splitlines() if line.strip())
+            readable_boards.append(board)
+        except ValueError:
+            skipped_boards.append({"board": board, "reason": "Hypertask read returned invalid task data"})
+    return tasks, readable_boards, skipped_boards, ""
 
 
 def board_config_sections(path: Path, board: str) -> set[str] | None:
@@ -422,16 +434,20 @@ def main() -> int:
         if not board_cli:
             raise RuntimeError("Product Bot board CLI is missing")
         boards = sorted({board for agent in agents for board in agent["boards"]})
-        tasks, task_error = read_tasks(root, product, boards, state_dir)
+        tasks, readable_boards, skipped_boards, task_error = read_tasks(
+            root, product, boards, state_dir)
+        readable_board_set = set(readable_boards)
         if task_error:
             operational_errors.append(task_error)
+        if not readable_boards and not task_error:
+            operational_errors.append("Hypertask read failed: no configured board could be read")
         tasks_by_board: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for task in tasks:
             if isinstance(task, dict):
                 tasks_by_board[str(task.get("board") or task.get("projectId") or "")].append(task)
-        intake = intake_sections(args.config_dir, root, agents, boards)
+        intake = intake_sections(args.config_dir, root, agents, readable_boards)
         unassigned: dict[str, list[dict[str, Any]]] = {}
-        for board in boards:
+        for board in readable_boards:
             names = {name.casefold() for name in intake.get(board, set())}
             unassigned[board] = [task for task in tasks_by_board.get(board, [])
                                  if str(task.get("section") or "").casefold() in names
@@ -444,13 +460,14 @@ def main() -> int:
             repo = agent["config"].get("PR_REPO", "")
             if repo:
                 for board in agent["boards"]:
-                    repo_votes[board][repo] += 1
+                    if board in readable_board_set:
+                        repo_votes[board][repo] += 1
         board_repos = {board: votes.most_common(1)[0][0] for board, votes in repo_votes.items() if votes}
         repos = sorted(set(board_repos.values()))
         remaining, repo_merges, github_note = github_data(repos, current)
         if github_note and remaining != 0:
             operational_errors.append(github_note)
-        merges_3h: dict[str, int | None] = {board: None for board in boards}
+        merges_3h: dict[str, int | None] = {board: None for board in readable_boards}
         breaches: dict[str, dict[str, str]] = {}
         if remaining == 0:
             add_breach(breaches, "R6", "GitHub has no API requests remaining, so merge checks are paused.",
@@ -482,6 +499,8 @@ def main() -> int:
             watched = {item.strip().casefold() for item in conf.get("WATCH_SECTIONS", "").split(",") if item.strip()}
             eligible = False
             for board in agent["boards"]:
+                if board not in readable_board_set:
+                    continue
                 for task in tasks_by_board.get(board, []):
                     section = str(task.get("section") or "").casefold()
                     agent_ids = {str(item) for item in task.get("agent_ids") or []}
@@ -526,7 +545,8 @@ def main() -> int:
         for agent in agents:
             slug = agent["slug"]
             conf = agent["config"]
-            waiting_boards = [board for board in agent["boards"] if unassigned.get(board)]
+            waiting_boards = [board for board in agent["boards"]
+                              if board in readable_board_set and unassigned.get(board)]
             manual = agent["kind"] in {"dev", "qa", "worker", "cli"} and conf.get("CLAIM_UNASSIGNED", "no") == "no"
             if manual and waiting_boards:
                 prior = parse_time(manual_since.get(slug))
@@ -573,6 +593,7 @@ def main() -> int:
             "checked_at": iso(current),
             "ok": not ordered_breaches and not operational_errors,
             "breaches": ordered_breaches,
+            "skipped_boards": skipped_boards,
             "metrics": {
                 "merges_3h": merges_3h,
                 "live_runs": live_runs,
@@ -585,14 +606,15 @@ def main() -> int:
                       "manual_since": manual_since})
         atomic_json(state_path, state)
         atomic_json(health_path, health)
-        note = github_note if remaining == 0 else "; ".join(operational_errors[:2])
+        notes = [f"skipped board {row['board']}: {row['reason']}" for row in skipped_boards]
+        notes.extend([github_note] if remaining == 0 else operational_errors[:2])
         line = f"{iso(current)} ok={str(health['ok']).lower()} breaches={','.join(sorted(breaches)) or 'none'}"
-        if note:
-            line += f" note={' '.join(note.split())[:240]}"
+        if notes:
+            line += f" note={' ; '.join(notes)[:240]}"
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
         print(line)
-        return 0 if not operational_errors else 1
+        return 0 if readable_boards else 1
 
 
 if __name__ == "__main__":
@@ -605,7 +627,7 @@ if __name__ == "__main__":
                 state_dir = Path(sys.argv[index + 1])
         state_dir.mkdir(parents=True, exist_ok=True)
         checked = iso(dt.datetime.now(dt.timezone.utc))
-        health = {"checked_at": checked, "ok": False, "breaches": [], "metrics": {
+        health = {"checked_at": checked, "ok": False, "breaches": [], "skipped_boards": [], "metrics": {
             "merges_3h": {}, "live_runs": {}, "failed_ticks": {}, "disk_pct": None,
             "github_remaining": None}}
         atomic_json(state_dir / "fleet-health.json", health)

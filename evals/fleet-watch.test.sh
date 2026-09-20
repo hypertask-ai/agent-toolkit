@@ -239,6 +239,117 @@ else
   bad fleet-watch-healthy 'the healthy snapshot or one-line log contract was wrong'
 fi
 
+SKIP_CONF="$TMP/skip-conf"
+SKIP_STATE="$TMP/skip-state"
+mkdir -p "$SKIP_CONF" "$SKIP_STATE/run-records"
+cat > "$SKIP_CONF/product-bot.conf" <<EOF
+AGENT_SLUG="product-bot"
+AGENT_KIND="answer"
+AGENT_ID="product-agent"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$BIN/board"
+WATCH_SECTIONS="*"
+CLAIM_UNASSIGNED="no"
+PR_REPO="example/work"
+EOF
+cat > "$SKIP_CONF/readable-dev.conf" <<EOF
+AGENT_SLUG="readable-dev"
+AGENT_KIND="dev"
+AGENT_ID="agent-readable"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$BIN/board"
+WATCH_SECTIONS="Bugs"
+CLAIM_UNASSIGNED="yes"
+PR_REPO="example/work"
+EOF
+cat > "$SKIP_CONF/support-bot.conf" <<EOF
+AGENT_SLUG="support-bot"
+AGENT_KIND="answer"
+AGENT_ID="support-agent"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="2101"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$BIN/board"
+WATCH_SECTIONS="*"
+CLAIM_UNASSIGNED="no"
+PR_REPO="example/support"
+EOF
+cat > "$SKIP_STATE/readable-dev.progress.json" <<'EOF'
+{"schema_version":1,"runner":"readable-dev","last_completed_run":{"ticket":"TEST-201","at":"2026-09-20T11:30:00Z"}}
+EOF
+: > "$SKIP_STATE/readable-dev.log"
+cat > "$BIN/curl" <<'PYEOF'
+#!/usr/bin/env python3
+import json, os, sys
+url = sys.argv[-1]
+forbidden = os.environ.get("CURL_MODE") == "forbidden" or "project_id=2101" in url
+if forbidden:
+    print(json.dumps({"error": "forbidden"}))
+    print("403")
+else:
+    print(json.dumps({"tasks": [{"id": 201, "ticketNumber": "TEST-201", "projectId": 15,
+                                  "section": "Bugs", "title": "Readable work",
+                                  "assignees": [{"agent": {"id": "agent-readable"}}]}]}))
+    print("200")
+PYEOF
+cat > "$BIN/hypertask" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$BIN/curl" "$BIN/hypertask"
+set +e
+HOME="$TMP/home" PATH="$BIN:$PATH" BOARD_LOG="$TMP/board.log" \
+  BOARD_COUNTER="$TMP/board-counter" GH_LOG="$TMP/gh.log" GH_MODE=recent \
+  FLEET_WATCH_INTAKE_JSON='{"15":["Bugs"],"2101":["Support"]}' \
+  "$WATCH" --config-dir "$SKIP_CONF" --state-dir "$SKIP_STATE" \
+    --now 2026-09-20T12:00:00Z --disk-pct 20 > "$TMP/skip.out" 2>&1
+skip_status=$?
+set -e
+if [ "$skip_status" -eq 0 ] && STATE="$SKIP_STATE" python3 - <<'PYEOF'
+import json, os
+state = os.environ["STATE"]
+health = json.load(open(os.path.join(state, "fleet-health.json")))
+assert health["ok"] is True and health["breaches"] == []
+assert health["metrics"]["merges_3h"] == {"15": 1}
+assert len(health["skipped_boards"]) == 1
+assert health["skipped_boards"][0]["board"] == "2101"
+assert "HTTP 403" in health["skipped_boards"][0]["reason"]
+lines = open(os.path.join(state, "fleet-watch.log")).read().splitlines()
+assert len(lines) == 1 and "skipped board 2101:" in lines[0] and "HTTP 403" in lines[0]
+PYEOF
+then
+  ok fleet-watch-skip-board 'one forbidden board is recorded while readable boards are evaluated successfully'
+else
+  bad fleet-watch-skip-board "partial board failure did not preserve the healthy board: $(cat "$TMP/skip.out")"
+fi
+
+ALL_SKIPPED_STATE="$TMP/all-skipped-state"
+mkdir -p "$ALL_SKIPPED_STATE/run-records"
+set +e
+HOME="$TMP/home" PATH="$BIN:$PATH" BOARD_LOG="$TMP/board.log" \
+  BOARD_COUNTER="$TMP/board-counter" GH_LOG="$TMP/gh.log" GH_MODE=recent CURL_MODE=forbidden \
+  FLEET_WATCH_INTAKE_JSON='{"15":["Bugs"],"2101":["Support"]}' \
+  "$WATCH" --config-dir "$SKIP_CONF" --state-dir "$ALL_SKIPPED_STATE" \
+    --now 2026-09-20T12:00:00Z --disk-pct 20 > "$TMP/all-skipped.out" 2>&1
+all_skipped_status=$?
+set -e
+if [ "$all_skipped_status" -ne 0 ] && STATE="$ALL_SKIPPED_STATE" python3 - <<'PYEOF'
+import json, os
+health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
+assert health["ok"] is False
+assert health["metrics"]["merges_3h"] == {}
+assert [row["board"] for row in health["skipped_boards"]] == ["15", "2101"]
+PYEOF
+then
+  ok fleet-watch-no-readable-boards 'the watch fails only when every configured board is unreadable'
+else
+  bad fleet-watch-no-readable-boards 'the watch did not fail after every board read failed'
+fi
+
 if grep -qF 'OnBootSec=5min' "$ROOT/install.sh" \
    && grep -qF 'OnUnitActiveSec=15min' "$ROOT/install.sh" \
    && grep -qF 'ExecStart=$BIN/agent-fleet-watch' "$ROOT/install.sh" \
