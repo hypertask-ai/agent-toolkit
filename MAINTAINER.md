@@ -93,16 +93,15 @@ visible text is its full id plus authoritative title.
 
 Set `MAINTAINER="on"` only for the one agent that owns setup changes. It must
 use a build job for every change to the toolkit, supervisor rules, analytics
-site, app, CLI, or Slack bot. A request to merge, release, update, or build is
-executed by the maintainer in that run and is never delegated or handed to a
-developer. The advisor session queues instructions and does not edit those
-repositories itself.
+site, app, CLI, or Slack bot. Update and build requests run in the current
+maintainer session and are never delegated. Runners never merge a pull request
+by hand. Auto-merge or the supervisor handles merges. The advisor session queues
+instructions and does not edit those repositories itself.
 
 ```sh
 agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]
 agent-template build status [id]
 agent-template build list
-agent-template merge <pr-url>
 agent-template update --keep-timers
 agent-template instruct <slug> <text|-> [--ticket <url>]
 ```
@@ -112,8 +111,7 @@ branch,memory cap`; the last field is optional. It defaults to 12 GB when the
 host has more than 32 GB of RAM and half of RAM otherwise. On first install,
 the slug and branch are discovered from each checkout's `origin` and
 `origin/HEAD`; updates never overwrite host policy. Build refuses a checkout
-whose current origin differs from its allowlist row, and build and merge
-refuse anything outside the file. The shipped file contains the six approved
+whose current origin differs from its allowlist row. The shipped file contains the six approved
 repositories and is installed only when the host has no allowlist, so host
 policy is never overwritten by an update. The reconciler fetches each listed
 base branch without changing the checkout and keeps a per-repository commit
@@ -123,8 +121,9 @@ A build writes its guarded prompt and output under
 `~/.local/state/agent-board-poll/<slug>-builds/`, launches a memory-capped
 systemd user unit, and records durable state in `<slug>-builds.json`. The prompt
 requires a scratch worktree, the non-engineer pull request body, green checks,
-squash merge, timer-preserving toolkit update, cleanup, and a report under ten
-lines. `build status` returns the exit marker and the last twelve output lines.
+auto-merge, timer-preserving toolkit update, cleanup, and a report under ten
+lines. It leaves the pull request open for the supervisor when auto-merge is
+unavailable. `build status` returns the exit marker and the last twelve output lines.
 
 Before each tick, the service checks completed build units and records any
 non-success result as failed even when no exit marker was written. An OOM kill
@@ -147,13 +146,12 @@ created by hand on board 5500 and assigned to Product Bot use the same normal
 run, build, and completion-comment path.
 
 Maintainer prompts require a four-part build spec: Ticket, What, Done when, and
-Guardrails. A board instruction to merge, release, update, or build on an
-allowlisted repository runs the matching maintainer command in that run. It
-never enters the ordinary developer pull request workflow or gets delegated to
-a developer. A successful direct merge gets a `Done:` comment with the linked
-pull request; background builds keep using the completion checker. Maintainer
-prompts forbid direct model-harness launches and answer questions about
-completed work from `build list`, not from memory.
+Guardrails. An update or build instruction for an allowlisted repository runs
+the matching maintainer command in that run. It never enters the ordinary
+developer pull request workflow or gets delegated. Manual merge requests are
+refused; background builds keep using the completion checker. Maintainer prompts
+forbid direct model-harness launches and answer questions about completed work
+from `build list`, not from memory.
 
 ## Channels
 
@@ -239,8 +237,10 @@ GitHub rate-limit response pauses the GitHub-dependent checks for that run inste
 of retrying.
 
 The watch raises one High ticket in toolkit `Review` per rule, with a six-hour
-per-rule cooldown. It sends no toast, chat-room message, or Telegram message.
-When a rule recovers, its open alarm moves to `Done`.
+per-rule cooldown. Each ticket is a manager report labelled `manager-only`; it
+contains the observation and asks agents to take no merge, assignment, or release
+action. Dev and QA runners skip that label. The watch sends no toast, chat-room
+message, or Telegram message. When a rule recovers, its open alarm moves to `Done`.
 
 The seven rules cover: three hours without a merge while unassigned intake work
 waits during local daytime; an eligible agent with no completed run for one hour;
@@ -427,7 +427,10 @@ pr-hygiene check merges a green PR that could not get auto-merge.
 Before any normal or event-ticket ranking, the runner reads one host-wide PR
 cache for the repository. The first tick after 60 seconds refreshes it under a
 lock and paginates every open PR plus merges from the last 48 hours. Each row
-stores the PR number, title, branch, and author, with no body. A GitHub rate-limit
+stores the PR number, title, branch, author, and labels, with no body. A pull
+request labelled `valentin-review` becomes a protected wait: the runner does not
+review, modify, close, or merge it. The runner command shim also refuses manual
+merges and checks this label before any pull request mutation. A GitHub rate-limit
 response records its reset time for the repository. Every runner skips GitHub
 calls until then, treats ownership as unknown, and continues its tick.
 

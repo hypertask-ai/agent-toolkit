@@ -78,7 +78,7 @@ EOF
 
 run_template() {
   HOME="$TMP" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$TMP/conf" \
-    BOARD_FIXTURE="$TMP/board" PATH="$TMP/bin:$PATH" AGENT_SLUG= "$ROOT/scripts/agent-template" "$@"
+    BOARD_FIXTURE="$TMP/board" PATH="$TMP/bin:/usr/bin:/bin" AGENT_SLUG= "$ROOT/scripts/agent-template" "$@"
 }
 
 blob=$'Please fix ticket writing because this long block mixes the customer result, the current failure, implementation notes, and proof.\nKeep every detail, but make the ticket easy for a product owner to scan and verify.'
@@ -138,7 +138,7 @@ COMMENT_CAPTURE="$TMP/comment"
 export COMMENT_CAPTURE
 adapter_install_board_cli writer-test "$TMP/token" "$TMP/comment-board" 'Test Bot' agent-1 5500 off
 original='<p><strong>Question: Can <span data-type="mention" data-label="name-6">Owner</span> approve this release plan after reviewing the customer impact, rollout steps, rollback steps, support notes, and expected result for everyone affected?</strong></p><p>Next: review the complete plan and answer when ready.</p>'
-HOME="$TMP" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+HOME="$TMP" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:/usr/bin:/bin" \
   AGENT_AI_WRITER_FIXTURE="$ROOT/evals/fixtures/write-with-ai-comment.json" \
   "$TMP/comment-board" comment add TEST-1 --text "$original" >/dev/null
 if grep -q '^<p><strong>Question:' "$COMMENT_CAPTURE" \

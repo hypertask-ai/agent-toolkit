@@ -175,13 +175,22 @@ for create in creates:
     assert create[create.index("--project") + 1] == "5500"
     assert create[create.index("--section") + 1] == "Review"
     assert create[create.index("--priority") + 1] == "high"
+    assert create[create.index("--labels") + 1] == "manager-only"
+    body = create[create.index("--description") + 1]
+    assert "Fleet watch manager report" in body
+    assert "Action:" not in body
+    assert "Merge the next" not in body
+    assert "assign its eligible ticket" not in body
+    assert "release the other agents" not in body
 r2 = next(row for row in creates if row[row.index("--title") + 1].startswith("R2:"))
 r2_body = r2[r2.index("--description") + 1]
 assert "started an immediate poll for agent dev-1" in r2_body
 assert "started an immediate poll for agent dev-2" in r2_body
 for comment in comments:
     body = comment[comment.index("--text") + 1]
-    assert body.startswith("<p><strong>R") and "</strong></p><p>Action: " in body
+    assert body.startswith("<p><strong>R")
+    assert "Fleet watch manager report" in body and "</strong></p><p>Observed: " in body
+    assert "<p>Acceptance: The manager reviewed this report.</p>" in body
 calls = [json.loads(line) for line in open(os.environ["GHLOG"])]
 assert len(calls) == 2
 starts = [json.loads(line) for line in open(os.environ["SYSLOG"])]

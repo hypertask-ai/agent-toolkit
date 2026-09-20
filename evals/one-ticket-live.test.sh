@@ -212,9 +212,10 @@ import os
 scenario = os.environ["SCENARIO"]
 state = os.environ["REQUEST_STATE"]
 page = int(os.environ.get("REQUEST_PAGE") or "1")
-def row(number, ticket, branch, author="shared-bot", updated="2026-09-18T21:00:00Z", merged=None):
+def row(number, ticket, branch, author="shared-bot", updated="2026-09-18T21:00:00Z", merged=None, labels=None):
     return {"number": number, "title": f"HTPR-{ticket} fix", "html_url": f"https://github.test/pull/{number}",
             "head": {"ref": branch}, "base": {"ref": "production"}, "user": {"login": author},
+            "labels": [{"name": label} for label in labels or []],
             "draft": False, "created_at": updated, "updated_at": updated, "merged_at": merged}
 rows = []
 merged_scenarios = {"deployed", "undeployed", "fallback", "base-missing", "qa-fail", "qa-passed"}
@@ -248,6 +249,9 @@ elif scenario not in merged_scenarios:
         rows = [row(13, 13, "dev-2/htpr-13", updated="2026-01-01T00:00:00Z")]
     elif scenario == "slug-prefix":
         rows = [row(12, 12, "DeV-1/htpr-12-fix", updated="2026-01-01T00:00:00Z")]
+    elif scenario == "valentin-review":
+        rows = [row(14, 14, "dev-1/htpr-14-fix", updated="2026-01-01T00:00:00Z",
+                    labels=["valentin-review"])]
     elif scenario != "record-open":
         updated = "2026-09-18T19:00:00Z" if scenario == "stale-red" else "2026-09-18T21:00:00Z"
         rows = [row(1, 1, "dev-1/htpr-1", author="dev-one", updated=updated)]
@@ -429,6 +433,13 @@ pending="$(run_gate pending)"
 [[ "$pending" == *'"action": "wait"'* && "$pending" == *'"state": "pending"'* ]]
 echo 'PASS pending PR remains bound without inventing work'
 
+: > "$TMP/gh-calls"
+protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate valentin-review)"
+[[ "$protected" == *'"action": "wait"'* && "$protected" == *'"state": "protected"'* ]]
+[[ "$protected" == *'label valentin-review'* ]]
+! grep -qE '^pr view|/comments|/compare|/deployments' "$TMP/gh-calls"
+echo 'PASS valentin-review PR is held without review, fix, close, or merge activity'
+
 green="$(run_gate green)"
 GREEN="$green" python3 - <<'PYEOF'
 import json, os
@@ -551,7 +562,7 @@ import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
 assert row["repo"] == "example/repo" and len(row["prs"]) == 1
 pr = row["prs"][0]
-assert {"number", "title", "branch", "author"} <= set(pr)
+assert {"number", "title", "branch", "author", "prLabels"} <= set(pr)
 assert "body" not in pr
 PYEOF
 ! grep -q 'pr list\|body' "$TMP/gh-calls" "$pr_cache"

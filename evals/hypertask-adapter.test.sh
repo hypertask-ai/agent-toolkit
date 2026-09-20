@@ -22,9 +22,10 @@ regular_prompt="$(MAINTAINER=off adapter_run_prompt "/company/INDEX.md" "Develop
   "TEST-1" "https://app.hypertask.ai/detail/project-1/1" "Fix the bug" \
   "Change the implementation." "" "new work")"
 if printf '%s' "$maintainer_prompt" | grep -qF 'FINISH IT AS THE SETUP MAINTAINER' \
-   && printf '%s' "$maintainer_prompt" | grep -qF 'agent-template merge <pr-url>' \
+   && printf '%s' "$maintainer_prompt" | grep -qF 'Never merge a pull request by hand' \
+   && printf '%s' "$maintainer_prompt" | grep -qF 'labelled `valentin-review`' \
+   && ! printf '%s' "$maintainer_prompt" | grep -qF 'agent-template merge <pr-url>' \
    && printf '%s' "$maintainer_prompt" | grep -qF 'Do not create an implementation branch for a direct operation, delegate it, hand it to a developer' \
-   && printf '%s' "$maintainer_prompt" | grep -qF 'post a `Done:` comment that names the result and links the pull request' \
    && ! printf '%s' "$maintainer_prompt" | grep -qF 'branch off the production branch' \
    && printf '%s' "$regular_prompt" | grep -qF 'branch off the production branch' \
    && printf '%s' "$regular_prompt" | grep -qF 'The runner already won the claim' \

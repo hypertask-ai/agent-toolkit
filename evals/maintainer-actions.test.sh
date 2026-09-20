@@ -256,6 +256,9 @@ if [ "$build" = "build started: $build_id" ] \
    && grep -q 'STANDARD BUILD GUARDRAILS' "$prompt" \
    && grep -q 'Summary for non-engineers' "$prompt" \
    && grep -q 'gh pr merge --auto --squash' "$prompt" \
+   && grep -q 'Never merge a pull request by hand' "$prompt" \
+   && grep -q 'labelled `valentin-review`' "$prompt" \
+   && ! grep -q 'merge the green pull request yourself' "$prompt" \
    && grep -q 'never edit VERSION or CHANGELOG.md' "$prompt" \
    && grep -q 'change one file' "$prompt" \
    && grep -q -- '--provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session' "$TMP/hax.log" \
@@ -278,22 +281,16 @@ else
 fi
 
 set +e
-red="$(AGENT_SLUG=maintainer run_template merge https://github.com/example/allowed/pull/7 2>&1)"
-red_rc=$?
+manual_merge="$(AGENT_SLUG=maintainer run_template merge https://github.com/example/allowed/pull/7 2>&1)"
+manual_merge_rc=$?
 set -e
-if [ "$red_rc" -ne 0 ] && [ "$red" = 'merge refused: checks are not green: ci' ] \
+if [ "$manual_merge_rc" -ne 0 ] \
+   && [ "$manual_merge" = 'merge refused: runners never merge pull requests by hand' ] \
+   && ! grep -q '^pr view ' "$TMP/gh.log" \
    && ! grep -q '^pr merge ' "$TMP/gh.log"; then
-  ok merge-refuses-red-checks "red pull request is not merged"
+  ok merge-refuses-manual-action "maintainer cannot merge a pull request by hand"
 else
-  bad merge-refuses-red-checks "rc=$red_rc output=$red gh=$(cat "$TMP/gh.log")"
-fi
-
-green="$(GH_MODE=green AGENT_SLUG=maintainer run_template merge https://github.com/example/allowed/pull/7)"
-if [ "$green" = 'merged: https://github.com/example/allowed/pull/7' ] \
-   && grep -q '^pr merge https://github.com/example/allowed/pull/7 --squash$' "$TMP/gh.log"; then
-  ok merge-squashes-green-pr "allowlisted green pull request is squash merged"
-else
-  bad merge-squashes-green-pr "output=$green gh=$(cat "$TMP/gh.log")"
+  bad merge-refuses-manual-action "rc=$manual_merge_rc output=$manual_merge gh=$(cat "$TMP/gh.log")"
 fi
 
 set +e
@@ -445,7 +442,7 @@ if python3 - "$fixture" "$ROOT/scripts/agent-board-poll" <<'PYEOF'
 import json, sys
 fixture = json.load(open(sys.argv[1], encoding="utf-8"))
 prompt = open(sys.argv[2], encoding="utf-8").read()
-assert "A request to merge, release, update, or build is yours to execute in this run." in prompt
+assert "An instruction to update or build on an allowlisted repository is yours to execute in this run." in prompt
 for command in fixture["required_commands"]:
     assert command in prompt
 for outcome in fixture["forbidden_outcomes"]:
