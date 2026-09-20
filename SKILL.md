@@ -311,9 +311,10 @@ before; nothing else about that identity changes.
 
 GitHub refuses `allow_auto_merge` on a private repo whose plan does not carry
 it, which is true for these repos. That refusal is expected, not an error:
-`create-agent.sh` logs "auto-merge unavailable on private repo, supervisor
-merges green PRs" and keeps going, and a run's own PR step does the same
-instead of failing over it.
+`create-agent.sh` reads the setting back and logs that auto-merge is unavailable.
+The run leaves its pull request open after requesting auto-merge. The five-minute
+reconciler squash merges it only when it is still open without auto-merge and
+has been green and mergeable for 30 minutes.
 
 ## Shape of the code
 

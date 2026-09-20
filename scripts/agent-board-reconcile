@@ -19,14 +19,16 @@ while [ $# -gt 0 ]; do
 done
 mkdir -p "$STATE_DIR/run-records"
 MERGED_SCANS="$STATE_DIR/reconcile-merged-scans.$$"
+MERGE_READY_SCANS="$STATE_DIR/reconcile-merge-ready-scans.$$"
 DIRECT_REPOS="$STATE_DIR/reconcile-direct-repos.$$"
 DIRECT_COMMITS="$STATE_DIR/reconcile-direct-commits.$$"
 DIRECT_CURSORS="$STATE_DIR/reconcile-direct-cursors.$$"
 : > "$MERGED_SCANS"
+: > "$MERGE_READY_SCANS"
 : > "$DIRECT_REPOS"
 : > "$DIRECT_COMMITS"
 : > "$DIRECT_CURSORS"
-trap 'rm -f "$MERGED_SCANS" "$DIRECT_REPOS" "$DIRECT_COMMITS" "$DIRECT_CURSORS"' EXIT
+trap 'rm -f "$MERGED_SCANS" "$MERGE_READY_SCANS" "$DIRECT_REPOS" "$DIRECT_COMMITS" "$DIRECT_CURSORS"' EXIT
 
 record_field() {
   local path="$1" field="$2"
@@ -163,6 +165,56 @@ PYEOF
       fi
       printf '%s board health: %s\n' "$(date -Is)" "$message" >> "$log"
     }
+
+    if [ -n "${PR_REPO:-}" ] && ! grep -qxF "$PR_REPO" "$MERGE_READY_SCANS"; then
+      printf '%s\n' "$PR_REPO" >> "$MERGE_READY_SCANS"
+      if open_prs="$(gh pr list --repo "$PR_REPO" --state open --limit 100 \
+          --json url,isDraft,createdAt,headRefOid,mergeable,autoMergeRequest,statusCheckRollup,labels 2>>"$log")"; then
+        ready_prs="$(PRS="$open_prs" NOW="${RECONCILE_NOW:-}" python3 - <<'PYEOF'
+import datetime
+import json
+import os
+
+now_text = os.environ.get("NOW") or ""
+now = datetime.datetime.fromisoformat(now_text.replace("Z", "+00:00")) if now_text else datetime.datetime.now(datetime.timezone.utc)
+for pull in json.loads(os.environ["PRS"]):
+    labels = {str(item.get("name") or "").casefold() for item in pull.get("labels") or []}
+    if (pull.get("isDraft") or pull.get("mergeable") != "MERGEABLE"
+            or pull.get("autoMergeRequest") or "valentin-review" in labels):
+        continue
+    try:
+        created = datetime.datetime.fromisoformat(str(pull.get("createdAt") or "").replace("Z", "+00:00"))
+    except ValueError:
+        continue
+    if (now - created).total_seconds() < 1800:
+        continue
+    checks = pull.get("statusCheckRollup") or []
+    green = bool(checks)
+    for check in checks:
+        status = str(check.get("status") or "").upper()
+        conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
+        if (status and status != "COMPLETED") or conclusion not in {"SUCCESS", "NEUTRAL", "SKIPPED"}:
+            green = False
+            break
+    url = str(pull.get("url") or "")
+    head = str(pull.get("headRefOid") or "")
+    if green and url.startswith("https://github.com/") and head:
+        print(url + "\t" + head)
+PYEOF
+)"
+        while IFS=$'\t' read -r ready_url ready_head; do
+          [ -n "$ready_url" ] && [ -n "$ready_head" ] || continue
+          if gh pr merge --repo "$PR_REPO" --squash --match-head-commit "$ready_head" "$ready_url" >>"$log" 2>&1; then
+            printf '%s reconciler squash merged green PR %s after auto-merge remained off for 30 minutes\n' \
+              "$(date -Is)" "$ready_url" >> "$log"
+          else
+            health_log "$BOARD_ID" "Reconciler could not squash merge green pull request $ready_url."
+          fi
+        done <<< "$ready_prs"
+      else
+        health_log "$BOARD_ID" "Reconciler could not inspect open pull requests in $PR_REPO for direct merge."
+      fi
+    fi
 
     for record in "$STATE_DIR/run-records/$slug-"*.json; do
       [ -f "$record" ] || continue
