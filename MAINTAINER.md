@@ -226,6 +226,35 @@ after two seconds. If two agents landed, the lower agent id keeps the ticket and
 the other unassigns itself without commenting. The runner posts `Claimed.` and
 moves to In Progress only after that handshake holds.
 
+## Fleet throughput watch
+
+`agent-fleet-watch.timer` runs every 15 minutes, starting five minutes after boot.
+It is a deterministic host check and never starts a model. It reads runner state
+and agent confs locally, reads board tickets through Product Bot's existing
+Hypertask adapter and token, and uses at most two GitHub REST calls per repository
+per run. A GitHub rate-limit response pauses the GitHub-dependent checks for that
+run instead of retrying.
+
+The watch raises one High ticket in toolkit `Review` per rule, with a six-hour
+per-rule cooldown. It sends no toast, chat-room message, or Telegram message.
+When a rule recovers, its open alarm moves to `Done`.
+
+The seven rules cover: three hours without a merge while unassigned intake work
+waits during local daytime; an eligible agent with no completed run for one hour;
+three failed runner ticks in a row; duplicate agent bindings to one pull request;
+host disk use above 85 percent; exhausted GitHub REST capacity; and an agent left
+in manual claiming mode for two hours while unassigned intake work waits.
+
+Every pass atomically writes
+`~/.local/state/agent-board-poll/fleet-health.json`. The Agents page can read its
+current breaches and the merge, run, failed-tick, disk, and GitHub metrics. The
+alarm cooldown and manual-mode start times are in `fleet-watch-state.json`, and
+exactly one summary line per pass is appended to `fleet-watch.log`.
+
+Run `agent-fleet-watch` for an immediate check. Check the schedule with
+`systemctl --user status agent-fleet-watch.timer` and service failures with
+`journalctl --user -u agent-fleet-watch.service`.
+
 ## Fleet progress contract
 
 Every real runner tick atomically rewrites

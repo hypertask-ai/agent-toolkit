@@ -1,0 +1,618 @@
+#!/usr/bin/env bash
+# agent-fleet-watch: deterministic host-wide throughput and capacity alarms.
+set -euo pipefail
+
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+CORE_ROOT="$(dirname "$(dirname "$SELF")")"
+exec python3 - "$CORE_ROOT" "$@" <<'PYEOF'
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
+
+RULE_ACTIONS = {
+    "R1": "Merge the next ready pull request or assign the waiting tickets.",
+    "R2": "Start the idle agent or assign its eligible ticket to another agent.",
+    "R3": "Open the agent log and fix the repeated tick failure before restarting it.",
+    "R4": "Leave one agent on the pull request and release the other agents.",
+    "R5": "Free disk space on the runner host.",
+    "R6": "Wait for the GitHub limit to reset or restore API capacity.",
+    "R7": "Switch the agent to automatic claiming or assign the waiting tickets.",
+}
+COOLDOWN_SECONDS = 6 * 60 * 60
+RUN_WINDOW_SECONDS = 60 * 60
+MANUAL_SECONDS = 2 * 60 * 60
+MERGE_WINDOW_SECONDS = 3 * 60 * 60
+TICK_FAILURE = re.compile(r"run FAILED tick exit=([1-9][0-9]*)\b")
+STAMP = re.compile(r"^(\S+) ")
+TICKET = re.compile(r"^[A-Za-z][A-Za-z0-9]*-[0-9]+$")
+
+
+def parse_time(value: Any) -> dt.datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def iso(value: dt.datetime) -> str:
+    return value.astimezone(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def parse_env(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return result
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.removeprefix("export ").split("=", 1)
+        key = key.strip()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+            continue
+        try:
+            words = shlex.split(value.strip(), posix=True)
+        except ValueError:
+            continue
+        if len(words) == 1:
+            result[key] = words[0]
+    return result
+
+
+def read_json(path: Path, fallback: Any) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return fallback
+
+
+def atomic_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def run(command: list[str], *, environment: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=45,
+                              check=False, env=environment)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return subprocess.CompletedProcess(command, 127, "", str(error))
+
+
+def read_tasks(root: Path, product: dict[str, str], boards: list[str], state_dir: Path) -> tuple[list[dict[str, Any]], str]:
+    fixture = os.environ.get("FLEET_WATCH_TASKS_FILE", "")
+    if fixture:
+        try:
+            return [json.loads(line) for line in Path(fixture).read_text(encoding="utf-8").splitlines()
+                    if line.strip()], ""
+        except (OSError, ValueError) as error:
+            return [], f"task fixture failed: {error}"
+    adapter = product.get("BOARD_ADAPTER", "")
+    token_file = product.get("TOKEN_FILE", "")
+    if not adapter or not token_file:
+        return [], "Product Bot adapter or token file is not configured"
+    script = r'''
+set -euo pipefail
+CORE_ROOT="$1"
+STATE_DIR="$2"
+SLUG=product-bot
+. "$CORE_ROOT/scripts/lib/core.sh"
+core_load_adapter "$3"
+adapter_require_tools
+adapter_list_candidates "$4" "$5" "*"
+'''
+    result = run(["bash", "-c", script, "fleet-watch-read", str(root), str(state_dir),
+                  adapter, token_file, ",".join(boards)])
+    if result.returncode != 0:
+        message = " ".join((result.stderr or result.stdout).split())[:240]
+        return [], f"Hypertask read failed: {message or 'adapter exited non-zero'}"
+    try:
+        return [json.loads(line) for line in result.stdout.splitlines() if line.strip()], ""
+    except ValueError:
+        return [], "Hypertask read returned invalid task data"
+
+
+def board_config_sections(path: Path, board: str) -> set[str] | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    project = ""
+    for line in lines:
+        match = re.match(r"^project:\s*['\"]?([0-9]+)", line.strip())
+        if match:
+            project = match.group(1)
+            break
+    if project and project != board:
+        return None
+    sections: set[str] = set()
+    in_columns = False
+    category = ""
+    for raw in lines:
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        text = raw.strip()
+        if indent == 0:
+            in_columns = text == "columns:"
+            category = ""
+            continue
+        if not in_columns:
+            continue
+        if indent == 2 and text.endswith(":"):
+            category = text[:-1]
+            continue
+        if indent == 2 and ":" in text:
+            key, value = text.split(":", 1)
+            category = key.strip()
+            value = value.strip().strip("'\"")
+            if category in {"intake", "work"} and value and value != "[]":
+                sections.add(value)
+            continue
+        if category not in {"intake", "work"}:
+            continue
+        if text.startswith("-"):
+            value = text[1:].strip().strip("'\"")
+            if value and not value.startswith("{"):
+                sections.add(value)
+        elif ":" in text:
+            key, value = text.split(":", 1)
+            value = value.strip().strip("'\"")
+            if key.strip() == "title" or (value and not value.isdigit() and value != "[]"):
+                if value:
+                    sections.add(value)
+    return sections
+
+
+def intake_sections(config_dir: Path, root: Path, agents: list[dict[str, Any]], boards: list[str]) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    explicit = os.environ.get("FLEET_WATCH_INTAKE_JSON", "")
+    if explicit:
+        try:
+            value = json.loads(explicit)
+            return {str(board): {str(item) for item in sections}
+                    for board, sections in value.items()}
+        except (TypeError, ValueError):
+            pass
+    company = Path(os.environ.get("COMPANY_SKILLS_DIR", str(Path.home() / "projects/company-skills")))
+    for board in boards:
+        candidates = [config_dir / f"board-{board}.yml", config_dir / "board.yml",
+                      company / "supervise-board" / "boards" / f"board-{board}.yml"]
+        configured: set[str] | None = None
+        for candidate in candidates:
+            found = board_config_sections(candidate, board)
+            if found is not None and found:
+                configured = found
+                break
+        if configured:
+            result[board] = configured
+            continue
+        derived: set[str] = set()
+        excluded = {"in progress", "ai review", "review", "qa", "done", "archive",
+                    "agent blocked (infra)", "ht manager review", "valentin review"}
+        for agent in agents:
+            if board not in agent["boards"] or agent["kind"] in {"qa", "answer", "manager"}:
+                continue
+            conf = agent["config"]
+            for key in ("IN_PROGRESS_SECTION", "REVIEW_SECTION", "OWNER_REVIEW_SECTION",
+                        "DONE_SECTION", "QA_FAIL_SECTION", "QA_BLOCKED_SECTION"):
+                if conf.get(key):
+                    excluded.add(conf[key].casefold())
+            watched = [item.strip() for item in conf.get("WATCH_SECTIONS", "").split(",")]
+            derived.update(item for item in watched if item and item != "*" and item.casefold() not in excluded)
+        result[board] = derived
+    return result
+
+
+def recent_completed(log_path: Path, progress_path: Path, current: dt.datetime) -> tuple[int, dt.datetime | None]:
+    progress = read_json(progress_path, {})
+    completed = progress.get("last_completed_run") if isinstance(progress, dict) else None
+    completed_at = parse_time(completed.get("at")) if isinstance(completed, dict) else None
+    count = int(completed_at is not None and (current - completed_at).total_seconds() <= RUN_WINDOW_SECONDS)
+    return count, completed_at
+
+
+def failed_ticks(log_path: Path) -> tuple[int, dt.datetime | None]:
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return 0, None
+    outcomes: list[tuple[bool, dt.datetime | None]] = []
+    for line in lines:
+        if TICK_FAILURE.search(line):
+            outcomes.append((False, parse_time(STAMP.match(line).group(1)) if STAMP.match(line) else None))
+        elif "tick finished:" in line:
+            outcomes.append((True, parse_time(STAMP.match(line).group(1)) if STAMP.match(line) else None))
+    count = 0
+    since = None
+    for success, at in reversed(outcomes):
+        if success:
+            break
+        count += 1
+        since = at or since
+    return count, since
+
+
+def active_fix_round(state_dir: Path, slug: str) -> bool:
+    for path in (state_dir / "run-records").glob(f"{slug}-*.json"):
+        row = read_json(path, {})
+        if isinstance(row, dict) and row.get("status") == "running" and row.get("run_kind") == "pr-fix":
+            return True
+    return False
+
+
+def github_data(repos: list[str], current: dt.datetime) -> tuple[int | None, dict[str, list[dt.datetime]] | None, str]:
+    rate = run(["gh", "api", "/rate_limit"])
+    combined = " ".join((rate.stderr + " " + rate.stdout).split())
+    if rate.returncode != 0:
+        if "rate limit" in combined.casefold() or "http 403" in combined.casefold():
+            return 0, None, "GitHub rules skipped: rate limit exhausted"
+        return None, None, "GitHub rules skipped: rate limit could not be read"
+    try:
+        remaining = int(json.loads(rate.stdout)["resources"]["core"]["remaining"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None, None, "GitHub rules skipped: rate limit response was invalid"
+    if remaining == 0:
+        return 0, None, "GitHub rules skipped: rate limit exhausted"
+    merges: dict[str, list[dt.datetime]] = {}
+    for repo in repos:
+        result = run(["gh", "api", "-H", "Accept: application/vnd.github+json",
+                      f"/repos/{repo}/pulls?state=closed&sort=updated&direction=desc&per_page=100"])
+        error = " ".join((result.stderr + " " + result.stdout).split())
+        if result.returncode != 0:
+            if "rate limit" in error.casefold() or "http 403" in error.casefold():
+                return 0, None, "GitHub rules skipped: rate limit exhausted"
+            return remaining, None, f"GitHub rules skipped: pull requests for {repo} could not be read"
+        try:
+            rows = json.loads(result.stdout)
+            if not isinstance(rows, list):
+                raise ValueError
+            merges[repo] = [parsed for parsed in (parse_time(row.get("merged_at"))
+                                                  for row in rows if isinstance(row, dict)) if parsed]
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return remaining, None, f"GitHub rules skipped: pull requests for {repo} were invalid"
+    return remaining, merges, ""
+
+
+def extract_ticket(output: str) -> str:
+    try:
+        raw = output[output.find("{"):output.rfind("}") + 1]
+        value = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        value = {}
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, dict):
+            ref = str(item.get("ticketNumber") or "")
+            if TICKET.fullmatch(ref):
+                return ref
+            stack.extend(item.values())
+        elif isinstance(item, list):
+            stack.extend(item)
+    match = re.search(r"\b[A-Z][A-Z0-9]*-[0-9]+\b", output)
+    return match.group(0) if match else ""
+
+
+def board_call(command: list[str], board_cli: str) -> subprocess.CompletedProcess[str]:
+    environment = dict(os.environ)
+    environment["AGENT_COMMENT_VERBATIM"] = "yes"
+    return run([*shlex.split(board_cli), *command], environment=environment)
+
+
+def open_alarm(rule: str, detail: str, board_cli: str) -> str:
+    body = f"<p><strong>{rule}: {detail}</strong></p><p>Action: {RULE_ACTIONS[rule]}</p>"
+    base = ["task", "create", "--project", "5500", "--section", "Review", "--priority", "high",
+            "--title", f"{rule}: Fleet watch alarm", "--description", body]
+    result = board_call([*base, "--labels", "bug", "--json"], board_cli)
+    if result.returncode != 0 and "LabelNotFound" in result.stderr + result.stdout:
+        result = board_call([*base, "--json"], board_cli)
+    if result.returncode != 0:
+        return ""
+    ticket = extract_ticket(result.stdout)
+    if ticket:
+        board_call(["comment", "add", ticket, "--raw", "--text", body], board_cli)
+    return ticket
+
+
+def clear_alarm(ticket: str, board_cli: str) -> bool:
+    return board_call(["task", "move", ticket, "--section", "Done"], board_cli).returncode == 0
+
+
+def disk_percent(path: Path, override: int | None) -> int:
+    if override is not None:
+        return override
+    result = run(["df", "-Pk", str(path)])
+    if result.returncode != 0:
+        raise RuntimeError("disk usage could not be read")
+    lines = result.stdout.splitlines()
+    if len(lines) < 2:
+        raise RuntimeError("disk usage response was invalid")
+    return int(lines[-1].split()[4].rstrip("%"))
+
+
+def add_breach(breaches: dict[str, dict[str, str]], rule: str, detail: str,
+               since: dt.datetime | None, current: dt.datetime) -> None:
+    candidate = {"rule": rule, "detail": " ".join(detail.split()), "since": iso(since or current)}
+    previous = breaches.get(rule)
+    if previous:
+        previous["detail"] = previous["detail"] + " " + candidate["detail"]
+        previous["since"] = min(previous["since"], candidate["since"])
+    else:
+        breaches[rule] = candidate
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Check fleet throughput without running a model")
+    parser.add_argument("--config-dir", type=Path, default=Path(os.environ.get(
+        "AGENT_CONFIG_DIR", "~/.config/hypertask-agents")).expanduser())
+    parser.add_argument("--state-dir", type=Path, default=Path(os.environ.get(
+        "AGENT_POLL_STATE_DIR", "~/.local/state/agent-board-poll")).expanduser())
+    parser.add_argument("--now", help="ISO 8601 time for deterministic checks")
+    parser.add_argument("--disk-path", type=Path, default=Path.home())
+    parser.add_argument("--disk-pct", type=int)
+    args = parser.parse_args(sys.argv[2:])
+    root = Path(sys.argv[1])
+    parsed_now = parse_time(args.now) if args.now else None
+    current = parsed_now or dt.datetime.now(dt.timezone.utc)
+    local_hour = current.astimezone().hour
+    state_dir = args.state_dir
+    state_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    state_path = state_dir / "fleet-watch-state.json"
+    health_path = state_dir / "fleet-health.json"
+    log_path = state_dir / "fleet-watch.log"
+    lock_path = state_dir / "fleet-watch-state.json.lock"
+    operational_errors: list[str] = []
+
+    with lock_path.open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = read_json(state_path, {"schema_version": 1, "rules": {}, "manual_since": {}})
+        if not isinstance(state, dict):
+            state = {"schema_version": 1, "rules": {}, "manual_since": {}}
+        rules_state = state.setdefault("rules", {})
+        manual_since = state.setdefault("manual_since", {})
+        agents: list[dict[str, Any]] = []
+        product: dict[str, str] = {}
+        for conf_path in sorted(args.config_dir.glob("*.conf")):
+            conf = parse_env(conf_path)
+            if conf.get("BOARD_ADAPTER") != "hypertask" or not conf.get("AGENT_ID"):
+                continue
+            slug = conf.get("AGENT_SLUG") or conf_path.stem
+            boards = [item.strip() for item in conf.get("BOARD_ID", "").split(",") if item.strip()]
+            if not boards:
+                continue
+            agent = {"slug": slug, "boards": boards, "kind": conf.get("AGENT_KIND", "dev").casefold(),
+                     "config": conf, "path": conf_path}
+            agents.append(agent)
+            if slug == "product-bot":
+                product = conf
+        if not product:
+            raise RuntimeError("Product Bot configuration is missing")
+        board_cli = product.get("BOARD_CLI", "")
+        if not board_cli:
+            raise RuntimeError("Product Bot board CLI is missing")
+        boards = sorted({board for agent in agents for board in agent["boards"]})
+        tasks, task_error = read_tasks(root, product, boards, state_dir)
+        if task_error:
+            operational_errors.append(task_error)
+        tasks_by_board: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for task in tasks:
+            if isinstance(task, dict):
+                tasks_by_board[str(task.get("board") or task.get("projectId") or "")].append(task)
+        intake = intake_sections(args.config_dir, root, agents, boards)
+        unassigned: dict[str, list[dict[str, Any]]] = {}
+        for board in boards:
+            names = {name.casefold() for name in intake.get(board, set())}
+            unassigned[board] = [task for task in tasks_by_board.get(board, [])
+                                 if str(task.get("section") or "").casefold() in names
+                                 and int(task.get("assignee_count") or 0) == 0]
+
+        repo_votes: dict[str, Counter[str]] = defaultdict(Counter)
+        for agent in agents:
+            if agent["kind"] in {"answer", "manager"}:
+                continue
+            repo = agent["config"].get("PR_REPO", "")
+            if repo:
+                for board in agent["boards"]:
+                    repo_votes[board][repo] += 1
+        board_repos = {board: votes.most_common(1)[0][0] for board, votes in repo_votes.items() if votes}
+        repos = sorted(set(board_repos.values()))
+        remaining, repo_merges, github_note = github_data(repos, current)
+        if github_note and remaining != 0:
+            operational_errors.append(github_note)
+        merges_3h: dict[str, int | None] = {board: None for board in boards}
+        breaches: dict[str, dict[str, str]] = {}
+        if remaining == 0:
+            add_breach(breaches, "R6", "GitHub has no API requests remaining, so merge checks are paused.",
+                       current, current)
+        if repo_merges is not None:
+            cutoff = current - dt.timedelta(seconds=MERGE_WINDOW_SECONDS)
+            for board, repo in board_repos.items():
+                recent = [value for value in repo_merges.get(repo, []) if value >= cutoff]
+                merges_3h[board] = len(recent)
+                if 7 <= local_hour < 23 and unassigned.get(board) and not recent:
+                    older = max(repo_merges.get(repo, []), default=cutoff)
+                    add_breach(breaches, "R1",
+                               f"Board {board} has unassigned intake tickets and no merged pull request in three hours.",
+                               older if older <= cutoff else cutoff, current)
+
+        live_runs: dict[str, int] = {}
+        failed_tick_metrics: dict[str, int] = {}
+        for agent in agents:
+            slug = agent["slug"]
+            completed_count, completed_at = recent_completed(
+                state_dir / f"{slug}.log", state_dir / f"{slug}.progress.json", current)
+            live_runs[slug] = completed_count
+            failures, failure_since = failed_ticks(state_dir / f"{slug}.log")
+            failed_tick_metrics[slug] = failures
+            if failures >= 3:
+                add_breach(breaches, "R3", f"Agent {slug} has failed three consecutive timer ticks.",
+                           failure_since, current)
+            conf = agent["config"]
+            watched = {item.strip().casefold() for item in conf.get("WATCH_SECTIONS", "").split(",") if item.strip()}
+            eligible = False
+            for board in agent["boards"]:
+                for task in tasks_by_board.get(board, []):
+                    section = str(task.get("section") or "").casefold()
+                    agent_ids = {str(item) for item in task.get("agent_ids") or []}
+                    assigned = conf.get("AGENT_ID") in agent_ids
+                    claimable = (int(task.get("assignee_count") or 0) == 0
+                                 and conf.get("CLAIM_UNASSIGNED", "no") == "yes")
+                    if ("*" in watched or section in watched) and (assigned or claimable):
+                        eligible = True
+                        break
+                if eligible:
+                    break
+            if eligible and completed_count == 0 and not active_fix_round(state_dir, slug):
+                since = completed_at or current - dt.timedelta(seconds=RUN_WINDOW_SECONDS)
+                add_breach(breaches, "R2",
+                           f"Agent {slug} completed no run in 60 minutes while eligible tickets waited.",
+                           since, current)
+
+        bindings: dict[tuple[str, str], list[str]] = defaultdict(list)
+        for agent in agents:
+            blocked = read_json(state_dir / f"{agent['slug']}.blocked", {})
+            if not isinstance(blocked, dict):
+                continue
+            repo = agent["config"].get("PR_REPO", "")
+            numbers = []
+            if blocked.get("pr") is not None:
+                numbers.append(str(blocked["pr"]))
+            for item in blocked.get("prs") or []:
+                if isinstance(item, dict) and item.get("pr") is not None:
+                    numbers.append(str(item["pr"]))
+            for number in set(numbers):
+                bindings[(repo, number)].append(agent["slug"])
+        for (repo, number), slugs in bindings.items():
+            if repo and len(slugs) >= 2:
+                add_breach(breaches, "R4",
+                           f"Agents {', '.join(sorted(slugs))} are all bound to pull request {number}.",
+                           current, current)
+
+        used = disk_percent(args.disk_path, args.disk_pct)
+        if used > 85:
+            add_breach(breaches, "R5", f"The runner host disk is {used} percent full.", current, current)
+
+        for agent in agents:
+            slug = agent["slug"]
+            conf = agent["config"]
+            waiting_boards = [board for board in agent["boards"] if unassigned.get(board)]
+            manual = agent["kind"] in {"dev", "qa", "worker", "cli"} and conf.get("CLAIM_UNASSIGNED", "no") == "no"
+            if manual and waiting_boards:
+                prior = parse_time(manual_since.get(slug))
+                try:
+                    changed = dt.datetime.fromtimestamp(agent["path"].stat().st_mtime, dt.timezone.utc)
+                except OSError:
+                    changed = current
+                started = prior or min(changed, current)
+                manual_since[slug] = iso(started)
+                if (current - started).total_seconds() >= MANUAL_SECONDS:
+                    add_breach(breaches, "R7",
+                               f"Agent {slug} has stayed in manual mode for two hours while unassigned intake tickets waited.",
+                               started, current)
+            else:
+                manual_since.pop(slug, None)
+
+        active_rules = set(breaches)
+        for rule, entry in list(rules_state.items()):
+            if not isinstance(entry, dict) or rule in active_rules or not entry.get("active"):
+                continue
+            ticket = str(entry.get("ticket") or "")
+            if not ticket or clear_alarm(ticket, board_cli):
+                entry.update({"active": False, "cleared_at": iso(current), "ticket": ""})
+
+        for rule, breach in breaches.items():
+            entry = rules_state.setdefault(rule, {})
+            was_active = bool(entry.get("active"))
+            if not was_active:
+                entry["since"] = breach["since"]
+            entry.update({"active": True, "detail": breach["detail"], "last_seen_at": iso(current)})
+            last_alarm = parse_time(entry.get("last_alarm_at"))
+            allowed = last_alarm is None or (current - last_alarm).total_seconds() >= COOLDOWN_SECONDS
+            if not entry.get("ticket") and allowed:
+                ticket = open_alarm(rule, breach["detail"], board_cli)
+                entry["last_alarm_at"] = iso(current)
+                if ticket:
+                    entry["ticket"] = ticket
+                    entry["opened_at"] = iso(current)
+                else:
+                    operational_errors.append(f"{rule} alarm could not be opened")
+
+        ordered_breaches = [breaches[key] for key in sorted(breaches)]
+        health = {
+            "checked_at": iso(current),
+            "ok": not ordered_breaches and not operational_errors,
+            "breaches": ordered_breaches,
+            "metrics": {
+                "merges_3h": merges_3h,
+                "live_runs": live_runs,
+                "failed_ticks": failed_tick_metrics,
+                "disk_pct": used,
+                "github_remaining": remaining,
+            },
+        }
+        state.update({"schema_version": 1, "checked_at": iso(current), "rules": rules_state,
+                      "manual_since": manual_since})
+        atomic_json(state_path, state)
+        atomic_json(health_path, health)
+        note = github_note if remaining == 0 else "; ".join(operational_errors[:2])
+        line = f"{iso(current)} ok={str(health['ok']).lower()} breaches={','.join(sorted(breaches)) or 'none'}"
+        if note:
+            line += f" note={' '.join(note.split())[:240]}"
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        print(line)
+        return 0 if not operational_errors else 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception as error:
+        state_dir = Path(os.environ.get("AGENT_POLL_STATE_DIR", "~/.local/state/agent-board-poll")).expanduser()
+        for index, value in enumerate(sys.argv):
+            if value == "--state-dir" and index + 1 < len(sys.argv):
+                state_dir = Path(sys.argv[index + 1])
+        state_dir.mkdir(parents=True, exist_ok=True)
+        checked = iso(dt.datetime.now(dt.timezone.utc))
+        health = {"checked_at": checked, "ok": False, "breaches": [], "metrics": {
+            "merges_3h": {}, "live_runs": {}, "failed_ticks": {}, "disk_pct": None,
+            "github_remaining": None}}
+        atomic_json(state_dir / "fleet-health.json", health)
+        message = " ".join(str(error).split())[:240]
+        line = f"{checked} ok=false breaches=none note={message}"
+        with (state_dir / "fleet-watch.log").open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        print(line, file=sys.stderr)
+        raise SystemExit(1)
+PYEOF
