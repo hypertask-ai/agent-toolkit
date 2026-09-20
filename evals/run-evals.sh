@@ -450,6 +450,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/fleet-progress.test.sh" ]; then
   echo "-- fleet progress and stall checks --"
   run_test "$HERE/fleet-progress.test.sh" bash "$HERE/fleet-progress.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/fleet-watch.test.sh" ]; then
+  echo ""
+  echo "-- fleet throughput watch checks --"
+  run_test "$HERE/fleet-watch.test.sh" bash "$HERE/fleet-watch.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/agent-status.test.sh" ]; then
   echo ""
   echo "-- Agents page status snapshot checks --"

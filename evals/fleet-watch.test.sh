@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WATCH="$ROOT/scripts/agent-fleet-watch"
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+STATE="$TMP/state"
+CONF="$TMP/conf"
+BIN="$TMP/bin"
+mkdir -p "$STATE/run-records" "$CONF" "$BIN"
+pass=0
+fail=0
+ok() { printf 'PASS %-36s %s\n' "$1" "$2"; pass=$((pass + 1)); }
+bad() { printf 'FAIL %-36s %s\n' "$1" "$2"; fail=$((fail + 1)); }
+
+cat > "$BIN/board" <<'PYEOF'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+log = pathlib.Path(os.environ["BOARD_LOG"])
+with log.open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(args) + "\n")
+if args[:2] == ["task", "create"]:
+    counter = pathlib.Path(os.environ["BOARD_COUNTER"])
+    value = int(counter.read_text() or "0") + 1 if counter.exists() else 1
+    counter.write_text(str(value), encoding="utf-8")
+    print(json.dumps({"task": {"ticketNumber": f"AGTE-{900 + value}"}}))
+elif args[:2] == ["comment", "add"]:
+    print(json.dumps({"comment": {"id": "comment-1"}}))
+elif args[:2] == ["task", "move"]:
+    print(json.dumps({"task": {"ticketNumber": args[2], "section": args[-1]}}))
+else:
+    raise SystemExit(2)
+PYEOF
+cat > "$BIN/gh" <<'PYEOF'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+with pathlib.Path(os.environ["GH_LOG"]).open("a", encoding="utf-8") as handle:
+    handle.write(json.dumps(args) + "\n")
+mode = os.environ.get("GH_MODE", "stale")
+if "/rate_limit" in args:
+    remaining = 0 if mode == "exhausted" else 20
+    print(json.dumps({"resources": {"core": {"remaining": remaining}}}))
+elif any("/pulls?" in arg for arg in args):
+    if mode == "recent":
+        print('[{"merged_at":"2026-09-20T11:30:00Z"}]')
+    else:
+        print("[]")
+else:
+    raise SystemExit(2)
+PYEOF
+chmod +x "$BIN/board" "$BIN/gh"
+printf 'fixture-token\n' > "$TMP/token"
+: > "$TMP/board.log"
+: > "$TMP/gh.log"
+
+cat > "$CONF/product-bot.conf" <<EOF
+AGENT_SLUG="product-bot"
+AGENT_KIND="answer"
+AGENT_ID="product-agent"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$BIN/board"
+WATCH_SECTIONS="*"
+CLAIM_UNASSIGNED="no"
+PR_REPO="example/work"
+EOF
+for slug in dev-1 dev-2; do
+  cat > "$CONF/$slug.conf" <<EOF
+AGENT_SLUG="$slug"
+AGENT_KIND="dev"
+AGENT_ID="agent-$slug"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$BIN/board"
+WATCH_SECTIONS="Bugs,In Progress"
+CLAIM_UNASSIGNED="yes"
+PR_REPO="example/work"
+EOF
+done
+cat > "$CONF/dev-3.conf" <<EOF
+AGENT_SLUG="dev-3"
+AGENT_KIND="dev"
+AGENT_ID="agent-dev-3"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$BIN/board"
+WATCH_SECTIONS="Bugs,In Progress"
+CLAIM_UNASSIGNED="no"
+PR_REPO="example/work"
+EOF
+cat > "$TMP/tasks.jsonl" <<'EOF'
+{"id":101,"ref":"TEST-101","board":"15","section":"Bugs","title":"Waiting work","assignee_count":0,"agent_ids":[]}
+EOF
+: > "$TMP/empty-tasks.jsonl"
+for slug in dev-1 dev-2 dev-3; do
+  cat > "$STATE/$slug.progress.json" <<EOF
+{"schema_version":1,"runner":"$slug","last_completed_run":{"ticket":"TEST-1","at":"2026-09-20T08:00:00Z"}}
+EOF
+done
+cat > "$STATE/dev-1.log" <<'EOF'
+2026-09-20T09:00:00+00:00 run FAILED tick exit=2
+2026-09-20T10:00:00+00:00 run FAILED tick exit=2
+2026-09-20T11:00:00+00:00 run FAILED tick exit=2
+EOF
+: > "$STATE/dev-2.log"
+: > "$STATE/dev-3.log"
+cat > "$STATE/dev-1.blocked" <<'EOF'
+{"pr":77,"ticket":"TEST-77","state":"red","since":"2026-09-20T10:00:00Z"}
+EOF
+cat > "$STATE/dev-2.blocked" <<'EOF'
+{"pr":77,"ticket":"TEST-77","state":"red","since":"2026-09-20T10:00:00Z"}
+EOF
+cat > "$STATE/fleet-watch-state.json" <<'EOF'
+{"schema_version":1,"rules":{},"manual_since":{"dev-3":"2026-09-20T09:00:00Z"}}
+EOF
+
+watch() {
+  local tasks="$1" mode="$2" disk="$3"
+  HOME="$TMP/home" PATH="$BIN:$PATH" BOARD_LOG="$TMP/board.log" \
+    BOARD_COUNTER="$TMP/board-counter" GH_LOG="$TMP/gh.log" GH_MODE="$mode" \
+    FLEET_WATCH_TASKS_FILE="$tasks" "$WATCH" --config-dir "$CONF" --state-dir "$STATE" \
+      --now 2026-09-20T12:00:00Z --disk-pct "$disk"
+}
+
+watch "$TMP/tasks.jsonl" stale 86 >/dev/null
+for rule in R1 R2 R3 R4 R5 R7; do
+  if RULE="$rule" STATE="$STATE" python3 - <<'PYEOF'
+import json, os
+health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
+row = next(item for item in health["breaches"] if item["rule"] == os.environ["RULE"])
+assert row["detail"] and row["since"]
+state = json.load(open(os.path.join(os.environ["STATE"], "fleet-watch-state.json")))
+assert state["rules"][os.environ["RULE"]]["ticket"].startswith("AGTE-")
+PYEOF
+  then
+    ok "fleet-watch-$rule" "$rule raises one Review alarm with durable state"
+  else
+    bad "fleet-watch-$rule" "$rule did not produce its breach and alarm state"
+  fi
+done
+
+if STATE="$STATE" BOARD="$TMP/board.log" GHLOG="$TMP/gh.log" python3 - <<'PYEOF'
+import json, os
+health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
+assert health["ok"] is False
+assert health["metrics"]["merges_3h"] == {"15": 0}
+assert health["metrics"]["live_runs"]["dev-1"] == 0
+assert health["metrics"]["failed_ticks"]["dev-1"] == 3
+assert health["metrics"]["disk_pct"] == 86
+assert health["metrics"]["github_remaining"] == 20
+board = [json.loads(line) for line in open(os.environ["BOARD"])]
+creates = [row for row in board if row[:2] == ["task", "create"]]
+comments = [row for row in board if row[:2] == ["comment", "add"]]
+assert len(creates) == len(comments) == 6
+for create in creates:
+    assert create[create.index("--project") + 1] == "5500"
+    assert create[create.index("--section") + 1] == "Review"
+    assert create[create.index("--priority") + 1] == "high"
+for comment in comments:
+    body = comment[comment.index("--text") + 1]
+    assert body.startswith("<p><strong>R") and "</strong></p><p>Action: " in body
+calls = [json.loads(line) for line in open(os.environ["GHLOG"])]
+assert len(calls) == 2
+PYEOF
+then
+  ok fleet-watch-contract 'health metrics, alarm shape, and two-call GitHub budget are enforced'
+else
+  bad fleet-watch-contract 'the first fleet snapshot or alarm contract was wrong'
+fi
+
+before="$(wc -l < "$TMP/board.log")"
+watch "$TMP/tasks.jsonl" stale 86 >/dev/null
+after="$(wc -l < "$TMP/board.log")"
+if [ "$before" -eq "$after" ]; then
+  ok fleet-watch-dedupe 'all six active rules add no second alarm inside six hours'
+else
+  bad fleet-watch-dedupe "active rules wrote again: $before/$after board calls"
+fi
+
+printf '%s\n' '2026-09-20T11:30:00+00:00 tick finished: 0 eligible, 0 started' >> "$STATE/dev-1.log"
+rm -f "$STATE/dev-1.blocked" "$STATE/dev-2.blocked"
+watch "$TMP/empty-tasks.jsonl" recent 20 >/dev/null
+moves="$(python3 -c 'import json,sys; print(sum(json.loads(line)[:2] == ["task","move"] for line in open(sys.argv[1])))' "$TMP/board.log")"
+if [ "$moves" -eq 6 ]; then
+  ok fleet-watch-clear 'recovered rules move all six active alarms to Done'
+else
+  bad fleet-watch-clear "expected 6 Done moves, got $moves"
+fi
+
+: > "$TMP/gh.log"
+watch "$TMP/empty-tasks.jsonl" exhausted 20 >/dev/null
+rate_board="$(wc -l < "$TMP/board.log")"
+rate_calls="$(wc -l < "$TMP/gh.log")"
+if STATE="$STATE" python3 - <<'PYEOF'
+import json, os
+health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
+assert [row["rule"] for row in health["breaches"]] == ["R6"]
+assert health["metrics"]["github_remaining"] == 0
+assert health["metrics"]["merges_3h"] == {"15": None}
+assert "GitHub rules skipped: rate limit exhausted" in open(os.path.join(os.environ["STATE"], "fleet-watch.log")).read().splitlines()[-1]
+PYEOF
+then
+  ok fleet-watch-rate-limit 'remaining zero raises R6 and skips every repository merge call'
+else
+  bad fleet-watch-rate-limit 'rate exhaustion did not skip GitHub-dependent rules cleanly'
+fi
+if [ "$rate_calls" -ne 1 ]; then
+  bad fleet-watch-rate-budget "rate exhaustion made $rate_calls GitHub calls"
+else
+  ok fleet-watch-rate-budget 'an exhausted limit stops after the one rate-limit call'
+fi
+
+watch "$TMP/empty-tasks.jsonl" exhausted 20 >/dev/null
+if [ "$(wc -l < "$TMP/board.log")" -eq "$rate_board" ]; then
+  ok fleet-watch-r6-dedupe 'R6 adds no second alarm inside six hours'
+else
+  bad fleet-watch-r6-dedupe 'R6 wrote a duplicate alarm'
+fi
+
+watch "$TMP/empty-tasks.jsonl" recent 20 >/dev/null
+if STATE="$STATE" python3 - <<'PYEOF'
+import json, os
+health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
+assert health["ok"] is True and health["breaches"] == []
+assert health["metrics"]["merges_3h"] == {"15": 1}
+lines = open(os.path.join(os.environ["STATE"], "fleet-watch.log")).read().splitlines()
+assert len(lines) == 6
+assert lines[-1].endswith("ok=true breaches=none")
+PYEOF
+then
+  ok fleet-watch-healthy 'a healthy pass writes ok=true and exactly one log line'
+else
+  bad fleet-watch-healthy 'the healthy snapshot or one-line log contract was wrong'
+fi
+
+if grep -qF 'OnBootSec=5min' "$ROOT/install.sh" \
+   && grep -qF 'OnUnitActiveSec=15min' "$ROOT/install.sh" \
+   && grep -qF 'ExecStart=$BIN/agent-fleet-watch' "$ROOT/install.sh" \
+   && grep -qF 'enable --now agent-fleet-watch.timer' "$ROOT/install.sh" \
+   && ! grep -Eq 'Telegram|toast|hax|codex|MODEL_CLI' "$WATCH"; then
+  ok fleet-watch-install 'install links the watcher and enables its model-free 15-minute timer'
+else
+  bad fleet-watch-install 'the install timer or no-notifier/no-model contract is missing'
+fi
+
+printf '\n%d fleet-watch check(s), %d failed\n' "$((pass + fail))" "$fail"
+[ "$fail" -eq 0 ]

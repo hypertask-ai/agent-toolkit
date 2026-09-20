@@ -230,6 +230,7 @@ echo "source: $SRC"
 echo "skill:  $DEST"
 echo "docs:   $DEST/MAINTAINER.md + $DEST/CONF.md"
 echo "bin:    $BIN/agent-board-poll -> $DEST/scripts/agent-board-poll"
+echo "bin:    $BIN/agent-fleet-watch -> $DEST/scripts/agent-fleet-watch"
 echo "bin:    $BIN/agent-status -> $DEST/scripts/agent-status"
 echo "bin:    $BIN/agent-chat -> $DEST/scripts/agent-chat"
 echo "bin:    $BIN/agent-events -> $DEST/scripts/agent-events"
@@ -312,6 +313,7 @@ done
 rm -rf "$DEST/core"
 chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-board-poll-tick" "$DEST/scripts/agent-board-reconcile" \
+          "$DEST/scripts/agent-fleet-watch" \
           "$DEST/scripts/agent-progress" "$DEST/scripts/agent-reply-contract" \
           "$DEST/scripts/agent-board-health" "$DEST/scripts/agent-status" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-events" "$DEST/scripts/agent-kick" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-feedback" \
@@ -327,6 +329,7 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
 ln -sfn "$DEST/scripts/agent-board-poll" "$BIN/agent-board-poll"
 ln -sfn "$DEST/scripts/agent-board-poll-tick" "$BIN/agent-board-poll-tick"
 ln -sfn "$DEST/scripts/agent-board-reconcile" "$BIN/agent-board-reconcile"
+ln -sfn "$DEST/scripts/agent-fleet-watch" "$BIN/agent-fleet-watch"
 ln -sfn "$DEST/scripts/agent-status" "$BIN/agent-status"
 ln -sfn "$DEST/scripts/agent-chat" "$BIN/agent-chat"
 ln -sfn "$DEST/scripts/agent-events" "$BIN/agent-events"
@@ -368,6 +371,9 @@ bash "$DEST/scripts/create-agent.sh" --help >/dev/null \
 "$BIN/agent-board-poll" --help >/dev/null \
   || fail "the installed agent-board-poll does not run" \
           "check that $BIN is on PATH and the symlink resolves"
+"$BIN/agent-fleet-watch" --help >/dev/null \
+  || fail "the installed agent-fleet-watch does not run" \
+          "check that python3 is present and the symlink resolves"
 "$BIN/agent-status" --help >/dev/null \
   || fail "the installed agent-status does not run" \
           "check that python3 is present and the symlink resolves"
@@ -427,6 +433,30 @@ elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >
   . "$DEST/scripts/lib/core.sh"
   core_write_poll_units "$SYSTEMD_USER_DIR" "$BIN"
   core_write_reconcile_units "$SYSTEMD_USER_DIR" "$BIN"
+  cat > "$SYSTEMD_USER_DIR/agent-fleet-watch.service" <<EOF
+[Unit]
+Description=Check agent fleet throughput and host capacity
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=%h
+Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=$BIN/agent-fleet-watch
+EOF
+  cat > "$SYSTEMD_USER_DIR/agent-fleet-watch.timer" <<EOF
+[Unit]
+Description=Check agent fleet health every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=agent-fleet-watch.service
+
+[Install]
+WantedBy=timers.target
+EOF
   cat > "$SYSTEMD_USER_DIR/agent-status.service" <<EOF
 [Unit]
 Description=Publish the Hypertask Agents page status snapshot
@@ -518,7 +548,8 @@ Unit=agent-template-update.service
 [Install]
 WantedBy=timers.target
 EOF
-  for unit in agent-status.service agent-status.timer agent-chat.service \
+  for unit in agent-fleet-watch.service agent-fleet-watch.timer \
+    agent-status.service agent-status.timer agent-chat.service \
     agent-events.service agent-template-update.service agent-template-update.timer; do
     core_record_installed_unit "$unit"
   done
@@ -584,6 +615,7 @@ EOF
     fi
   done
   systemctl --user daemon-reload
+  systemctl --user enable --now agent-fleet-watch.timer
   systemctl --user enable --now agent-status.timer
   systemctl --user enable agent-chat.service
   systemctl --user restart agent-chat.service
@@ -599,6 +631,7 @@ EOF
     echo "feedback timer: skipped (this is not a writable agent-toolkit maintainer checkout with the bot wrapper)"
   fi
   echo "poll units: $SYSTEMD_USER_DIR/agent-board-poll@.service + .timer (refreshed, daemon-reload done)"
+  echo "fleet timer: agent-fleet-watch.timer, every 15 minutes"
   echo "status timer: agent-status.timer, every 60 seconds"
   echo "reconcile timer: agent-board-reconcile.timer, every 5 minutes"
   echo "chat service: agent-chat.service (enabled and restarted)"
