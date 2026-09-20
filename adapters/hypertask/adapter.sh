@@ -2029,8 +2029,9 @@ print(",".join(ids))')" || {
 
 # ---------- one ticket until live ----------
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
-# Prints one JSON object per non-live pull request owned by this agent, oldest
-# first. Ownership comes from the agent's branch prefix, a current assignment
+# Prints one JSON object per pull request still owned by this agent, open PRs
+# before merged PRs awaiting QA. Ownership comes from the agent's branch prefix,
+# a current assignment
 # of the title's ticket when no other agent prefix is present, or the runner's
 # record that this agent opened the PR. Comments and shared GitHub authorship
 # do not transfer ownership.
@@ -2044,18 +2045,20 @@ print(",".join(ids))')" || {
 adapter_pr_gate() (
   local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
   local config_dir="${7:-}" opened_prs="${8:-}" repo="${PR_REPO:-}" prefix="${PR_BRANCH_PREFIX:-agent/$slug-}"
-  local state_dir tmp pr number live branch marker today owner_conf owner_slug one board_json
+  local state_dir released_prs tmp pr number live branch marker today owner_conf owner_slug one board_json pr_state
+  local offset path returned
   [ -n "$repo" ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
   mkdir -p "$cache_dir"
   state_dir="$(dirname "${opened_prs:-$cache_dir/none}")"
+  released_prs="$state_dir/$slug.released-prs"
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
 
   if ! gh pr list --repo "$repo" --state open --limit 1000 \
-      --json number,state,url,title,body,headRefName,createdAt,author > "$tmp/open.json" \
+      --json number,state,url,title,body,headRefName,baseRefName,createdAt,author > "$tmp/open.json" \
      || ! gh pr list --repo "$repo" --state merged --limit 100 \
-      --json number,state,url,title,body,headRefName,createdAt,mergedAt,author > "$tmp/merged.json"; then
+      --json number,state,url,title,body,headRefName,baseRefName,createdAt,mergedAt,author > "$tmp/merged.json"; then
     printf 'ERROR: cannot list pull requests in %s for the one-ticket-until-live gate\n' "$repo" >&2
     return 1
   fi
@@ -2070,6 +2073,13 @@ for path in sys.argv[1:]:
         rows.append(row)
 print(json.dumps(rows))
 PYEOF
+  if python3 - "$tmp/prs.json" <<'PYEOF'
+import json, sys
+raise SystemExit(0 if not json.load(open(sys.argv[1], encoding="utf-8")) else 1)
+PYEOF
+  then
+    return 0
+  fi
 
   # Keep the active identity and branch prefix together. Assignment ownership
   # is only valid for an identity represented by a current schema conf.
@@ -2098,14 +2108,23 @@ PYEOF
   : > "$tmp/tasks.jsonl"
   for one in $(printf '%s' "$board_ids" | tr ',' ' '); do
     [ -n "$one" ] || continue
-    if ! board_json="$(_ht_get "$token_file" "/mcp/tasks?project_id=${one}&limit=100")"; then
-      printf 'ERROR: cannot list board %s assignments for the one-ticket-until-live gate\n' "$one" >&2
-      return 1
-    fi
-    printf '%s\n' "$board_json" >> "$tmp/tasks.jsonl"
+    offset=0
+    while :; do
+      path="/mcp/tasks?project_id=${one}&limit=100"
+      [ "$offset" -eq 0 ] || path="$path&offset=$offset"
+      if ! board_json="$(_ht_get "$token_file" "$path")"; then
+        printf 'ERROR: cannot list board %s assignments for the one-ticket-until-live gate\n' "$one" >&2
+        return 1
+      fi
+      printf '%s\n' "$board_json" >> "$tmp/tasks.jsonl"
+      returned="$(printf '%s' "$board_json" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("tasks") or []))')"
+      [ "$returned" -eq 100 ] || break
+      offset=$((offset + returned))
+    done
   done
 
   PREFIX="$prefix" SLUG="$slug" AGENT_ID="$agent_id" REPO="$repo" OPENED_PRS="$opened_prs" \
+  RELEASED_PRS="$released_prs" BOARDS="$board_ids" \
     python3 - "$tmp/prs.json" "$tmp/owners.tsv" "$tmp/tasks.jsonl" <<'PYEOF' > "$tmp/candidates.jsonl"
 import json, os, re, sys
 prs_path, owners_path, tasks_path = sys.argv[1:]
@@ -2121,11 +2140,13 @@ with open(owners_path, encoding="utf-8") as handle:
         if row not in owners:
             owners.append(row)
 assigned = {}
+tasks = {}
 with open(tasks_path, encoding="utf-8") as handle:
     for line in handle:
         for task in (json.loads(line).get("tasks") or []):
             ref = str(task.get("ticketNumber") or "").upper()
             ids = assigned.setdefault(ref, set())
+            tasks[ref] = task
             for who in task.get("assignees") or []:
                 agent = who.get("agent") if isinstance(who, dict) else None
                 if isinstance(agent, dict) and agent.get("id"):
@@ -2138,6 +2159,17 @@ try:
             fields = line.rstrip("\n").split("\t")
             if len(fields) >= 2 and fields[0] == repo:
                 opened.add(fields[1])
+except OSError:
+    pass
+released, released_tickets = set(), set()
+try:
+    with open(os.environ.get("RELEASED_PRS") or "", encoding="utf-8") as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) >= 2 and fields[0] == repo:
+                released.add(fields[1])
+                if len(fields) >= 3 and fields[2]:
+                    released_tickets.add(fields[2].upper())
 except OSError:
     pass
 ticket_pattern = re.compile(r"(?<![0-9A-Za-z])([A-Z][A-Z0-9]{1,10}-[0-9]+)(?![0-9A-Za-z])", re.I)
@@ -2159,17 +2191,31 @@ def has_other_prefix(branch):
     return folded.startswith("agent/") and not folded.startswith(prefix)
 with open(prs_path, encoding="utf-8") as handle:
     prs = json.load(handle)
-for pr in sorted(prs, key=lambda row: row.get("createdAt") or ""):
-    if str(pr.get("state") or "").upper() not in ("OPEN", "MERGED"):
+for pr in sorted(prs, key=lambda row: (str(row.get("state") or "").upper() != "OPEN", row.get("createdAt") or "")):
+    state = str(pr.get("state") or "").upper()
+    if state not in ("OPEN", "MERGED") or str(pr.get("number")) in released:
         continue
     branch = str(pr.get("headRefName") or "")
     ref = title_ticket(pr)
+    if ref in released_tickets or (state == "MERGED" and ref not in tasks):
+        continue
     by_prefix = branch.casefold().startswith(prefix)
     by_state = str(pr.get("number")) in opened
     by_assignment = bool(ref and agent_id in assigned.get(ref, set()) and not has_other_prefix(branch))
     if not (by_prefix or by_state or by_assignment):
         continue
     pr["ticket"] = display_ticket(pr)
+    task = tasks.get(ref, {})
+    pr["task_id"] = task.get("id") or ""
+    pr["board"] = str(task.get("projectId") or os.environ["BOARDS"].split(",", 1)[0])
+    pr["ticket_section"] = str(task.get("section") or "")
+    pr["labels"] = [str((item.get("name") or item.get("title") or item.get("label") or "")
+                        if isinstance(item, dict) else item).strip().casefold()
+                    for item in task.get("labels") or []]
+    pr["human_assignee_ids"] = [str(item.get("id") or item.get("userId"))
+                                for item in task.get("assignees") or []
+                                if isinstance(item, dict) and not isinstance(item.get("agent"), dict)
+                                and (item.get("id") is not None or item.get("userId") is not None)]
     print(json.dumps(pr))
 PYEOF
 
@@ -2236,12 +2282,60 @@ PYEOF
     [ -n "$pr" ] || continue
     number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
     live="$(_ht_pr_live_state "$repo" "$number" "$cache_dir")" || return 1
-    if LIVE="$live" python3 -c 'import json,os,sys;sys.exit(0 if json.loads(os.environ["LIVE"])["live"] else 1)'; then
-      continue
+    pr_state="$(ROW="$pr" python3 -c 'import json,os;print(str(json.loads(os.environ["ROW"]).get("state") or "").upper())')"
+    if [ "$pr_state" = "MERGED" ]; then
+      _ht_pr_qa_state "$token_file" "$pr" "$live" "${DONE_SECTION:-Done}" || return 1
+    else
+      _ht_pr_work_state "$repo" "$pr" "$live" || return 1
     fi
-    _ht_pr_work_state "$repo" "$pr" "$live" || return 1
   done < "$tmp/candidates.jsonl"
 )
+
+# A merged PR remains this agent's work until QA passes and the reconciler moves
+# its ticket to Done. A new QA Handoff is a red round on the same PR counter.
+_ht_pr_qa_state() {
+  local token_file="$1" pr="$2" live="$3" done_section="$4" task_id board comments="[]"
+  task_id="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get("task_id") or "")')"
+  board="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get("board") or "")')"
+  if ROW="$pr" DONE="$done_section" python3 -c 'import json,os,sys; row=json.loads(os.environ["ROW"]); sys.exit(0 if str(row.get("ticket_section") or "").casefold() == os.environ["DONE"].casefold() else 1)'; then
+    return 0
+  fi
+  if [ -n "$task_id" ] && [ -n "$board" ]; then
+    comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board}" 2>/dev/null || printf '{"comments":[]}')"
+  fi
+  PR="$pr" LIVE="$live" COMMENTS="$comments" python3 -c '
+import html, json, os, re
+pr, live = json.loads(os.environ["PR"]), json.loads(os.environ["LIVE"])
+comments = json.loads(os.environ["COMMENTS"]).get("comments") or []
+merged_at = str(pr.get("mergedAt") or "")
+def plain(row):
+    value = row.get("text") or row.get("commentText") or row.get("html") or ""
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", str(value))).split())
+def agent_comment(row):
+    return bool(row.get("agent") or row.get("agentId") or row.get("agent_id"))
+failures = [row for row in comments
+            if agent_comment(row) and str(row.get("createdAt") or "") > merged_at
+            and re.match(r"Handoff:", plain(row), re.I)]
+latest = max(failures, key=lambda row: (row.get("createdAt") or "", str(row.get("id") or ""))) if failures else {}
+message = plain(latest) if latest else ""
+qa_failed = bool(latest)
+state = "red" if qa_failed else "in-qa"
+checks = ["QA fail"] if qa_failed else []
+print(json.dumps({"action":"fix" if qa_failed else "wait", "state":state,
+                  "wait_reason":("red: QA fail" if qa_failed else "in-qa"),
+                  "definition":live.get("definition") or "merged and awaiting QA",
+                  "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
+                  "title":pr["title"], "branch":pr["headRefName"],
+                  "base":pr.get("baseRefName") or "main", "since":pr.get("mergedAt") or pr["createdAt"],
+                  "merged_at":pr.get("mergedAt"), "task_id":pr.get("task_id") or "",
+                  "board":pr.get("board") or "", "ticket_section":pr.get("ticket_section") or "",
+                  "labels":pr.get("labels") or [], "human_assignee_ids":pr.get("human_assignee_ids") or [],
+                  "feedback":("QA failure comment:\n" + message if qa_failed else ""),
+                  "failed_checks":checks, "first_error_line":message if qa_failed else "",
+                  "qa_failure_id":str(latest.get("id") or "") if qa_failed else "",
+                  "pickup_slot":True, "unfixable":False}))
+'
+}
 
 # _ht_pr_live_state <repo> <number> <cache-dir>: one JSON answer, cached 60s.
 _ht_pr_live_state() {
@@ -2324,7 +2418,7 @@ sys.exit(0 if os.environ["DEP_STATE"] == "success" and os.environ["CONTAINS"] ==
 
 # Add current checks, failed-run logs, and review feedback to an owed PR.
 _ht_pr_work_state() {
-  local repo="$1" pr="$2" live="$3" number view checks reviews inline feedback action wait_state head run_ids run_id logs
+  local repo="$1" pr="$2" live="$3" number view checks reviews inline feedback action wait_state head run_rows check_name run_id logs first_error
   number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
   view="$(gh pr view "$number" --repo "$repo" --json state,url,title,body,headRefName,headRefOid,baseRefName,createdAt,statusCheckRollup,reviews,comments 2>/dev/null)" || return 1
   state="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state") or "")')"
@@ -2368,20 +2462,30 @@ for item in (view.get("reviews") or []) + (view.get("comments") or []) + inline:
 print(json.dumps({"failed": failed, "pending": pending, "review": review}))
 ')"
   head="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("headRefOid") or "")')"
-  run_ids="$(printf '%s' "$feedback" | python3 -c '
+  run_rows="$(printf '%s' "$feedback" | python3 -c '
 import json, re, sys
+seen = set()
 for check in json.load(sys.stdin)["failed"]:
     match = re.search(r"/actions/runs/([0-9]+)", check.get("url") or "")
-    if match: print(match.group(1))
-' | sort -u)"
+    if match and (check["name"], match.group(1)) not in seen:
+        seen.add((check["name"], match.group(1)))
+        print("%s\t%s" % (check["name"], match.group(1)))
+')"
   logs=""
-  for run_id in $run_ids; do
-    logs="$logs$(gh run view "$run_id" --repo "$repo" --log-failed 2>&1 | tail -c 12000 || true)"
-  done
+  while IFS=$'\t' read -r check_name run_id; do
+    [ -n "$run_id" ] || continue
+    logs="${logs}${logs:+$'\n\n'}[$check_name, last 80 failed-log lines]"$'\n'"$(gh run view "$run_id" --repo "$repo" --log-failed 2>&1 | tail -n 80 || true)"
+  done <<< "$run_rows"
+  first_error="$(LOGS="$logs" python3 -c '
+import os, re
+lines = [line.strip() for line in os.environ["LOGS"].splitlines() if line.strip() and not line.startswith("[")]
+match = next((line for line in lines if re.search(r"(?:^|\b)(?:error|failed?|fatal|exception)(?:\b|:)", line, re.I)), None)
+print((match or (lines[0] if lines else "no error line reported"))[:500])
+')"
   action="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("fix" if d["failed"] or d["review"] else "wait")')"
-  wait_state="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("checks-pending" if d["pending"] else "awaiting-merge")')"
-  PR="$pr" VIEW="$view" LIVE="$live" FEEDBACK="$feedback" LOGS="$logs" ACTION="$action" WAIT_STATE="$wait_state" python3 -c '
-import datetime, json, os
+  wait_state="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("pending" if d["pending"] else "awaiting-review")')"
+  PR="$pr" VIEW="$view" LIVE="$live" FEEDBACK="$feedback" LOGS="$logs" FIRST_ERROR="$first_error" ACTION="$action" WAIT_STATE="$wait_state" python3 -c '
+import json, os
 pr, view = json.loads(os.environ["PR"]), json.loads(os.environ["VIEW"])
 live, feedback = json.loads(os.environ["LIVE"]), json.loads(os.environ["FEEDBACK"])
 parts = []
@@ -2393,24 +2497,19 @@ if os.environ["LOGS"].strip():
     parts.append("Failing check logs:\n" + os.environ["LOGS"].strip())
 action = os.environ["ACTION"]
 state = "red" if action == "fix" else os.environ["WAIT_STATE"]
-created = datetime.datetime.fromisoformat(str(pr["createdAt"]).replace("Z", "+00:00"))
-now_value = os.environ.get("PR_GATE_NOW")
-now = (datetime.datetime.fromisoformat(now_value.replace("Z", "+00:00"))
-       if now_value else datetime.datetime.now(datetime.timezone.utc))
-stale = (now - created).total_seconds() >= 2 * 60 * 60
-unfixable = stale and state in ("red", "checks-pending")
-if state == "awaiting-merge" or unfixable:
-    action = "observe"
 failed_names = [check["name"] for check in feedback["failed"]]
 wait_reason = "red: " + ", ".join(failed_names) if state == "red" else state
 print(json.dumps({"action":action, "state":state, "wait_reason":wait_reason,
                   "definition":live["definition"], "number":pr["number"], "url":pr["url"],
                   "ticket":pr["ticket"], "title":view.get("title") or pr["title"],
                   "branch":view.get("headRefName") or pr["headRefName"],
-                  "base":view.get("baseRefName") or "main", "since":pr["createdAt"],
+                  "base":view.get("baseRefName") or "main", "head":view.get("headRefOid") or "",
+                  "since":pr["createdAt"], "task_id":pr.get("task_id") or "",
+                  "board":pr.get("board") or "", "ticket_section":pr.get("ticket_section") or "",
+                  "labels":pr.get("labels") or [], "human_assignee_ids":pr.get("human_assignee_ids") or [],
                   "feedback":"\n\n".join(parts), "pending":feedback["pending"],
-                  "failed_checks":failed_names, "pickup_slot":not unfixable,
-                  "unfixable":unfixable}))
+                  "failed_checks":failed_names, "first_error_line":os.environ["FIRST_ERROR"],
+                  "pickup_slot":True, "unfixable":False}))
 '
 }
 

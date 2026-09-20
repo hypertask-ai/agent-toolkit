@@ -1,0 +1,1 @@
+AGTE-130 binds an agent to its owned pull request through merge and QA, adds durable structured fix rounds with an independent second opinion, and releases unfixable work to human review only after the full handoff sequence succeeds.
