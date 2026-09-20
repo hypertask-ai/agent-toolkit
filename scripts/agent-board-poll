@@ -1083,7 +1083,9 @@ if status != "running":
 else:
     for key in ("fix_rounds", "first_red_at", "last_failure_signature",
                 "last_qa_failure_id", "second_opinion", "second_opinion_at",
-                "second_opinion_round"):
+                "second_opinion_round", "consecutive_infra_errors",
+                "last_infra_error", "last_infra_error_at", "revert_guard_head",
+                "revert_guard_verdict", "revert_guard_verdict_at"):
         if key in prior:
             row[key] = prior[key]
 row.update({
@@ -2169,6 +2171,57 @@ print(row["fix_rounds"])
 PYEOF
 }
 
+record_pr_infra_error() {
+  local path="$1" reason="$2"
+  REASON="$reason" NOW="$(date -Is)" python3 - "$path" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+try:
+    row = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+row["consecutive_infra_errors"] = int(row.get("consecutive_infra_errors") or 0) + 1
+row["last_infra_error"] = os.environ["REASON"]
+row["last_infra_error_at"] = os.environ["NOW"]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+print(row["consecutive_infra_errors"])
+PYEOF
+}
+
+clear_pr_infra_errors() {
+  local path="$1"
+  python3 - "$path" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+try:
+    row = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit
+for key in ("consecutive_infra_errors", "last_infra_error", "last_infra_error_at"):
+    row.pop(key, None)
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+}
+
+update_pr_infra_alarm() {
+  local active="$1" number="$2" ref="$3" reason="$4" key title description
+  key="pr-fix-infra-${PR_REPO//\//-}-$number"
+  title="Bug: three infrastructure errors blocked PR #$number"
+  description="<p><strong>Three consecutive infrastructure errors stopped repair work on $ref.</strong></p><p>The latest error is recorded in the runner log.</p><p>New ticket work stays stopped while this pull request remains bound.</p>"
+  "$AGENT_PROGRESS" alarm --state-dir "$STATE_DIR" --board-cli "$BOARD_CLI" \
+    --token-file "$TOKEN_FILE" --key "$key" --runner "$SLUG" --active "$active" \
+    --title "$title" --description "$description" >>"$LOG" 2>&1 \
+    || log "PR fix infrastructure alarm update failed for PR #$number: $reason"
+}
+
 record_second_opinion() {
   local path="$1" diagnosis="$2" round="$3"
   DIAGNOSIS="$diagnosis" ROUND="$round" NOW="$(date -Is)" python3 - "$path" <<'PYEOF'
@@ -2264,6 +2317,176 @@ $history"
   return 0
 }
 
+record_revert_guard_opinion() {
+  local path="$1" head="$2" verdict="$3"
+  HEAD_SHA="$head" VERDICT="$verdict" NOW="$(date -Is)" python3 - "$path" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+try:
+    row = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+row["revert_guard_head"] = os.environ["HEAD_SHA"]
+row["revert_guard_verdict"] = os.environ["VERDICT"]
+row["revert_guard_verdict_at"] = os.environ["NOW"]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+}
+
+revert_guard_context() {
+  local run_dir="$1" base_ref="$2" head_ref="$3"
+  python3 - "$run_dir" "$base_ref" "$head_ref" <<'PYEOF'
+import collections, re, subprocess, sys
+
+repo, base_ref, head_ref = sys.argv[1:]
+def git(*args):
+    return subprocess.run(["git", "-C", repo, *args], check=True, capture_output=True, text=True).stdout
+
+merge_base = git("merge-base", base_ref, head_ref).strip()
+diff = git("-c", "core.quotePath=false", "diff", "--unified=0", "--no-color", merge_base, head_ref, "--")
+removed, path, old_line = [], None, None
+for line in diff.splitlines():
+    if line.startswith("diff --git "):
+        path, old_line = None, None
+    elif line.startswith("--- "):
+        path = line[4:].split("\t", 1)[0]
+        if path == "/dev/null":
+            path = None
+        elif path.startswith("a/"):
+            path = path[2:]
+    elif line.startswith("@@ "):
+        match = re.match(r"@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@", line)
+        old_line = int(match.group(1)) if match else None
+    elif path and old_line is not None and line.startswith("-") and not line.startswith("---"):
+        removed.append((path, old_line, line[1:]))
+        old_line += 1
+    elif old_line is not None and line.startswith(" "):
+        old_line += 1
+
+by_range = []
+for file_name, line_no, text in removed:
+    if by_range and by_range[-1][0] == file_name and line_no == by_range[-1][2] + 1:
+        by_range[-1][2] = line_no
+        by_range[-1][3].append(text)
+    else:
+        by_range.append([file_name, line_no, line_no, [text]])
+
+origins = collections.defaultdict(lambda: collections.defaultdict(list))
+blocks = []
+for file_name, start, end, texts in by_range:
+    blocks.append("%s:%s-%s\n%s" % (file_name, start, end, "\n".join("-" + text for text in texts)))
+    blame = git("blame", "-w", "--line-porcelain", "-L", f"{start},{end}", merge_base, "--", file_name)
+    sha = ""
+    for line in blame.splitlines():
+        match = re.match(r"\^?([0-9a-f]{40}) \d+ \d+", line)
+        if match:
+            sha = match.group(1)
+        elif sha and line.startswith("\t"):
+            origins[sha][file_name].append(line[1:])
+origin_lines = []
+for sha, files in origins.items():
+    subject = git("show", "-s", "--format=%s", sha).strip()
+    origin_lines.append("- %s %s (%s)" % (sha, subject, ", ".join(sorted(files))))
+print("Deleted hunks:\n" + ("\n\n".join(blocks) or "(none)"))
+print("\nOrigin commits:\n" + ("\n".join(origin_lines) or "(none)"))
+PYEOF
+}
+
+run_revert_guard_opinion() {
+  local gate="$1" record="$2" run_dir="$3" base_ref="$4" head_ref="$5"
+  local number ref head prior context prompt output diagnosis opinion_file run_id
+  local dev_family dev_families reviewer_family provider command reviewer_argv=()
+  number="$(row_field "$gate" number)"
+  ref="$(row_field "$gate" ticket)"
+  head="$(git -C "$run_dir" rev-parse "$head_ref")" || return 1
+  prior="$(HEAD_SHA="$head" python3 - "$record" <<'PYEOF'
+import json, os, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+if row.get("revert_guard_head") == os.environ["HEAD_SHA"]:
+    print(row.get("revert_guard_verdict") or "")
+PYEOF
+)"
+  if [ -n "$prior" ]; then
+    REVERT_GUARD_DIAGNOSIS="$prior"
+    [ "${prior,,}" != "deletion intended" ] || return 11
+    return 0
+  fi
+  dev_families="$(command_family "$MODEL_CLI")"
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    command="$(provider_command "$provider")"
+    [ -n "$command" ] || continue
+    dev_family="$(command_family "$command")"
+    [ -z "$dev_family" ] || dev_families="${dev_families}${dev_families:+$'\n'}${dev_family}"
+  done < <(printf '%s\n' "$PROVIDER_ORDER" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  reviewer_family="$(command_family "$SECOND_OPINION_CLI")"
+  if [ -n "$reviewer_family" ] && printf '%s\n' "$dev_families" | grep -qxF "$reviewer_family"; then
+    log "revert-guard second opinion for PR #$number refused: reviewer family $reviewer_family matches a development worker"
+    return 1
+  fi
+  core_command_available "$SECOND_OPINION_CLI" || return 1
+  context="$(revert_guard_context "$run_dir" "$base_ref" "$head_ref" 2>>"$LOG")" || return 1
+  prompt="Review only the deletions in PR #$number for $ref. Decide whether they are an intentional part of the requested change.
+
+Return exactly one line:
+deletion intended
+deletion not intended
+
+$context"
+  read -r -a reviewer_argv <<< "$SECOND_OPINION_CLI"
+  output="$(timeout 900 "${reviewer_argv[@]}" "$prompt" 2>>"$LOG")" || return 1
+  diagnosis="$(OUTPUT="$output" CONTEXT="$context" python3 -c '
+import os, re
+value = " ".join(os.environ["OUTPUT"].split()).strip().rstrip(".")
+if value.casefold() == "deletion intended":
+    print("deletion intended")
+elif value.casefold() == "deletion not intended":
+    deleted = os.environ["CONTEXT"].partition("Deleted hunks:\n")[2].partition("\n\nOrigin commits:")[0]
+    files = []
+    for line in deleted.splitlines():
+        match = re.match(r"(.+):\d+-\d+$", line)
+        if match and match.group(1) not in files:
+            files.append(match.group(1))
+    if files:
+        print("restore %s, do not delete them" % ", ".join(files))
+elif re.fullmatch(r"restore .+, do not delete them", value, re.I):
+    print(value)
+')"
+  [ -n "$diagnosis" ] || return 1
+  opinion_file="$STATE_DIR/.second-opinion-$SLUG-$number.$$"
+  printf 'Second opinion: %s\n' "$diagnosis" > "$opinion_file"
+  if ! post_ticket_comment "$ref" raw-file "$opinion_file"; then
+    rm -f "$opinion_file"
+    return 1
+  fi
+  rm -f "$opinion_file"
+  REVERT_GUARD_DIAGNOSIS="$diagnosis"
+  if [ "$diagnosis" = "deletion intended" ]; then
+    gh api -X POST "repos/$PR_REPO/issues/$number/labels" \
+      -f "labels[]=intentional-revert" >>"$LOG" 2>&1 || return 1
+    while IFS= read -r run_id; do
+      [ -n "$run_id" ] || continue
+      gh run rerun "$run_id" --repo "$PR_REPO" --failed >>"$LOG" 2>&1 || return 1
+    done < <(ROW="$gate" python3 -c '
+import json, os, re
+text = json.loads(os.environ["ROW"]).get("feedback") or ""
+for value in dict.fromkeys(re.findall(r"/actions/runs/([0-9]+)", text)):
+    print(value)
+')
+    record_revert_guard_opinion "$record" "$head" "$diagnosis"
+    return 10
+  fi
+  record_revert_guard_opinion "$record" "$head" "$diagnosis"
+  return 0
+}
+
 release_owned_pr() {
   local gate="$1" diagnosis="$2" number ref board checks body
   number="$(row_field "$gate" number)"
@@ -2296,6 +2519,7 @@ PR_GATE_REASON=""
 PR_GATE_MERGED_AT=""
 PR_OPEN_TICKETS=""
 PR_FIX_DIAGNOSIS=""
+PR_REVERT_GUARD_ONLY="no"
 if declare -F adapter_pr_gate >/dev/null 2>&1; then
   PR_GATES="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
               "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" "$OPENED_PRS" 2>>"$LOG")" || die \
@@ -2315,6 +2539,16 @@ if [ -n "$PR_GATES" ]; then
   PR_GATE_SINCE="$(row_field "$PR_GATE" since)"
   PR_GATE_REASON="$(row_field "$PR_GATE" wait_reason)"
   PR_GATE_MERGED_AT="$(row_field "$PR_GATE" merged_at)"
+  if ROW="$PR_GATE" python3 -c '
+import json, os, sys
+row = json.loads(os.environ["ROW"])
+names = {str(name).casefold() for name in row.get("failed_checks") or []}
+fail_fast = "revert-guard would fail" in str(row.get("first_error_line") or "").casefold()
+only_guard = names == {"revert-guard"} or (fail_fast and names <= {"revert-guard", "ci-tests"})
+raise SystemExit(0 if only_guard else 1)
+'; then
+    PR_REVERT_GUARD_ONLY="yes"
+  fi
   if [ -n "$PR_GATE_MERGED_AT" ]; then
     progress_event --event merge --pr "$PR_GATE_NUMBER" --pr-url "$PR_GATE_URL" \
       --ticket "$PR_GATE_TICKET" --occurred-at "$PR_GATE_MERGED_AT"
@@ -2324,13 +2558,20 @@ if [ -n "$PR_GATES" ]; then
 
   gate_board="$(row_field "$PR_GATE" board)"; [ -n "$gate_board" ] || gate_board="${BOARD_ID%%,*}"
   gate_labels=",$(ROW="$PR_GATE" python3 -c 'import json,os; print(",".join(json.loads(os.environ["ROW"]).get("labels") or []))'),"
-  gate_owner="$(qa_config_field "$gate_board" owner_id)"
-  gate_humans=",$(ROW="$PR_GATE" python3 -c 'import json,os; print(",".join(json.loads(os.environ["ROW"]).get("human_assignee_ids") or []))'),"
+  gate_section="$(row_field "$PR_GATE" ticket_section)"
+  gate_humans="$(ROW="$PR_GATE" python3 -c 'import json,os; print(",".join(json.loads(os.environ["ROW"]).get("human_assignee_ids") or []))')"
   gate_classification="$(owner_classification_state "$gate_board" "$PR_GATE_TICKET")"
   read -r _ gate_owner_state <<< "$gate_classification"
-  if [[ "$gate_labels" == *,valentin,* ]] || { [ -n "$gate_owner" ] && [[ "$gate_humans" == *",$gate_owner,"* ]]; } \
-     || [ "${gate_owner_state:-}" = "hold" ]; then
-    log "owned PR #$PR_GATE_NUMBER is held by the owner; no fix or new-ticket ranking ran"
+  gate_hold_reason=""
+  if [ "${gate_section,,}" = "${QA_BLOCKED_SECTION,,}" ]; then
+    gate_hold_reason="ticket is in $gate_section"
+  elif [ -n "$gate_humans" ]; then
+    gate_hold_reason="ticket has a human assignee"
+  elif [[ "$gate_labels" == *,valentin,* ]] || [ "${gate_owner_state:-}" = "hold" ]; then
+    gate_hold_reason="ticket is held by the owner"
+  fi
+  if [ -n "$gate_hold_reason" ]; then
+    log "owned PR #$PR_GATE_NUMBER is not eligible for a fix round: $gate_hold_reason; no new-ticket ranking ran"
     exit 0
   fi
 
@@ -2377,7 +2618,9 @@ PYEOF
     log "QA fail $qa_failure_id on $PR_GATE_TICKET already counted; waiting for a new QA verdict"
     exit 0
   fi
-  if [ -n "$PR_SECOND_OPINION" ]; then
+  if [ "$PR_REVERT_GUARD_ONLY" = "yes" ]; then
+    : # The deletion-specific reviewer runs after the PR refs are prepared.
+  elif [ -n "$PR_SECOND_OPINION" ]; then
     PR_FIX_DIAGNOSIS="$PR_SECOND_OPINION"
     if [[ "${PR_SECOND_OPINION,,}" == 'not fixable here because '* ]] \
        || [ "$PR_FIX_ROUNDS" -gt "$PR_SECOND_OPINION_ROUND" ]; then
@@ -2490,7 +2733,8 @@ fi
 # retry ladder, but it shares the per-ticket run cooldown.
 if [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$PR_GATE_ACTION" = "fix" ]; then
   pr_row="$(GATE="$PR_GATE" AID="$AGENT_ID" BOARD="${BOARD_ID%%,*}" DIAGNOSIS="$PR_FIX_DIAGNOSIS" \
-    ROUND="${fix_round:-}" SIGNATURE="${failure_signature:-}" QA_FAILURE_ID="${qa_failure_id:-}" python3 -c '
+    ROUND="${fix_round:-}" SIGNATURE="${failure_signature:-}" QA_FAILURE_ID="${qa_failure_id:-}" \
+    REVERT_GUARD_ONLY="$PR_REVERT_GUARD_ONLY" python3 -c '
 import json, os
 p = json.loads(os.environ["GATE"])
 print(json.dumps({"id":"pr-%s" % p["number"], "ref":p["ticket"], "section":"Pull request",
@@ -2502,7 +2746,8 @@ print(json.dumps({"id":"pr-%s" % p["number"], "ref":p["ticket"], "section":"Pull
                   "pr_fix_round":os.environ["ROUND"], "pr_diagnosis":os.environ["DIAGNOSIS"],
                   "pr_failure_signature":os.environ["SIGNATURE"],
                   "pr_qa_failure_id":os.environ["QA_FAILURE_ID"],
-                  "pr_feedback":p.get("feedback") or ""}))
+                  "pr_revert_guard_only":os.environ["REVERT_GUARD_ONLY"] == "yes",
+                  "pr_head":p.get("head") or "", "pr_feedback":p.get("feedback") or ""}))
 ')"
   CANDIDATES="$(printf '%s\n%s\n' "$CANDIDATES" "$pr_row")"
 fi
@@ -3167,20 +3412,6 @@ print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:120
     pr_fix_round="$(row_field "$row" pr_fix_round)"
     pr_failure_signature="$(row_field "$row" pr_failure_signature)"
     pr_qa_failure_id="$(row_field "$row" pr_qa_failure_id)"
-    fix_comment="$STATE_DIR/.fix-round-$SLUG-$(row_field "$row" pr_number).$$"
-    printf 'Fix round %s: %s\n' "$pr_fix_round" "$pr_failure_signature" > "$fix_comment"
-    if ! post_ticket_comment "$ref" raw-file "$fix_comment"; then
-      rm -f "$fix_comment"
-      log "fix round $pr_fix_round for $ref could not be announced; binding remains"
-      continue
-    fi
-    rm -f "$fix_comment"
-    recorded_round="$(record_pr_fix_round "$RUN_RECORD_DIR/$SLUG-$ref.json" \
-      "$pr_failure_signature" "$pr_qa_failure_id")"
-    if [ "$recorded_round" != "$pr_fix_round" ]; then
-      log "fix round state changed for $ref: announced $pr_fix_round but recorded $recorded_round; binding remains"
-      continue
-    fi
   fi
 
   # Scored before the run starts, because both things the score decides (which
@@ -3457,16 +3688,61 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
   fi
 
   if [ "$is_pr_fix" = "yes" ]; then
-    pr_branch="$(row_field "$row" pr_branch)"
-    pr_base="$(row_field "$row" pr_base)"; [ -n "$pr_base" ] || pr_base="main"
-    if ! git -C "$RUN_DIR" fetch origin "$pr_base" "$pr_branch" >>"$LOG" 2>&1 \
-       || ! git -C "$RUN_DIR" checkout -B "$pr_branch" "origin/$pr_branch" >>"$LOG" 2>&1; then
-      log "PR fix preparation failed for $ref: could not check out $pr_branch"
+    pr_number="$(row_field "$row" pr_number)"
+    pr_remote_url="https://github.com/$PR_REPO.git"
+    pr_view="$(gh pr view "$pr_number" --repo "$PR_REPO" --json baseRefName,headRefName 2>>"$LOG" || true)"
+    pr_base="$(printf '%s' "$pr_view" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("baseRefName") or "")' 2>/dev/null || true)"
+    pr_branch="$(printf '%s' "$pr_view" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("headRefName") or "")' 2>/dev/null || true)"
+    pr_base_ref="refs/remotes/agent-board-poll/$pr_number/base"
+    pr_head_ref="refs/remotes/agent-board-poll/$pr_number/head"
+    prep_error=""
+    if [ -z "$pr_base" ] || [ -z "$pr_branch" ]; then
+      prep_error="could not resolve base and head refs from GitHub"
+    elif ! git -C "$RUN_DIR" fetch "$pr_remote_url" \
+        "+refs/heads/$pr_base:$pr_base_ref" "+refs/heads/$pr_branch:$pr_head_ref" >>"$LOG" 2>&1; then
+      prep_error="could not fetch $pr_base and $pr_branch from $PR_REPO"
+    elif ! git -C "$RUN_DIR" checkout --detach "$pr_head_ref" >>"$LOG" 2>&1; then
+      prep_error="could not check out $pr_branch"
+    fi
+    if [ -n "$prep_error" ]; then
+      infra_count="$(record_pr_infra_error "$RUN_RECORD_DIR/$SLUG-$ref.json" "$prep_error")"
+      explain "infra error preparing PR #$pr_number for $ref: $prep_error (consecutive $infra_count)"
+      if [ "$infra_count" -ge 3 ]; then
+        update_pr_infra_alarm yes "$pr_number" "$ref" "$prep_error"
+      fi
       [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
       continue
     fi
-    if ! git -C "$RUN_DIR" rebase "origin/$pr_base" >>"$LOG" 2>&1; then
+    clear_pr_infra_errors "$RUN_RECORD_DIR/$SLUG-$ref.json"
+    update_pr_infra_alarm no "$pr_number" "$ref" "preparation recovered"
+    pr_remote_head="$(git -C "$RUN_DIR" rev-parse "$pr_head_ref")"
+    if ! git -C "$RUN_DIR" rebase "$pr_base_ref" >>"$LOG" 2>&1; then
       log "PR fix preparation left a rebase conflict for $ref; the worker must resolve it"
+    fi
+    pr_head_before="$(git -C "$RUN_DIR" rev-parse HEAD)"
+    if [ "$(row_field "$row" pr_revert_guard_only)" = "True" ]; then
+      REVERT_GUARD_DIAGNOSIS=""
+      set +e
+      run_revert_guard_opinion "$PR_GATE" "$RUN_RECORD_DIR/$SLUG-$ref.json" \
+        "$RUN_DIR" "$pr_base_ref" "$pr_head_ref"
+      revert_opinion_rc=$?
+      set -e
+      if [ "$revert_opinion_rc" -eq 10 ]; then
+        log "revert-guard second opinion for PR #$pr_number found the deletion intended; label applied and check rerun"
+        [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+        continue
+      elif [ "$revert_opinion_rc" -eq 11 ]; then
+        log "revert-guard second opinion for PR #$pr_number already found the deletion intended; waiting for its rerun"
+        [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+        continue
+      elif [ "$revert_opinion_rc" -ne 0 ]; then
+        log "revert-guard second opinion for PR #$pr_number failed; binding remains"
+        [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+        continue
+      fi
+      PROMPT="$PROMPT
+
+Second-opinion verdict: $REVERT_GUARD_DIAGNOSIS"
     fi
   fi
 
@@ -3654,6 +3930,8 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
   quota_exhausted=no
   quota_reset_epoch=""
   quota_reset_at=""
+  worker_exited=no
+  pr_round_outcome=""
   set +e
   WATCHDOG_REASON=""
   # Reply runs have one fixed model and no board capability. The model writes a
@@ -3873,6 +4151,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       else
         rc=$?
       fi
+      worker_exited=yes
       ACTIVE_MODEL_WAIT_PID=""
       ACTIVE_MODEL_PROCESS_GROUP=""
       rm -f "$MODEL_PID_FILE"
@@ -3897,11 +4176,33 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "provider $route_provider quota exhausted"
       fi
     done < <(provider_routes "$RUN_MODEL_CLI")
-    if [ "$rc" -eq 0 ] && [ "$is_pr_fix" = "yes" ]; then
-      if ! git -C "$RUN_DIR" push --force-with-lease origin "HEAD:refs/heads/$pr_branch" >>"$LOG" 2>&1; then
+    if [ "$is_pr_fix" = "yes" ] && [ "$worker_exited" = "yes" ]; then
+      pr_head_after="$(git -C "$RUN_DIR" rev-parse HEAD 2>/dev/null || true)"
+      if [ "$rc" -ne 0 ]; then
+        pr_round_outcome="no push: worker exited $rc"
+      elif [ -z "$pr_head_after" ]; then
+        pr_round_outcome="no push: worker left no readable commit"
+        rc=74
+      elif [ "$pr_head_after" = "$pr_head_before" ]; then
+        pr_round_outcome="no push: worker made no commit"
+      elif git -C "$RUN_DIR" push \
+          "--force-with-lease=refs/heads/$pr_branch:$pr_remote_head" "$pr_remote_url" \
+          "HEAD:refs/heads/$pr_branch" >>"$LOG" 2>&1; then
+        pr_round_outcome="pushed commit ${pr_head_after:0:12}"
+      else
+        pr_round_outcome="no push: push failed"
         printf 'PR fix push failed for %s\n' "$pr_branch" >> "$ERRFILE"
         rc=74
       fi
+      recorded_round="$(record_pr_fix_round "$RUN_RECORD_DIR/$SLUG-$ref.json" \
+        "$pr_failure_signature" "$pr_qa_failure_id")"
+      fix_comment="$STATE_DIR/.fix-round-$SLUG-$pr_number.$$"
+      printf 'Fix round %s: %s. Trigger: %s\n' "$recorded_round" "$pr_round_outcome" \
+        "$pr_failure_signature" > "$fix_comment"
+      if ! post_ticket_comment "$ref" raw-file "$fix_comment"; then
+        log "fix round $recorded_round for $ref completed but its result comment failed"
+      fi
+      rm -f "$fix_comment"
     fi
     if [ "$rc" -ne 0 ] && [ "$quota_count" -gt 0 ] && [ "$quota_count" -eq "$available_count" ]; then
       quota_exhausted=yes
