@@ -1,0 +1,1 @@
+- AGTE-140 makes all runners share one per-repository pull request cache and pause GitHub calls until a reported rate limit resets.

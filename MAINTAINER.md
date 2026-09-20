@@ -421,11 +421,12 @@ pr-hygiene check merges a green PR that could not get auto-merge.
 
 ## One ticket until live
 
-Before any normal or event-ticket ranking, the runner reads the host-wide PR
-cache for the repository. The first tick after 90 seconds refreshes it under a
-lock with two REST calls: open PRs and PRs merged in the last 48 hours. The cache
-contains no PR bodies. A GitHub rate-limit response logs its reset time and makes
-PR ownership unknown for that tick, so no PR binds an agent and the tick continues.
+Before any normal or event-ticket ranking, the runner reads one host-wide PR
+cache for the repository. The first tick after 60 seconds refreshes it under a
+lock and paginates every open PR plus merges from the last 48 hours. Each row
+stores the PR number, title, branch, and author, with no body. A GitHub rate-limit
+response records its reset time for the repository. Every runner skips GitHub
+calls until then, treats ownership as unknown, and continues its tick.
 
 Ownership is proved only by `<slug>/` (case-insensitive), `<slug>.opened-prs`, or
 an explicitly configured `GH_LOGIN` that differs from the host `gh` login.

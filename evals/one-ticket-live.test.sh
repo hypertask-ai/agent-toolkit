@@ -16,6 +16,11 @@ set -euo pipefail
 [ -z "${BOARD_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$BOARD_CALL_LOG"
 if [ "${1:-}" = "--token" ] && [ "$#" -ge 2 ]; then shift 2; fi
 [ -z "${ACTION_LOG:-}" ] || printf 'board %s\n' "$*" >> "$ACTION_LOG"
+if [ "${1:-} ${2:-} ${3:-}" = "--json comment list" ] \
+   && [ -e "${MODEL_OPEN_MARKER:-/no-marker}" ]; then
+  printf '%s\n' '{"comments":[{"id":"opened-8","agent":{"displayName":"Dev One"},"text":"<p><strong>Handoff: The pull request is ready for review.</strong></p><p><a href=\"https://github.com/example/repo/pull/8\">https://github.com/example/repo/pull/8</a></p><p>Next: Review the linked change.</p>"}]}'
+  exit 0
+fi
 if [ "${1:-} ${2:-}" = "task create" ]; then
   printf '{"task":{"ticketNumber":"AGTE-999"}}\n'
   exit 0
@@ -43,6 +48,11 @@ EOF
 cat > "$TMP/bin/claude" <<'EOF'
 #!/usr/bin/env bash
 [ -z "${MODEL_OPEN_MARKER:-}" ] || touch "$MODEL_OPEN_MARKER"
+if [ -n "${MODEL_OPEN_MARKER:-}" ] && [ -n "${AGENT_BOARD_CLI:-}" ]; then
+  "$AGENT_BOARD_CLI" comment add HTPR-1 --text '<p><strong>Handoff: The pull request is ready for review.</strong></p><p><a href="https://github.com/example/repo/pull/8">https://github.com/example/repo/pull/8</a></p><p>Next: Review the linked change.</p>'
+  mkdir -p "$HOME/.local/state/agent-board-poll"
+  printf 'HTPR-1 opened-8\n' >> "$HOME/.local/state/agent-board-poll/dev-1.posted-comments"
+fi
 [ -z "${WORKER_LOG:-}" ] || printf '%s\n' "${*: -1}" >> "$WORKER_LOG"
 if [ "${WORKER_COMMIT:-no}" = yes ]; then
   printf 'worker change\n' >> app
@@ -193,19 +203,26 @@ if [ "$1" = "api" ]; then
     fi
     REQUEST_STATE="${endpoint#*state=}"
     REQUEST_STATE="${REQUEST_STATE%%&*}"
-    SCENARIO="$scenario" REQUEST_STATE="$REQUEST_STATE" python3 <<'PYEOF'
+    REQUEST_PAGE="${endpoint##*page=}"
+    REQUEST_PAGE="${REQUEST_PAGE%%&*}"
+    SCENARIO="$scenario" REQUEST_STATE="$REQUEST_STATE" REQUEST_PAGE="$REQUEST_PAGE" python3 <<'PYEOF'
 import json
 import os
 
 scenario = os.environ["SCENARIO"]
 state = os.environ["REQUEST_STATE"]
+page = int(os.environ.get("REQUEST_PAGE") or "1")
 def row(number, ticket, branch, author="shared-bot", updated="2026-09-18T21:00:00Z", merged=None):
     return {"number": number, "title": f"HTPR-{ticket} fix", "html_url": f"https://github.test/pull/{number}",
             "head": {"ref": branch}, "base": {"ref": "production"}, "user": {"login": author},
             "draft": False, "created_at": updated, "updated_at": updated, "merged_at": merged}
 rows = []
 merged_scenarios = {"deployed", "undeployed", "fallback", "base-missing", "qa-fail", "qa-passed"}
-if state == "closed":
+if scenario == "paginated" and state == "open":
+    start = 1 if page == 1 else 101
+    stop = 101 if page == 1 else 102
+    rows = [row(number, number, f"dev-1/htpr-{number}") for number in range(start, stop)]
+elif state == "closed":
     if scenario in merged_scenarios:
         rows = [row(1, 1, "dev-1/htpr-1", updated="2026-09-18T20:00:00Z", merged="2026-09-18T20:00:00Z")]
 elif scenario not in merged_scenarios:
@@ -291,6 +308,9 @@ elif [[ "$url" == *'/mcp/tasks?'* ]]; then
   cat <<JSON
 {"tasks":[{"id":"task-1","ticketNumber":"HTPR-1","projectId":"15","section":"$ticket_section","title":"PR ticket","description":"fix it","assignees":$task1_assignees,"labels":$task1_labels,"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0},{"id":"task-5","ticketNumber":"HTPR-5","section":"Bugs","title":"Legacy branch ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
 JSON
+elif [[ "$url" == *'task_id=task-1'* ]] \
+     && [ -e "${MODEL_OPEN_MARKER:-/no-marker}" ]; then
+  printf '%s\n' '{"comments":[{"id":"opened-8","agent":{"id":"agent-1"},"createdAt":"2026-09-18T21:00:00Z","text":"<p><strong>Handoff: The pull request is ready for review.</strong></p><p><a href=\"https://github.com/example/repo/pull/8\">https://github.com/example/repo/pull/8</a></p><p>Next: Review the linked change.</p>"}]}'
 elif [[ "$url" == *'task_id=task-1'* ]] && [ "${PR_TEST_SCENARIO:-}" = "qa-fail" ]; then
   printf '{"comments":[{"id":"qa-77","agent":{"id":"agent-qa"},"createdAt":"2026-09-18T21:00:00Z","text":"<p>Handoff: Dev One, checkout fails after deploy.</p>"}]}\n'
 elif [[ "$url" == *'task_id=task-3'* ]]; then
@@ -331,7 +351,6 @@ PATH="$TMP/bin:$PATH"
 HOME="$TMP/home"
 PR_REPO="example/repo"
 export PR_GATE_NOW="2026-09-18T22:00:00Z"
-export PR_CACHE_TTL_SECONDS=0
 # shellcheck source=/dev/null
 . "$ROOT/adapters/hypertask/adapter.sh"
 die() { printf 'die: %s %s\n' "$*" >&2; return 1; }
@@ -370,7 +389,8 @@ run_gate() {
   opened="$TMP/home/.local/state/agent-board-poll/$slug.opened-prs"
   mkdir -p "$(dirname "$opened")"
   touch "$opened"
-  PR_TEST_SCENARIO="$scenario" PR_FIXTURE="$ROOT/evals/fixtures/status-context-pr.json" \
+  AGENT_PR_CACHE_DIR="$cache/pr-cache" PR_TEST_SCENARIO="$scenario" \
+    PR_FIXTURE="$ROOT/evals/fixtures/status-context-pr.json" \
     PR_GATE_NOW="2026-09-18T22:00:00Z" PR_BRANCH_PREFIX="${4:-}" adapter_pr_gate \
       "$TMP/token" 15 agent-1 "$name" "$slug" "$cache" \
       "$TMP/home/.config/hypertask-agents" "$opened"
@@ -504,15 +524,72 @@ slug_prefix="$(run_gate slug-prefix)"
 [[ -z "$(run_gate slug-prefix dev-2 'Dev Two' 'cursor-dev-2/' 2>/dev/null)" ]]
 echo 'PASS slug branch prefix is case-insensitive and attributes only its matching agent'
 
-pr_cache="$TMP/home/.local/state/agent-board-poll/pr-cache/example__repo.json"
-rm -f "$pr_cache"
+pr_cache_dir="$TMP/shared-pr-cache"
+pr_cache="$pr_cache_dir/example__repo.json"
+rm -rf "$pr_cache_dir"
 : > "$TMP/gh-calls"
-PR_CACHE_TTL_SECONDS=90 GH_CALL_LOG="$TMP/gh-calls" PR_TEST_SCENARIO=pending _ht_pr_cache_rows example/repo >/dev/null
-PR_CACHE_TTL_SECONDS=90 GH_CALL_LOG="$TMP/gh-calls" PR_TEST_SCENARIO=red _ht_pr_cache_rows example/repo >/dev/null
+for reader in 1 2 3 4 5 6; do
+  AGENT_PR_CACHE_DIR="$pr_cache_dir" GH_CALL_LOG="$TMP/gh-calls" \
+    PR_TEST_SCENARIO=pending _ht_pr_cache_rows example/repo > "$TMP/cache-reader-$reader" &
+done
+wait
+AGENT_PR_CACHE_DIR="$pr_cache_dir" GH_CALL_LOG="$TMP/gh-calls" \
+  PR_TEST_SCENARIO=red _ht_pr_cache_rows example/repo >/dev/null
 [[ "$(grep -cF 'api repos/example/repo/pulls?' "$TMP/gh-calls")" = 2 ]]
 [[ -f "$pr_cache" ]]
+printf '%s\n' "$(( $(date +%s) + 60 ))" > "$pr_cache.rate-limit"
+set +e
+AGENT_PR_CACHE_DIR="$pr_cache_dir" GH_CALL_LOG="$TMP/gh-calls" \
+  PR_TEST_SCENARIO=red _ht_pr_cache_rows example/repo >/dev/null
+paused_cache_rc=$?
+set -e
+[[ "$paused_cache_rc" = 75 ]]
+[[ "$(grep -cF 'api repos/example/repo/pulls?' "$TMP/gh-calls")" = 2 ]]
+rm -f "$pr_cache.rate-limit"
+python3 - "$pr_cache" <<'PYEOF'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+assert row["repo"] == "example/repo" and len(row["prs"]) == 1
+pr = row["prs"][0]
+assert {"number", "title", "branch", "author"} <= set(pr)
+assert "body" not in pr
+PYEOF
 ! grep -q 'pr list\|body' "$TMP/gh-calls" "$pr_cache"
-echo 'PASS host-wide REST cache refreshes once per 90 seconds without PR bodies'
+echo 'PASS six readers share one repository cache refreshed no more than once per minute'
+
+page_cache="$TMP/page-pr-cache"
+: > "$TMP/page-gh-calls"
+page_rows="$(AGENT_PR_CACHE_DIR="$page_cache" GH_CALL_LOG="$TMP/page-gh-calls" \
+  PR_TEST_SCENARIO=paginated _ht_pr_cache_rows example/repo)"
+[[ "$(PAGE_ROWS="$page_rows" python3 -c 'import json,os; print(len(json.loads(os.environ["PAGE_ROWS"])))')" = 101 ]]
+[[ "$(grep -cF 'api repos/example/repo/pulls?' "$TMP/page-gh-calls")" = 3 ]]
+echo 'PASS cache paginates every open pull request once for all readers'
+
+merge_cache="$TMP/merge-pr-cache"
+merge_rows="$(AGENT_PR_CACHE_DIR="$merge_cache" PR_TEST_SCENARIO=deployed _ht_pr_cache_rows example/repo)"
+MERGE_ROWS="$merge_rows" python3 - <<'PYEOF'
+import json, os
+rows = json.loads(os.environ["MERGE_ROWS"])
+assert len(rows) == 1 and rows[0]["state"] == "MERGED"
+assert rows[0]["mergedAt"] == "2026-09-18T20:00:00Z"
+assert {"number", "title", "branch", "author"} <= set(rows[0])
+PYEOF
+echo 'PASS cache keeps recent merges with the required identity fields'
+
+rate_cache="$TMP/rate-pr-cache"
+: > "$TMP/rate-gh-calls"
+set +e
+AGENT_PR_CACHE_DIR="$rate_cache" GH_CALL_LOG="$TMP/rate-gh-calls" \
+  PR_TEST_SCENARIO=rate-limit _ht_pr_cache_rows example/repo >/dev/null 2>"$TMP/rate-first.err"
+first_rate_rc=$?
+AGENT_PR_CACHE_DIR="$rate_cache" GH_CALL_LOG="$TMP/rate-gh-calls" \
+  PR_TEST_SCENARIO=pending _ht_pr_cache_rows example/repo >/dev/null 2>"$TMP/rate-second.err"
+second_rate_rc=$?
+set -e
+[[ "$first_rate_rc" = 75 && "$second_rate_rc" = 75 ]]
+[[ "$(wc -l < "$TMP/rate-gh-calls")" = 2 ]]
+[[ -s "$rate_cache/example__repo.json.rate-limit" ]]
+echo 'PASS rate-limit reset is shared and blocks later GitHub calls until reset'
 
 orphan_log="$TMP/orphan.log"
 run_gate orphan >/dev/null 2>"$orphan_log"
@@ -556,12 +633,14 @@ state="$TMP/home/.local/state/agent-board-poll"
 mkdir -p "$state"
 rate_log_before="$([ ! -f "$state/dev-1.log" ] || wc -l < "$state/dev-1.log")"
 rate_log_before="${rate_log_before:-0}"
-rate_run="$(PR_TEST_SCENARIO=rate-limit BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+rate_run="$(AGENT_PR_CACHE_DIR="$TMP/tick-rate-cache" PR_TEST_SCENARIO=rate-limit \
+  BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+  COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$rate_run" != *'bound to PR'* && "$rate_run" == *'would pick up HTPR-2'* ]]
 [[ "$(tail -n "+$((rate_log_before + 1))" "$state/dev-1.log" | grep -c '^github rate limited until ' || true)" = 1 ]]
 echo 'PASS GitHub rate limit logs once, binds no PR, and does not fail the tick'
 
-multi_run="$(PR_TEST_SCENARIO=oldest HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+multi_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-multi_run" PR_TEST_SCENARIO=oldest HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$multi_run" == *'bound to PR #9 for HTPR-9: red'* ]]
 [[ "$multi_run" == *'would run a structured fix round for PR #9; no new ticket was ranked.'* ]]
 [[ "$multi_run" != *'would pick up HTPR-2'* ]]
@@ -569,55 +648,56 @@ multi_run="$(PR_TEST_SCENARIO=oldest HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMP
 echo 'PASS oldest owned red PR is the only work considered'
 
 rm -rf "$state/pr-live-cache"
-two_green_run="$(PR_TEST_SCENARIO=two-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+two_green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-two_green_run" PR_TEST_SCENARIO=two-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$two_green_run" == *'bound to PR #9 (awaiting-review); no new ticket was ranked.'* ]]
 [[ "$two_green_run" != *'would pick up'* ]]
 echo 'PASS even the first green PR consumes the tick'
 
 rm -rf "$state/pr-live-cache"
-stale_red_green_run="$(PR_TEST_SCENARIO=stale-red-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+stale_red_green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-stale_red_green_run" PR_TEST_SCENARIO=stale-red-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$stale_red_green_run" == *'would run a structured fix round for PR #9'* ]]
 [[ "$stale_red_green_run" != *'would pick up'* ]]
 echo 'PASS old red PR remains bound instead of aging out'
 
 rm -rf "$state/pr-live-cache"
-pending_run="$(PR_TEST_SCENARIO=pending BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+pending_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-pending_run" PR_TEST_SCENARIO=pending BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$pending_run" == *'bound to PR #1 (pending); no new ticket was ranked.'* ]]
 [[ "$pending_run" != *'would pick up'* ]]
 echo 'PASS one pending PR blocks normal polling pickup'
 
 rm -rf "$state/pr-live-cache"
-event_run="$(PR_TEST_SCENARIO=pending BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run --ticket HTPR-2 dev-1)"
+event_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-event_run" PR_TEST_SCENARIO=pending BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run --ticket HTPR-2 dev-1)"
 [[ "$event_run" == *'bound to PR #1 (pending); no new ticket was ranked.'* ]]
 [[ "$event_run" != *'would pick up HTPR-2'* ]]
 echo 'PASS exact-ticket event pickup obeys the same PR binding'
 
 rm -rf "$state/pr-live-cache"
-green_run="$(PR_TEST_SCENARIO=green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-green_run" PR_TEST_SCENARIO=green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$green_run" == *'bound to PR #1 (awaiting-review); no new ticket was ranked.'* ]]
 [[ "$green_run" != *'would pick up'* ]]
 echo 'PASS one green PR blocks normal pickup'
 
 rm -rf "$state/pr-live-cache"
-undeployed_run="$(PR_TEST_SCENARIO=undeployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+undeployed_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-undeployed_run" PR_TEST_SCENARIO=undeployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$undeployed_run" == *'bound to PR #1 (in-qa); no new ticket was ranked.'* ]]
 [[ "$undeployed_run" != *'would pick up'* ]]
 echo 'PASS merged PR remains bound through QA'
 
 rm -rf "$state/pr-live-cache"
-qa_passed_run="$(PR_TEST_SCENARIO=qa-passed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+qa_passed_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-qa_passed_run" PR_TEST_SCENARIO=qa-passed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$qa_passed_run" == *'would pick up HTPR-2'* ]]
 echo 'PASS QA pass releases the next ticket'
 
 rm -rf "$state/pr-live-cache"
-red_run="$(PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+red_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-red_run" PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$red_run" == *'would run a structured fix round for PR #1; no new ticket was ranked.'* ]]
 [[ "$red_run" != *'would pick up HTPR-2'* ]]
 echo 'PASS one red PR starts only its structured repair path'
 
 run_actual() {
   local scenario="$1" board_scenario="${2:-no-emergency}"
-  PR_TEST_SCENARIO="$scenario" BOARD_TEST_SCENARIO="$board_scenario" RUN_COOLDOWN_SECONDS=0 \
+  AGENT_PR_CACHE_DIR="$TMP/actual-pr-cache-$scenario" PR_TEST_SCENARIO="$scenario" \
+    BOARD_TEST_SCENARIO="$board_scenario" RUN_COOLDOWN_SECONDS=0 \
     HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" \
     BOARD_CALL_LOG="$TMP/board-calls" BOARD_COMMENT_LOG="$TMP/board-comments" \
     WORKER_LOG="$TMP/worker-prompts" REVIEWER_LOG="$TMP/reviewer-prompts" \
@@ -691,7 +771,7 @@ PYEOF
 echo 'PASS unfixable second opinion releases in order, closes the PR, and preserves its branch'
 
 rm -rf "$state/pr-live-cache"
-released_run="$(PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+released_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-released_run" PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$released_run" != *'bound to PR #1'* ]]
 echo 'PASS released PR state prevents eventual GitHub results from rebinding'
 
@@ -735,10 +815,11 @@ echo 'PASS unintended deletion verdict becomes the next fix brief and ticket com
 
 rm -f "$state/dev-1.released-prs" "$TMP/unassigned" "$TMP/opened-marker"
 rm -rf "$state/pr-live-cache"
-PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency RUN_COOLDOWN_SECONDS=0 MODEL_OPEN_MARKER="$TMP/opened-marker" \
+AGENT_PR_CACHE_DIR="$TMP/record-open-pr-cache" PR_TEST_SCENARIO=record-open \
+  BOARD_TEST_SCENARIO=no-emergency RUN_COOLDOWN_SECONDS=0 MODEL_OPEN_MARKER="$TMP/opened-marker" \
   HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" \
   "$ROOT/scripts/agent-board-poll" --once dev-1 >/dev/null
 [[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "8" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.opened-prs")" = yes ]]
 echo 'PASS runner persists a PR first seen after its ticket run'
 
-echo '47 one-ticket-until-live checks passed'
+echo '50 one-ticket-until-live checks passed'
