@@ -200,10 +200,12 @@ runner_pid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["p
 kill -TERM "$runner_pid"
 wait "$launcher_pid" 2>/dev/null || true
 sed -i 's/RUN_STALL_SECONDS="30"/RUN_STALL_SECONDS="1"/' "$TMP/config/dev.conf"
-if [ -f "$TMP/model-term" ] && [ ! -e "$TMP/worktrees/dev-TEST-1" ]; then
-  pass cleanup-signal 'a terminated runner stops its model and removes the run worktree'
+if [ -f "$TMP/model-term" ] && [ -d "$TMP/worktrees/dev-TEST-1" ] \
+   && grep -qF "interrupted run kept worktree $TMP/worktrees/dev-TEST-1" \
+     "$TMP/state/agent-board-poll/dev.log"; then
+  pass cleanup-signal 'a terminated runner stops its model and keeps the run worktree for reconciliation'
 else
-  fail cleanup-signal "signal exit left a model or worktree: $(cat "$TMP/killed.out")"
+  fail cleanup-signal "signal exit did not stop the model and preserve its worktree: $(cat "$TMP/killed.out")"
 fi
 
 reset_runtime

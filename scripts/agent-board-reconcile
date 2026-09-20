@@ -49,6 +49,13 @@ record_is_live() {
   pgrep -f 'agent-board-poll([[:space:]]|$)' 2>/dev/null | grep -qxF "$pid"
 }
 
+record_preserves_ticket() {
+  local action
+  action="$(record_field "$1" reconciliation_action)"
+  case "$action" in owner-hold|alarm|pr-binding) return 0 ;; esac
+  return 1
+}
+
 CONF_FILES=()
 if [ -n "$CONFIG_DIR" ]; then
   for conf in "$CONFIG_DIR"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
@@ -180,7 +187,7 @@ PYEOF
       ref="$(ROW="$row" python3 -c 'import json,os; print(json.loads(os.environ["ROW"]).get("ref") or "")')"
       board="$(ROW="$row" python3 -c 'import json,os; print(json.loads(os.environ["ROW"]).get("board") or "")')"
       record="$STATE_DIR/run-records/$slug-$ref.json"
-      if [ -f "$record" ] && record_is_live "$record"; then continue; fi
+      if [ -f "$record" ] && { record_is_live "$record" || record_preserves_ticket "$record"; }; then continue; fi
       set +e
       adapter_agent_has_open_pr "${PR_REPO:-}" "$ref" "$PR_BRANCH_PREFIX" "$opened"
       pr_rc=$?
@@ -296,7 +303,7 @@ print(row.get("section") or "")
           continue
         fi
         record="$STATE_DIR/run-records/$slug-$ref.json"
-        if [ -f "$record" ] && record_is_live "$record"; then continue; fi
+        if [ -f "$record" ] && { record_is_live "$record" || record_preserves_ticket "$record"; }; then continue; fi
         set +e
         merged_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" "${PR_REPO:-}" "$ref" 2>>"$log")"
         merged_rc=$?

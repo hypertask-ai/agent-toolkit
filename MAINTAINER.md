@@ -609,6 +609,18 @@ paste-it-yourself fallback appears only when no bot token is configured.
 
 ## Run cleanup and disk guard
 
+Every runner start reconciles its `running` records before cleanup or ticket
+ranking. A missing process, zombie, reused pid, or pid now owned by another
+command marks the record `reconciled`, returns the ticket to its configured
+intake column unassigned, and posts one comment naming the run and reason. The
+worktree stays in place and its path is written to the runner log. Owner-held
+tickets stay where they are, and a dead pull request fix round keeps its existing
+pull request binding.
+
+A ticket is requeued after its first dead process. A second dead process raises
+the existing high-priority toolkit alarm instead of allowing a third run. The
+alarm uses the AGTE-118 Review, agent-room, Telegram, and Board health path.
+
 Every tick cleans before it ranks work. It sweeps isolated worktrees older than
 two days when no live run record owns them, removes clean or fully pushed
 worktrees, prunes generated build directories from stale worktrees kept for

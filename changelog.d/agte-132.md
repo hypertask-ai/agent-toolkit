@@ -1,0 +1,1 @@
+AGTE-132 reconciles dead or reused runner pids before ranking, requeues the first failure while preserving its worktree, and raises the existing alarm after a second death without releasing owner holds or pull request bindings.

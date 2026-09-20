@@ -375,6 +375,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/atomic-claim.test.sh" ]; then
   echo "-- atomic claim race checks --"
   run_test "$HERE/atomic-claim.test.sh" bash "$HERE/atomic-claim.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/dead-run-reconcile.test.sh" ]; then
+  echo ""
+  echo "-- dead run reconciliation checks --"
+  run_test "$HERE/dead-run-reconcile.test.sh" bash "$HERE/dead-run-reconcile.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/post-run-cleanup.test.sh" ]; then
   echo ""
   echo "-- post-run cleanup and disk guard checks --"
