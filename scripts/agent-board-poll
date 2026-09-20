@@ -4535,6 +4535,12 @@ if rows:
   fi
   if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
     OPEN_PRS_AFTER="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
+    if declare -F adapter_posted_pr_numbers >/dev/null 2>&1; then
+      posted_pr_ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
+      posted_prs="$(adapter_posted_pr_numbers "$TOKEN_FILE" "$task_id" "$board" \
+        "$PR_REPO" "$posted_pr_ids" 2>>"$LOG" || true)"
+      OPEN_PRS_AFTER="$(printf '%s\n%s\n' "$OPEN_PRS_AFTER" "$posted_prs" | sed '/^$/d' | sort -nu)"
+    fi
     while IFS= read -r opened_number; do
       [ -n "$opened_number" ] || continue
       if printf '%s\n' "$OPEN_PRS_BEFORE" | grep -qxF "$opened_number"; then continue; fi

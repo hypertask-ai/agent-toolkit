@@ -386,10 +386,11 @@ when `<slug>.opened-prs` records that the runner saw it open during that agent's
 run, or when an explicit `GH_LOGIN` differs from the host `gh` login and matches
 the author. `dev-2` also recognizes `dev-cursor-2/` and `cursor-dev-2/`. QA
 agents recognize only PRs in their own opened-PR ledger. Board assignment and
-shared GitHub authorship do not transfer ownership. PR discovery uses a locked,
-host-wide REST cache per repository, refreshed at most every 90 seconds without
-PR bodies. A rate-limit response makes ownership unknown for that tick and does
-not fail it.
+shared GitHub authorship do not transfer ownership. PR discovery uses one locked,
+host-wide REST cache per repository. It refreshes no more than once a minute and
+stores every open PR plus merges from the last 48 hours without PR bodies. When
+GitHub reports a rate limit, all runners pause repository calls until its reset
+time. PR ownership stays unknown during the pause, and ticks continue.
 
 Two open PRs fill the pickup slots and stop every new claim, including an
 `emergency`. The runner ranks that queue oldest first. A red or pending PR older

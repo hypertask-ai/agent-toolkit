@@ -33,8 +33,10 @@ if [ "${1:-}" = api ] && [[ "${2:-}" == repos/example/repo/pulls\?state=* ]]; th
       fi
       ;;
     *)
-      if [ -n "${MOCK_MERGED_PR_TITLE:-}" ]; then
-        now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      if [ "${MOCK_PR_STATE:-OPEN}" = MERGED ]; then
+        printf '[{"number":9,"title":"TEST-1: change","html_url":"https://github.com/example/repo/pull/9","head":{"ref":"human/change"},"base":{"ref":"main"},"user":{"login":"human"},"draft":false,"created_at":"%s","updated_at":"%s","merged_at":"%s"}]\n' "$now" "$now" "$now"
+      elif [ -n "${MOCK_MERGED_PR_TITLE:-}" ]; then
         printf '[{"number":999,"title":"%s","html_url":"https://github.com/example/repo/pull/999","head":{"ref":"human/change"},"base":{"ref":"main"},"user":{"login":"human"},"draft":false,"created_at":"%s","updated_at":"%s","merged_at":"%s"}]\n' "$MOCK_MERGED_PR_TITLE" "$now" "$now" "$now"
       else
         printf '[]\n'
@@ -89,6 +91,20 @@ if [ "${MOCK_MODEL_MODE:-pr}" = sleep ]; then
   exec sleep 60
 fi
 printf 'yes\n' > "$MOCK_PR_OPEN"
+mkdir -p "$XDG_STATE_HOME/agent-board-poll"
+printf 'TEST-1 opened-9\n' >> "$XDG_STATE_HOME/agent-board-poll/dev.posted-comments"
+python3 - "$MOCK_COMMENTS" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data["comments"].append({
+    "id": "opened-9",
+    "createdAt": "2026-01-01T00:00:01Z",
+    "agent": {"id": "agent-dev", "displayName": "Dev"},
+    "text": '<p><strong>Handoff: The pull request is ready for review.</strong></p><p><a href="https://github.com/example/repo/pull/9">https://github.com/example/repo/pull/9</a></p><p>Next: Review the linked change.</p>',
+})
+json.dump(data, open(path, "w"))
+PYEOF
 EOF
 cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash

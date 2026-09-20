@@ -1720,12 +1720,10 @@ adapter_triage_input() {
   comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")" \
     || comments='{"comments":[]}'
 
-  # A pull request that closed without merging is the quietest failed attempt
-  # there is: nothing is written on the ticket when somebody gives up on a
-  # branch. No gh, no claim either way.
+  # The repository-wide cache is the only PR listing path in a runner tick.
+  # It deliberately contains open PRs and recent merges, never PR bodies.
   if [ -n "$repo" ] && command -v gh >/dev/null 2>&1; then
-    pr_json="$(gh pr list --repo "$repo" --state all --search "$ref" \
-                 --json number,state,url,headRefName --limit 10 2>/dev/null || printf '[]')"
+    pr_json="$(_ht_pr_cache_rows "$repo" 2>/dev/null || printf '[]')"
   fi
 
   printf '%s' "$comments" | \
@@ -1741,7 +1739,7 @@ comments = [text_of(c) for c in (doc.get("comments") or [])]
 ref = os.environ["REF"]
 prs = json.loads(os.environ["PR_JSON"]) or []
 prs = [p for p in prs if ref.casefold() in
-       (str(p.get("headRefName") or "") + " " + str(p.get("url") or "")).casefold()]
+       (str(p.get("title") or "") + " " + str(p.get("headRefName") or "")).casefold()]
 merged = any(str(p.get("state") or "").upper() == "MERGED" for p in prs)
 closed_unmerged = (not merged) and any(
     str(p.get("state") or "").upper() == "CLOSED" for p in prs)
@@ -1924,12 +1922,88 @@ print(task.get("section") or "")
 '
 }
 
+_ht_pr_cache_file() {
+  local repo="$1" cache_dir
+  cache_dir="${AGENT_PR_CACHE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll/pr-cache}"
+  printf '%s/%s.json' "$cache_dir" "${repo//\//__}"
+}
+
+_ht_github_paused() {
+  local repo="$1" pause_file reset now
+  pause_file="$(_ht_pr_cache_file "$repo").rate-limit"
+  [ -s "$pause_file" ] || return 1
+  read -r reset < "$pause_file" || return 1
+  if ! [[ "$reset" =~ ^[0-9]+$ ]]; then
+    rm -f "$pause_file"
+    return 1
+  fi
+  now="$(date +%s)"
+  if [ "$now" -lt "$reset" ]; then
+    return 0
+  fi
+  rm -f "$pause_file"
+  return 1
+}
+
+_ht_pause_github() {
+  local repo="$1" error_file="$2" cache_file pause_file reset now tmp
+  cache_file="$(_ht_pr_cache_file "$repo")"
+  pause_file="$cache_file.rate-limit"
+  now="$(date +%s)"
+  reset="$(python3 - "$error_file" <<'PYEOF'
+import re
+import sys
+
+try:
+    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+except OSError:
+    text = ""
+match = re.search(r"(?:x-ratelimit-reset|reset(?:_at|At|_epoch)?)['\" :=]+([0-9]{10})", text, re.I)
+print(match.group(1) if match else "")
+PYEOF
+)"
+  if ! [[ "$reset" =~ ^[0-9]+$ ]] || [ "$reset" -le "$now" ]; then
+    reset="$(command gh api rate_limit --jq '.rate.reset' 2>/dev/null || true)"
+  fi
+  if ! [[ "$reset" =~ ^[0-9]+$ ]] || [ "$reset" -le "$now" ]; then
+    reset=$((now + 60))
+  fi
+  mkdir -p "$(dirname "$pause_file")"
+  tmp="$(mktemp "$pause_file.XXXXXX")"
+  printf '%s\n' "$reset" > "$tmp"
+  chmod 600 "$tmp"
+  mv "$tmp" "$pause_file"
+  printf 'github rate limited until %s\n' \
+    "$(date -u -d "@$reset" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '%s' "$reset")" >&2
+}
+
+_ht_gh() {
+  local repo="$1" error_file rc
+  shift
+  _ht_github_paused "$repo" && return 75
+  error_file="$(mktemp)"
+  if command gh "$@" 2>"$error_file"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -ne 0 ] && grep -Eqi 'rate.?limit|HTTP 429|abuse detection' "$error_file"; then
+    _ht_pause_github "$repo" "$error_file"
+    cat "$error_file" >&2
+    rm -f "$error_file"
+    return 75
+  fi
+  cat "$error_file" >&2
+  rm -f "$error_file"
+  return "$rc"
+}
+
 # adapter_merged_pr_from_comments <repo>
 # Reads one Hypertask comments response on stdin and prints the first linked
-# pull request URL whose GitHub state is MERGED. A ticket link is authoritative;
-# the pull request does not also need the ticket reference in its title or branch.
+# pull request URL whose cached GitHub state is MERGED. A ticket link is
+# authoritative; the PR does not also need the ticket reference in its title.
 adapter_merged_pr_from_comments() {
-  local repo="$1" numbers number view failed="no"
+  local repo="$1" numbers rows cache_rc
   [ -n "$repo" ] || return 2
   numbers="$(REPO="$repo" python3 -c '
 import html, json, os, re, sys
@@ -1944,23 +2018,21 @@ for comment in json.load(sys.stdin).get("comments") or []:
             print(match.group(1))
 ')" || return 2
   [ -n "$numbers" ] || return 1
-  command -v gh >/dev/null 2>&1 || return 2
-  while IFS= read -r number; do
-    [ -n "$number" ] || continue
-    if ! view="$(gh pr view "$number" --repo "$repo" --json state,url 2>/dev/null)"; then
-      failed="yes"
-      continue
-    fi
-    if printf '%s' "$view" | python3 -c '
-import json, sys
-raise SystemExit(0 if str(json.load(sys.stdin).get("state") or "").upper() == "MERGED" else 1)
-'; then
-      printf '%s' "$view" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("url") or "")'
-      return 0
-    fi
-  done <<< "$numbers"
-  [ "$failed" = "no" ] || return 2
-  return 1
+  if rows="$(_ht_pr_cache_rows "$repo")"; then
+    cache_rc=0
+  else
+    cache_rc=$?
+  fi
+  [ "$cache_rc" -eq 0 ] || return "$cache_rc"
+  NUMBERS="$numbers" ROWS="$rows" python3 -c '
+import json, os, sys
+numbers = set(os.environ["NUMBERS"].splitlines())
+for row in json.loads(os.environ["ROWS"] or "[]"):
+    if str(row.get("number")) in numbers and str(row.get("state") or "").upper() == "MERGED":
+        print(row.get("url") or "")
+        raise SystemExit(0)
+raise SystemExit(1)
+'
 }
 
 # adapter_ticket_merged_pr <token-file> <board-id> <task-id> <repo> <ref>
@@ -2007,19 +2079,23 @@ for pr in json.loads(os.environ["ROWS"] or "[]"):
 }
 
 _ht_pr_cache_rows() (
-  local repo="$1" cache_dir cache_file lock_file now modified age tmp open_rc closed_rc reset reset_at
+  local repo="$1" cache_file cache_dir lock_file now modified age ttl tmp rc page returned stop
   [ -n "$repo" ] && command -v gh >/dev/null 2>&1 || return 1
-  cache_dir="${AGENT_PR_CACHE_DIR:-$HOME/.local/state/agent-board-poll/pr-cache}"
-  cache_file="$cache_dir/${repo//\//__}.json"
+  cache_file="$(_ht_pr_cache_file "$repo")"
+  cache_dir="$(dirname "$cache_file")"
   lock_file="$cache_file.lock"
   mkdir -p "$cache_dir"
   exec 8>>"$lock_file"
   flock 8
   now="$(date +%s)"
+  ttl="${PR_CACHE_TTL_SECONDS:-60}"
+  [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=60
+  [ "$ttl" -ge 60 ] || ttl=60
+  _ht_github_paused "$repo" && return 75
   if [ -s "$cache_file" ]; then
     modified="$(stat -c %Y "$cache_file" 2>/dev/null || printf 0)"
     age=$((now - modified))
-    if [ "$age" -ge 0 ] && [ "$age" -lt "${PR_CACHE_TTL_SECONDS:-90}" ] \
+    if [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ] \
        && python3 -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1])).get("prs"), list)' "$cache_file" 2>/dev/null; then
       python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["prs"]))' "$cache_file"
       return 0
@@ -2028,36 +2104,63 @@ _ht_pr_cache_rows() (
 
   tmp="$(mktemp -d "$cache_dir/.refresh.XXXXXX")"
   trap 'rm -rf "$tmp"' EXIT
-  set +e
-  gh api "repos/$repo/pulls?state=open&per_page=100" > "$tmp/open.json" 2> "$tmp/open.err"
-  open_rc=$?
-  if [ "$open_rc" -eq 0 ]; then
-    gh api "repos/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=100" \
-      > "$tmp/closed.json" 2> "$tmp/closed.err"
-    closed_rc=$?
-  else
-    closed_rc=0
-    : > "$tmp/closed.err"
-  fi
-  set -e
-  if [ "$open_rc" -ne 0 ] || [ "$closed_rc" -ne 0 ]; then
-    cat "$tmp/open.err" "$tmp/closed.err" > "$tmp/error"
-    if grep -Eqi 'rate.?limit|HTTP 429' "$tmp/error"; then
-      reset="$(gh api rate_limit --jq .rate.reset 2>/dev/null || true)"
-      if [[ "$reset" =~ ^[0-9]+$ ]]; then
-        reset_at="$(date -u -d "@$reset" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '%s' "$reset")"
-      else
-        reset_at="unknown"
-      fi
-      printf 'github rate limited until %s\n' "$reset_at" >&2
-      return 75
+  : > "$tmp/open.pages"
+  page=1
+  while :; do
+    if _ht_gh "$repo" api "repos/$repo/pulls?state=open&per_page=100&page=$page" > "$tmp/page.json"; then
+      rc=0
+    else
+      rc=$?
     fi
-    printf 'ERROR: cannot refresh pull request cache for %s\n' "$repo" >&2
-    return 1
-  fi
+    [ "$rc" -eq 0 ] || { [ "$rc" -eq 75 ] && return 75; printf 'ERROR: cannot refresh pull request cache for %s\n' "$repo" >&2; return 1; }
+    cat "$tmp/page.json" >> "$tmp/open.pages"
+    printf '\n' >> "$tmp/open.pages"
+    returned="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$tmp/page.json")" || return 1
+    [ "$returned" -eq 100 ] || break
+    page=$((page + 1))
+  done
+
+  : > "$tmp/closed.pages"
+  page=1
+  while :; do
+    if _ht_gh "$repo" api "repos/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=$page" > "$tmp/page.json"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 0 ] || { [ "$rc" -eq 75 ] && return 75; printf 'ERROR: cannot refresh pull request cache for %s\n' "$repo" >&2; return 1; }
+    cat "$tmp/page.json" >> "$tmp/closed.pages"
+    printf '\n' >> "$tmp/closed.pages"
+    stop="$(NOW="${PR_GATE_NOW:-}" python3 - "$tmp/page.json" <<'PYEOF'
+import datetime
+import json
+import os
+import sys
+
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+try:
+    now = datetime.datetime.fromisoformat(os.environ.get("NOW", "").replace("Z", "+00:00"))
+except ValueError:
+    now = datetime.datetime.now(datetime.timezone.utc)
+if now.tzinfo is None:
+    now = now.replace(tzinfo=datetime.timezone.utc)
+cutoff = now - datetime.timedelta(hours=48)
+value = str((rows[-1] if rows else {}).get("updated_at") or "")
+try:
+    oldest = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if oldest.tzinfo is None:
+        oldest = oldest.replace(tzinfo=datetime.timezone.utc)
+except ValueError:
+    oldest = None
+print("yes" if len(rows) < 100 or (oldest is not None and oldest < cutoff) else "no")
+PYEOF
+)"
+    [ "$stop" = "no" ] || break
+    page=$((page + 1))
+  done
 
   REPO="$repo" NOW="${PR_GATE_NOW:-}" FETCHED_AT="$now" python3 - \
-    "$tmp/open.json" "$tmp/closed.json" "$cache_file.new" <<'PYEOF'
+    "$tmp/open.pages" "$tmp/closed.pages" "$cache_file.new" <<'PYEOF'
 import datetime
 import json
 import os
@@ -2073,6 +2176,12 @@ if now.tzinfo is None:
     now = now.replace(tzinfo=datetime.timezone.utc)
 cutoff = now - datetime.timedelta(hours=48)
 
+def pages(path):
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                yield from json.loads(line)
+
 def parsed(value):
     try:
         result = datetime.datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
@@ -2085,31 +2194,35 @@ def normalize(row, state):
     head = row.get("head") if isinstance(row.get("head"), dict) else {}
     base = row.get("base") if isinstance(row.get("base"), dict) else {}
     user = row.get("user") if isinstance(row.get("user"), dict) else {}
+    branch = head.get("ref") or ""
+    login = user.get("login") or ""
     return {
         "number": number,
         "state": state,
         "url": row.get("html_url") or "https://github.com/%s/pull/%s" % (os.environ["REPO"], number),
         "title": row.get("title") or "",
-        "headRefName": head.get("ref") or "",
+        "branch": branch,
+        "headRefName": branch,
         "baseRefName": base.get("ref") or "",
-        "author": {"login": user.get("login") or ""},
+        "author": {"login": login},
         "draft": bool(row.get("draft")),
         "createdAt": row.get("created_at") or row.get("updated_at") or "",
         "updatedAt": row.get("updated_at") or "",
         "mergedAt": row.get("merged_at") if state == "MERGED" else None,
     }
 
-rows = [normalize(row, "OPEN") for row in json.load(open(open_path, encoding="utf-8"))]
-for row in json.load(open(closed_path, encoding="utf-8")):
+rows = [normalize(row, "OPEN") for row in pages(open_path)]
+for row in pages(closed_path):
     merged = parsed(row.get("merged_at"))
     if merged is not None and merged >= cutoff:
         rows.append(normalize(row, "MERGED"))
 seen = set()
-rows = [row for row in rows if not (row["number"] in seen or seen.add(row["number"]))]
+rows = [row for row in rows if row["number"] is not None and not (row["number"] in seen or seen.add(row["number"]))]
 with open(output_path, "w", encoding="utf-8") as handle:
     json.dump({"fetched_at": int(os.environ["FETCHED_AT"]), "repo": os.environ["REPO"], "prs": rows}, handle)
     handle.write("\n")
 PYEOF
+  chmod 600 "$cache_file.new"
   mv "$cache_file.new" "$cache_file"
   python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["prs"]))' "$cache_file"
 )
@@ -2117,7 +2230,7 @@ PYEOF
 _ht_distinct_agent_login() {
   local configured="${GH_LOGIN:-}" host_login
   [ -n "$configured" ] || return 0
-  host_login="$(gh api user --jq .login 2>/dev/null || true)"
+  host_login="$(_ht_gh "${PR_REPO:-}" api user --jq .login 2>/dev/null || true)"
   [ -n "$host_login" ] && [ "${configured,,}" != "${host_login,,}" ] || return 0
   printf '%s' "$configured"
 }
@@ -2133,6 +2246,7 @@ adapter_agent_has_open_pr() {
   fi
   [ "$cache_rc" -eq 0 ] || { [ "$cache_rc" -eq 75 ] && return 75; return 2; }
   login="$(_ht_distinct_agent_login)"
+  _ht_github_paused "$repo" && return 75
   ROWS="$rows" REF="$ref" SLUG="${AGENT_SLUG:-}" LOGIN="$login" \
     KIND="${AGENT_KIND:-${AGENT_ROLE:-${ROLE:-}}}" REPO="$repo" OPENED="$opened_prs" python3 -c '
 import json, os, sys
@@ -2249,7 +2363,7 @@ adapter_pr_gate() (
   local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
   local config_dir="${7:-}" opened_prs="${8:-}" repo="${PR_REPO:-}"
   local state_dir released_prs tmp pr number live branch marker today owner_conf owner_slug one board_json pr_state
-  local offset path returned github_login host_login cache_rc agent_role
+  local offset path returned github_login host_login cache_rc agent_role rc
 
   [ -n "$repo" ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
@@ -2265,6 +2379,7 @@ adapter_pr_gate() (
     cache_rc=$?
   fi
   [ "$cache_rc" -eq 0 ] || return "$cache_rc"
+  _ht_github_paused "$repo" && return 75
   printf '%s\n' "$pr" > "$tmp/prs.json"
   python3 - "$tmp/prs.json" <<'PYEOF' > "$tmp/open.json"
 import json, sys
@@ -2284,7 +2399,8 @@ PYEOF
   host_login=""
   if [ -n "${GH_LOGIN:-}" ] \
      || { [ -n "$config_dir" ] && grep -qE '^GH_LOGIN=' "$config_dir"/*.conf 2>/dev/null; }; then
-    host_login="$(gh api user --jq .login 2>/dev/null || true)"
+    host_login="$(_ht_gh "$repo" api user --jq .login 2>/dev/null || true)"
+    _ht_github_paused "$repo" && return 75
   fi
   github_login=""
   if [ -n "${GH_LOGIN:-}" ] && [ -n "$host_login" ] \
@@ -2479,12 +2595,18 @@ PYEOF
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue
     number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
-    live="$(_ht_pr_live_state "$repo" "$number" "$cache_dir")" || return 1
+    if live="$(_ht_pr_live_state "$repo" "$number" "$cache_dir")"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 0 ] || { _ht_github_paused "$repo" && return 75; return 1; }
     pr_state="$(ROW="$pr" python3 -c 'import json,os;print(str(json.loads(os.environ["ROW"]).get("state") or "").upper())')"
     if [ "$pr_state" = "MERGED" ]; then
       _ht_pr_qa_state "$token_file" "$pr" "$live" "${DONE_SECTION:-Done}" || return 1
-    else
-      _ht_pr_work_state "$repo" "$pr" "$live" || return 1
+    elif ! _ht_pr_work_state "$repo" "$pr" "$live"; then
+      _ht_github_paused "$repo" && return 75
+      return 1
     fi
   done < "$tmp/candidates.jsonl"
 )
@@ -2546,7 +2668,7 @@ _ht_pr_live_state() {
     mtime="$(stat -c %Y "$cache" 2>/dev/null || printf 0)"
     if [ "$((now - mtime))" -lt 60 ]; then cat "$cache"; return 0; fi
   fi
-  view="$(gh pr view "$number" --repo "$repo" --json state,baseRefName,mergedAt,mergeCommit 2>/dev/null)" || return 1
+  view="$(_ht_gh "$repo" pr view "$number" --repo "$repo" --json state,baseRefName,mergedAt,mergeCommit 2>/dev/null)" || return $?
   state="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state") or "")')"
   if [ "$state" != "MERGED" ]; then
     printf '{"live":false,"state":"open","definition":"GitHub Production deployments"}\n' | tee "$cache"
@@ -2556,7 +2678,7 @@ _ht_pr_live_state() {
   merge="$(printf '%s' "$view" | python3 -c 'import json,sys;d=json.load(sys.stdin);print((d.get("mergeCommit") or {}).get("oid") or "")')"
   merged_at="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("mergedAt") or "")')"
   [ -n "$base" ] && [ -n "$merge" ] && [ -n "$merged_at" ] || return 1
-  compare="$(gh api "repos/$repo/compare/$merge...$base" 2>/dev/null)" || return 1
+  compare="$(_ht_gh "$repo" api "repos/$repo/compare/$merge...$base" 2>/dev/null)" || return 1
   if ! printf '%s' "$compare" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d.get("status") in ("ahead","identical") else 1)'; then
     # The merge commit can never become an ancestor of base again once base's
     # history has been rewritten (force-push/reset past the merge), so nothing
@@ -2571,7 +2693,7 @@ _ht_pr_live_state() {
     return 0
   fi
 
-  deployments="$(gh api "repos/$repo/deployments?per_page=100" 2>/dev/null)" || return 1
+  deployments="$(_ht_gh "$repo" api "repos/$repo/deployments?per_page=100" 2>/dev/null)" || return 1
   if [ "$(printf '%s' "$deployments" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = "0" ]; then
     printf '{"live":true,"state":"live","definition":"fallback: merged and base contains merge commit (no deployment records)"}\n' | tee "$cache"
     return 0
@@ -2589,16 +2711,16 @@ print(json.dumps(rows[0]) if rows else "")
   dep_id="$(printf '%s' "$deployment" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id") or "")')"
   dep_sha="$(printf '%s' "$deployment" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("sha") or d.get("ref") or "")')"
   dep_at="$(printf '%s' "$deployment" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("created_at") or "")')"
-  statuses="$(gh api "repos/$repo/deployments/$dep_id/statuses?per_page=1" 2>/dev/null)" || return 1
+  statuses="$(_ht_gh "$repo" api "repos/$repo/deployments/$dep_id/statuses?per_page=1" 2>/dev/null)" || return 1
   dep_state="$(printf '%s' "$statuses" | python3 -c 'import json,sys;d=json.load(sys.stdin);print((d[0] if d else {}).get("state") or "")')"
   deploy_contains="no"
   base_contains_deploy="no"
   if [ -n "$dep_sha" ]; then
-    compare="$(gh api "repos/$repo/compare/$merge...$dep_sha" 2>/dev/null)" || return 1
+    compare="$(_ht_gh "$repo" api "repos/$repo/compare/$merge...$dep_sha" 2>/dev/null)" || return 1
     if printf '%s' "$compare" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d.get("status") in ("ahead","identical") else 1)'; then
       deploy_contains="yes"
     fi
-    compare="$(gh api "repos/$repo/compare/$dep_sha...$base" 2>/dev/null)" || return 1
+    compare="$(_ht_gh "$repo" api "repos/$repo/compare/$dep_sha...$base" 2>/dev/null)" || return 1
     if printf '%s' "$compare" | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d.get("status") in ("ahead","identical") else 1)'; then
       base_contains_deploy="yes"
     fi
@@ -2616,9 +2738,9 @@ sys.exit(0 if os.environ["DEP_STATE"] == "success" and os.environ["CONTAINS"] ==
 
 # Add current checks, failed-run logs, and review feedback to an owed PR.
 _ht_pr_work_state() {
-  local repo="$1" pr="$2" live="$3" number view checks reviews inline feedback action wait_state head run_rows check_name run_id logs first_error
+  local repo="$1" pr="$2" live="$3" number view checks reviews inline feedback action wait_state head run_rows check_name run_id logs first_error rc run_log
   number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
-  view="$(gh pr view "$number" --repo "$repo" --json state,url,title,body,headRefName,headRefOid,baseRefName,createdAt,statusCheckRollup,reviews,comments 2>/dev/null)" || return 1
+  view="$(_ht_gh "$repo" pr view "$number" --repo "$repo" --json state,url,title,body,headRefName,headRefOid,baseRefName,createdAt,statusCheckRollup,reviews,comments 2>/dev/null)" || return $?
   state="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state") or "")')"
   if [ "$state" = "MERGED" ]; then
     PR="$pr" LIVE="$live" python3 -c '
@@ -2631,7 +2753,13 @@ print(json.dumps({"action":"wait", "state":live["state"], "definition":live["def
 '
     return 0
   fi
-  inline="$(gh api "repos/$repo/pulls/$number/comments?per_page=100" 2>/dev/null || printf '[]')"
+  if inline="$(_ht_gh "$repo" api "repos/$repo/pulls/$number/comments?per_page=100" 2>/dev/null)"; then
+    rc=0
+  else
+    rc=$?
+    [ "$rc" -ne 75 ] || return 75
+    inline='[]'
+  fi
   feedback="$(VIEW="$view" INLINE="$inline" python3 -c '
 import json, os
 view, inline = json.loads(os.environ["VIEW"]), json.loads(os.environ["INLINE"])
@@ -2672,7 +2800,13 @@ for check in json.load(sys.stdin)["failed"]:
   logs=""
   while IFS=$'\t' read -r check_name run_id; do
     [ -n "$run_id" ] || continue
-    logs="${logs}${logs:+$'\n\n'}[$check_name, last 80 failed-log lines]"$'\n'"$(gh run view "$run_id" --repo "$repo" --log-failed 2>&1 | tail -n 80 || true)"
+    if run_log="$(_ht_gh "$repo" run view "$run_id" --repo "$repo" --log-failed 2>&1)"; then
+      rc=0
+    else
+      rc=$?
+      [ "$rc" -ne 75 ] || return 75
+    fi
+    logs="${logs}${logs:+$'\n\n'}[$check_name, last 80 failed-log lines]"$'\n'"$(printf '%s\n' "$run_log" | tail -n 80)"
   done <<< "$run_rows"
   first_error="$(LOGS="$logs" python3 -c '
 import os, re
@@ -2743,18 +2877,12 @@ adapter_pick_rank() {
     fi
   fi
 
-  # PR_REPO is required (agent-board-poll refuses to tick without it), so the
-  # only question here is whether gh could answer. gh missing or the call
-  # failing is a real fault, loud on purpose so the supervisor's log check
-  # catches it; only a successful call may claim a pull request state. Either
-  # way a ticket this agent still owes falls through to "not finished" below,
-  # and the run itself discovers the truth.
+  # Every rank in this tick reads the same repository cache. A rate-limit pause
+  # makes PR state unknown without blocking unrelated board work.
   if command -v gh >/dev/null 2>&1; then
-    if pr_json="$(gh pr list --repo "$repo" --state all --search "$ref" \
-                 --json number,state,url,headRefName --limit 10 2>&1)"; then
+    if pr_json="$(_ht_pr_cache_rows "$repo" 2>/dev/null)"; then
       pr_known="yes"
     else
-      printf 'ERROR: gh pr list failed for %s in %s: %s\n' "$ref" "$repo" "$pr_json" >&2
       pr_json=""
     fi
   else
@@ -2808,10 +2936,9 @@ done = section in {"done", "archive", "archived", "shipped"}
 reply_only = "reply_only" in reason.split("+")
 
 prs = json.loads(os.environ["PR_JSON"]) or []
-# gh --search is a full-text search, so keep only the pull requests that
-# actually name this ticket in the branch or the title.
+# Keep only cached pull requests that name this ticket in the branch or title.
 prs = [p for p in prs if ref.casefold() in
-       (str(p.get("headRefName") or "") + " " + str(p.get("url") or "")).casefold()]
+       (str(p.get("title") or "") + " " + str(p.get("headRefName") or "")).casefold()]
 merged = bool(os.environ["LINKED_MERGED_PR"]) or any(
     str(p.get("state") or "").upper() == "MERGED" for p in prs)
 open_pr = [p for p in prs if str(p.get("state") or "").upper() == "OPEN"]
@@ -2844,17 +2971,40 @@ else:
 # line. Core compares this before and after a run so a newly opened PR remains
 # attributable even when its branch predates the agent prefix convention.
 adapter_open_pr_numbers() {
-  local ref="$1"
+  local ref="$1" rows
   [ -n "${PR_REPO:-}" ] || return 0
   command -v gh >/dev/null 2>&1 || return 0
-  gh pr list --repo "$PR_REPO" --state open --search "$ref" \
-    --json number,title,headRefName --limit 20 2>/dev/null | REF="$ref" python3 -c '
-import json, os, re, sys
+  rows="$(_ht_pr_cache_rows "$PR_REPO" 2>/dev/null || printf '[]')"
+  REF="$ref" ROWS="$rows" python3 -c '
+import json, os, re
 ref = os.environ["REF"]
 pattern = re.compile(r"(?<![0-9A-Za-z])" + re.escape(ref) + r"(?![0-9A-Za-z])", re.I)
-for row in json.load(sys.stdin):
-    if pattern.search("%s %s" % (row.get("title") or "", row.get("headRefName") or "")):
+for row in json.loads(os.environ["ROWS"] or "[]"):
+    if str(row.get("state") or "").upper() == "OPEN" and pattern.search(
+            "%s %s" % (row.get("title") or "", row.get("headRefName") or "")):
         print(row["number"])
+'
+}
+
+# adapter_posted_pr_numbers <token-file> <task-id> <board-id> <repo> <ids>
+# A PR opened during this tick cannot trigger a second cache refresh. Its ticket
+# link is enough to attribute it until the next minute's cache includes it.
+adapter_posted_pr_numbers() {
+  local token_file="$1" task_id="$2" board_id="$3" repo="$4" ids="$5" comments
+  [ -n "$repo" ] && [ -n "$ids" ] || return 0
+  comments="$(adapter_ticket_comments "$token_file" "$task_id" "$board_id")" || return 0
+  COMMENTS="$comments" IDS="$ids" REPO="$repo" python3 -c '
+import html, json, os, re
+ids = set(os.environ["IDS"].split())
+pattern = re.compile(r"https://github[.]com/" + re.escape(os.environ["REPO"]) + r"/pull/([0-9]+)(?![0-9])", re.I)
+seen = set()
+for row in json.loads(os.environ["COMMENTS"] or "[]"):
+    if str(row.get("id") or "") not in ids:
+        continue
+    for number in pattern.findall(html.unescape(str(row.get("html") or ""))):
+        if number not in seen:
+            seen.add(number)
+            print(number)
 '
 }
 
@@ -2868,25 +3018,17 @@ for row in json.load(sys.stdin):
 # open pull request resumes on that branch: cutting from the base branch again
 # is how one ticket ends up with two pull requests.
 _ht_open_branch_for() {
-  local ref="$1"
+  local ref="$1" rows
   [ -n "${PR_REPO:-}" ] || return 0
   command -v gh >/dev/null 2>&1 || return 0
-  # REF has to be exported: an assignment prefix would only reach gh, not the
-  # python3 on the other side of the pipe.
-  export REF="$ref"
-  gh pr list --repo "$PR_REPO" --state open --search "$ref" \
-    --json headRefName,url --limit 10 2>/dev/null | python3 -c '
-import json, os, sys
+  rows="$(_ht_pr_cache_rows "$PR_REPO" 2>/dev/null || printf '[]')"
+  REF="$ref" ROWS="$rows" python3 -c '
+import json, os, re
 ref = os.environ["REF"].casefold()
-try:
-    rows = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-# The ref has to appear as a whole word. A substring match puts ticket 6459 on
-# the branch of ticket 16459, worse than opening a second pull request.
-import re
 pattern = re.compile(r"(?<![0-9a-z])" + re.escape(ref) + r"(?![0-9a-z])")
-for row in rows:
+for row in json.loads(os.environ["ROWS"] or "[]"):
+    if str(row.get("state") or "").upper() != "OPEN":
+        continue
     branch = row.get("headRefName") or ""
     if pattern.search(branch.casefold()):
         print(branch)
