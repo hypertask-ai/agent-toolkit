@@ -1029,7 +1029,7 @@ run_tick_cleanup() {
   log "cleanup: freed $freed MB, kept ${kept:-0} worktrees"
   if [ "$DISK_USED_PERCENT" -gt 85 ]; then
     update_disk_alarm yes "$DISK_USED_PERCENT" "$mount"
-  else
+  elif [ "$DISK_USED_PERCENT" -lt 80 ]; then
     update_disk_alarm no "$DISK_USED_PERCENT" "$mount"
   fi
 }

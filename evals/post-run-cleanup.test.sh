@@ -263,3 +263,23 @@ if [ ! -e "$TMP/model-marker" ] \
 else
   fail cleanup-disk-block "disk guard failed: board=$(cat "$TMP/board.log") output=$(cat "$TMP/disk.out")"
 fi
+
+reset_runtime
+empty_tasks
+run_tick MOCK_DISK_USED=86 > "$TMP/disk-alarm.out" 2>&1
+run_tick MOCK_DISK_USED=82 > "$TMP/disk-recovery-band.out" 2>&1
+if [ "$(grep -c '^create ' "$TMP/board.log")" -eq 1 ] \
+   && ! grep -q '^move$' "$TMP/board.log" \
+   && STATE="$TMP/state/agent-board-poll" python3 -c 'import json,os; state=json.load(open(os.path.join(os.environ["STATE"],"host-alarms.json"))); alarm=next(iter(state["alarms"].values())); assert alarm["active"] and not alarm.get("resolved_at")'; then
+  pass cleanup-disk-recovery-band 'an active disk alarm stays open between 80% and 85% usage'
+else
+  fail cleanup-disk-recovery-band "disk alarm cleared inside the recovery band: board=$(cat "$TMP/board.log")"
+fi
+run_tick MOCK_DISK_USED=79 > "$TMP/disk-cleared.out" 2>&1
+if [ "$(grep -c '^create ' "$TMP/board.log")" -eq 1 ] \
+   && [ "$(grep -c '^move$' "$TMP/board.log")" -eq 1 ] \
+   && STATE="$TMP/state/agent-board-poll" python3 -c 'import json,os; state=json.load(open(os.path.join(os.environ["STATE"],"host-alarms.json"))); alarm=next(iter(state["alarms"].values())); health=json.load(open(os.path.join(os.environ["STATE"],"board-health.json"))); assert not alarm["active"] and alarm["resolved_at"] and alarm["moved_done_at"] and not health["alarms"]'; then
+  pass cleanup-disk-clears-below-80 'an active disk alarm clears after usage falls below 80%'
+else
+  fail cleanup-disk-clears-below-80 "disk alarm did not clear below 80%: board=$(cat "$TMP/board.log")"
+fi
