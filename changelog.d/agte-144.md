@@ -1,0 +1,1 @@
+- AGTE-144 adds a model-free fleet watch every 15 minutes. It publishes fleet health, raises deduplicated High alarms in Review for seven throughput and capacity failures, and closes each alarm when the fleet recovers.
