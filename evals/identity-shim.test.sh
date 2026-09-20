@@ -43,14 +43,48 @@ esac
 EOF
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-printf '[]\n'
+printf '%s\n' "$*" >> "$GH_CAPTURE"
+if [ "${1:-} ${2:-}" = "pr view" ] && [[ " $* " = *' --json labels '* ]]; then
+  [ -z "${GH_PR_LABEL:-}" ] || printf '%s\n' "$GH_PR_LABEL"
+else
+  printf '[]\n'
+fi
 EOF
 cat > "$TMP/bin/provider" <<'EOF'
 #!/usr/bin/env bash
 command -v hypertask > "$RESOLVED_CAPTURE"
 command -v ht >> "$RESOLVED_CAPTURE"
 command -v htbot >> "$RESOLVED_CAPTURE"
+command -v gh >> "$RESOLVED_CAPTURE"
 hypertask --json status > "$TOKEN_CAPTURE"
+if gh pr merge 7 > /dev/null 2> "$MANUAL_MERGE_ERROR"; then
+  printf '0\n' > "$MANUAL_MERGE_RC"
+else
+  printf '%s\n' "$?" > "$MANUAL_MERGE_RC"
+fi
+gh pr merge --repo example/repo --auto --squash 7 >/dev/null
+if gh api -X PUT repos/example/repo/pulls/7/merge > /dev/null 2> "$API_MERGE_ERROR"; then
+  printf '0\n' > "$API_MERGE_RC"
+else
+  printf '%s\n' "$?" > "$API_MERGE_RC"
+fi
+if gh api graphql -f 'query=mutation { mergePullRequest(input: {}) { clientMutationId } }' \
+    > /dev/null 2> "$GRAPHQL_MERGE_ERROR"; then
+  printf '0\n' > "$GRAPHQL_MERGE_RC"
+else
+  printf '%s\n' "$?" > "$GRAPHQL_MERGE_RC"
+fi
+if GH_PR_LABEL=valentin-review gh pr comment 7 --body blocked > /dev/null 2> "$PROTECTED_PR_ERROR"; then
+  printf '0\n' > "$PROTECTED_PR_RC"
+else
+  printf '%s\n' "$?" > "$PROTECTED_PR_RC"
+fi
+if GH_PR_LABEL=valentin-review gh api /repos/example/repo/issues/7/comments -f body=blocked \
+    > /dev/null 2> "$PROTECTED_API_ERROR"; then
+  printf '0\n' > "$PROTECTED_API_RC"
+else
+  printf '%s\n' "$?" > "$PROTECTED_API_RC"
+fi
 EOF
 chmod +x "$TMP/bin/"*
 
@@ -82,20 +116,54 @@ TRIAGE="no"
 EOF
 
 run_poll() {
-  env HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
+    HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
     XDG_RUNTIME_DIR= XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
     BOARD_JSON="$TMP/board.json" BOARD_POSTED="$TMP/posted" \
     RESOLVED_CAPTURE="$TMP/resolved" TOKEN_CAPTURE="$TMP/received-token" \
+    GH_CAPTURE="$TMP/gh-calls" MANUAL_MERGE_RC="$TMP/manual-merge.rc" \
+    MANUAL_MERGE_ERROR="$TMP/manual-merge.error" API_MERGE_RC="$TMP/api-merge.rc" \
+    API_MERGE_ERROR="$TMP/api-merge.error" GRAPHQL_MERGE_RC="$TMP/graphql-merge.rc" \
+    GRAPHQL_MERGE_ERROR="$TMP/graphql-merge.error" PROTECTED_PR_RC="$TMP/protected-pr.rc" \
+    PROTECTED_PR_ERROR="$TMP/protected-pr.error" PROTECTED_API_RC="$TMP/protected-api.rc" \
+    PROTECTED_API_ERROR="$TMP/protected-api.error" \
     PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test
 }
 
 if run_poll > "$TMP/run.out" 2> "$TMP/run.err" \
    && [ "$(sed -n '1p' "$TMP/resolved")" = "$TMP/state/agent-identity-shims/test/hypertask" ] \
    && [ "$(sed -n '2p' "$TMP/resolved")" = "$TMP/state/agent-identity-shims/test/ht" ] \
-   && [ "$(sed -n '3p' "$TMP/resolved")" = "$TMP/state/agent-identity-shims/test/htbot" ]; then
-  ok identity-shim-first-on-path "hypertask, ht, and htbot resolve inside the agent shim"
+   && [ "$(sed -n '3p' "$TMP/resolved")" = "$TMP/state/agent-identity-shims/test/htbot" ] \
+   && [ "$(sed -n '4p' "$TMP/resolved")" = "$TMP/state/agent-identity-shims/test/gh" ]; then
+  ok identity-shim-first-on-path "board and GitHub commands resolve inside the agent shim"
 else
   bad identity-shim-first-on-path "resolved paths: $(paste -sd, "$TMP/resolved" 2>/dev/null || true)"
+fi
+
+if [ "$(cat "$TMP/manual-merge.rc")" -ne 0 ] \
+   && [ "$(cat "$TMP/api-merge.rc")" -ne 0 ] \
+   && [ "$(cat "$TMP/graphql-merge.rc")" -ne 0 ] \
+   && grep -qF 'runners never merge pull requests by hand' "$TMP/manual-merge.error" \
+   && grep -qF 'runners never merge pull requests by hand' "$TMP/api-merge.error" \
+   && grep -qF 'runners never merge pull requests by hand' "$TMP/graphql-merge.error" \
+   && grep -qxF 'pr merge --repo example/repo --auto --squash 7' "$TMP/gh-calls" \
+   && ! grep -qxF 'pr merge 7' "$TMP/gh-calls" \
+   && ! grep -qF 'api -X PUT repos/example/repo/pulls/7/merge' "$TMP/gh-calls" \
+   && ! grep -qF 'mergePullRequest' "$TMP/gh-calls"; then
+  ok identity-shim-manual-merge-blocked 'CLI, REST, and GraphQL manual merges are refused while auto-merge reaches GitHub'
+else
+  bad identity-shim-manual-merge-blocked "rc=$(cat "$TMP/manual-merge.rc") calls=$(cat "$TMP/gh-calls")"
+fi
+
+if [ "$(cat "$TMP/protected-pr.rc")" -ne 0 ] \
+   && [ "$(cat "$TMP/protected-api.rc")" -ne 0 ] \
+   && grep -qF 'label valentin-review is manager-only' "$TMP/protected-pr.error" \
+   && grep -qF 'label valentin-review is manager-only' "$TMP/protected-api.error" \
+   && ! grep -qF 'pr comment 7 --body blocked' "$TMP/gh-calls" \
+   && ! grep -qF '/repos/example/repo/issues/7/comments' "$TMP/gh-calls"; then
+  ok identity-shim-protected-pr-blocked 'CLI and implicit-POST API changes to a valentin-review PR are refused'
+else
+  bad identity-shim-protected-pr-blocked "rc=$(cat "$TMP/protected-pr.rc") calls=$(cat "$TMP/gh-calls")"
 fi
 
 if cmp -s "$TMP/received-token" <(printf 'agent-token\n'); then

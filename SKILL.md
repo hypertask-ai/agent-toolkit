@@ -363,8 +363,8 @@ our own message rather than "command not found" three layers down.
    one acknowledgement before any claim. A hold unassigns this agent, moves the
    ticket to the configured review column, and blocks every work lane. A go
    resumes normal work, a question uses the reply-only lane, and feedback uses
-   the normal ticket run. The `valentin` label and an owner assignment remain
-   separate holds on every board and lane.
+   the normal ticket run. The `valentin` and `manager-only` labels and an owner
+   assignment remain separate holds on every board and lane.
 6. Keep the ones **assigned to this agent id**, or whose **newest comment
    @mentions it**.
 7. Drop anything already handled. The state key is `<task id>:<newest comment
@@ -388,7 +388,10 @@ the author. `dev-2` also recognizes `dev-cursor-2/` and `cursor-dev-2/`. QA
 agents recognize only PRs in their own opened-PR ledger. Board assignment and
 shared GitHub authorship do not transfer ownership. PR discovery uses one locked,
 host-wide REST cache per repository. It refreshes no more than once a minute and
-stores every open PR plus merges from the last 48 hours without PR bodies. When
+stores every open PR plus merges from the last 48 hours without PR bodies. The
+cache also stores labels. A `valentin-review` label makes the PR manager-only, so
+the runner starts no fix and performs no PR mutation. Its command shim rejects
+manual merges and checks this label before any allowed PR mutation. When
 GitHub reports a rate limit, all runners pause repository calls until its reset
 time. PR ownership stays unknown during the pause, and ticks continue.
 
@@ -672,17 +675,16 @@ tickets and userId 6. Every accepted or refused manager action is recorded in
 `MAINTAINER="on"` makes one agent the executor for setup changes. Missing or
 any other value is off. Its runner and chat prompts require a build for every
 change to the toolkit, supervisor rules, analytics site, app, CLI, or Slack bot,
-and forbid launching a model harness directly. An allowlisted merge, release,
-update, or build instruction runs the matching maintainer command in the current
-run instead of entering the developer pull request workflow or being delegated.
-A successful direct merge gets a `Done:` comment with the linked pull request;
+and forbid launching a model harness directly. An allowlisted update or build
+instruction runs the matching maintainer command in the current run instead of
+entering the developer pull request workflow or being delegated. Runners never
+merge a pull request by hand. Auto-merge or the supervisor handles merges, and
 the existing completion checker reports background build results.
 
 ```sh
 agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]
 agent-template build status [id]
 agent-template build list
-agent-template merge <pr-url>
 agent-template update --keep-timers
 agent-template instruct <slug> <text|-> [--ticket <url>]
 ```
@@ -692,8 +694,8 @@ cap` CSV rows, with the memory cap optional. Its default is 12 GB on hosts with
 more than 32 GB of RAM and half of RAM otherwise. A first install discovers the
 slug and default branch from each checkout's `origin`; a build outside the
 file or whose checkout origin differs is refused. An accepted build writes the
-standard worktree, pull request, check, squash-merge, deployment, cleanup, and
-reporting guardrails into a prompt, starts the capped systemd user job, and
+standard worktree, pull request, auto-merge, deployment, cleanup, and reporting
+guardrails into a prompt, starts the capped systemd user job, and
 records its paths and status in `<slug>-builds.json`. Status prints the exit
 marker and twelve output lines; list is the source for answering what the
 agent did.

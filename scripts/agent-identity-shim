@@ -64,6 +64,92 @@ exec {board_cli} "$@"
     for stale in {"hypertask", "ht", "htbot"} - set(names):
         (shim_dir / stale).unlink(missing_ok=True)
 
+    gh = shutil.which("gh", path=original_path)
+    if gh:
+        gh_script = """#!/usr/bin/env bash
+set -euo pipefail
+REAL_GH=__GH__
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "merge" ]; then
+  auto=no
+  for arg in "$@"; do [ "$arg" != "--auto" ] || auto=yes; done
+  if [ "$auto" != yes ]; then
+    echo "merge refused: runners never merge pull requests by hand" >&2
+    exit 2
+  fi
+fi
+check_pr_labels() {
+  local target="$1" repo="$2" labels
+  local view=("$REAL_GH" pr view)
+  [ -z "$target" ] || view+=("$target")
+  [ -z "$repo" ] || view+=(--repo "$repo")
+  labels="$("${view[@]}" --json labels --jq '.labels[].name' 2>/dev/null)" || {
+    echo "pull request change refused: labels could not be verified" >&2
+    exit 2
+  }
+  if printf '%s\n' "$labels" | grep -qix 'valentin-review'; then
+    echo "pull request change refused: label valentin-review is manager-only" >&2
+    exit 2
+  fi
+}
+if [ "${1:-}" = "api" ]; then
+  method=GET
+  explicit_method=no
+  has_fields=no
+  endpoint=""
+  args=("$@")
+  for ((i = 1; i < ${#args[@]}; i++)); do
+    case "${args[$i]}" in
+      -X|--method) method="${args[$((i + 1))]:-}"; explicit_method=yes; i=$((i + 1)) ;;
+      -X*|--method=*) method="${args[$i]#*=}"; method="${method#-X}"; explicit_method=yes ;;
+      -f|-F|--field|--raw-field) has_fields=yes; i=$((i + 1)) ;;
+      -f*|-F*|--field=*|--raw-field=*) has_fields=yes ;;
+      -H|--header|--hostname|--input|--cache) i=$((i + 1)) ;;
+      -*) ;;
+      *) [ -n "$endpoint" ] || endpoint="${args[$i]}" ;;
+    esac
+  done
+  if [ "$explicit_method" = no ] && [ "$has_fields" = yes ]; then method=POST; fi
+  if [ "${method^^}" != GET ]; then
+    if [[ "$endpoint" =~ /pulls/[0-9]+/merge ]] \
+       || printf '%s\n' "$*" | grep -qF 'mergePullRequest'; then
+      echo "merge refused: runners never merge pull requests by hand" >&2
+      exit 2
+    fi
+    if [ "$endpoint" = graphql ] && printf '%s\n' "$*" | grep -qF 'PullRequest'; then
+      echo "pull request change refused: use a guarded gh pr command" >&2
+      exit 2
+    fi
+    if [[ "$endpoint" =~ ^/?repos/([^/]+/[^/]+)/(pulls|issues)/([0-9]+) ]]; then
+      check_pr_labels "${BASH_REMATCH[3]}" "${BASH_REMATCH[1]}"
+    fi
+  fi
+fi
+case "${1:-} ${2:-}" in
+  "pr close"|"pr comment"|"pr edit"|"pr merge"|"pr ready"|"pr reopen"|"pr review")
+    target=""
+    repo=""
+    args=("$@")
+    for ((i = 2; i < ${#args[@]}; i++)); do
+      case "${args[$i]}" in
+        --repo|-R) repo="${args[$((i + 1))]:-}"; i=$((i + 1)) ;;
+        --repo=*|-R=*) repo="${args[$i]#*=}" ;;
+        -*) ;;
+        *) [ -n "$target" ] || target="${args[$i]}" ;;
+      esac
+    done
+    check_pr_labels "$target" "$repo"
+    ;;
+esac
+exec "$REAL_GH" "$@"
+""".replace("__GH__", shlex.quote(gh))
+        target = shim_dir / "gh"
+        temporary = shim_dir / ".gh.new"
+        temporary.write_text(gh_script, encoding="utf-8")
+        temporary.chmod(0o700)
+        temporary.replace(target)
+    else:
+        (shim_dir / "gh").unlink(missing_ok=True)
+
     print(shim_dir)
 
 

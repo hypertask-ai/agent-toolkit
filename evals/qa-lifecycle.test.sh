@@ -134,7 +134,8 @@ run_case() {
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"QA","title":"Verify checkout","description":"Test every acceptance step","assignees":$assignees,"labels":$labels,"commentCount":1}]}
 EOF
   printf '%s\n' "$comments" > "$TMP/comments.json"
-  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+  env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
+    HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT="$verdict" \
     MOCK_MOVE_FAIL="$move_fail" MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
@@ -179,7 +180,8 @@ if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
 else
   bad qa-valentin-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
-HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
   COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT=Done \
   MOCK_MOVE_FAIL=no MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
   MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
@@ -188,6 +190,30 @@ if [ "$(grep -cF 'pickup skipped for TEST-1: label valentin' "$TMP/state/agent-b
   ok qa-protection-log-daily 'a protected QA ticket logs its skip only once per UTC day'
 else
   bad qa-protection-log-daily "log=$(cat "$TMP/state/agent-board-poll/qa-runner.log")"
+fi
+
+run_case Done '[{"name":"manager-only"}]' '{"comments":[]}'
+if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
+   && grep -qF 'pickup skipped for TEST-1: label manager-only' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-manager-only-label-skip 'QA never claims a manager-only alarm ticket'
+else
+  bad qa-manager-only-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+sed -i 's/AGENT_KIND="qa"/AGENT_KIND="dev"/' "$TMP/config/qa-runner.conf"
+rm -rf "$TMP/state"; mkdir -p "$TMP/state/agent-board-poll"
+: > "$TMP/board.log"; : > "$TMP/model.log"
+env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+  COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT=Done \
+  MOCK_MOVE_FAIL=no MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
+  MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
+  "$ROOT/scripts/agent-board-poll" --once qa-runner > "$TMP/out" 2>&1 || true
+sed -i 's/AGENT_KIND="dev"/AGENT_KIND="qa"/' "$TMP/config/qa-runner.conf"
+if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
+   && grep -qF 'pickup skipped for TEST-1: label manager-only' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok dev-manager-only-label-skip 'dev never claims a manager-only alarm ticket'
+else
+  bad dev-manager-only-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 
 run_case Done '[]' '{"comments":[]}' '[{"id":6},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
@@ -202,7 +228,8 @@ run_case Done '[{"name":"valentin"}]' '{"comments":[]}'
 sed -i 's/AGENT_KIND="qa"/AGENT_KIND="dev"/' "$TMP/config/qa-runner.conf"
 rm -rf "$TMP/state"; mkdir -p "$TMP/state/agent-board-poll"
 : > "$TMP/board.log"; : > "$TMP/model.log"
-HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
+  HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
   COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT=Done \
   MOCK_MOVE_FAIL=no MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
   MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \

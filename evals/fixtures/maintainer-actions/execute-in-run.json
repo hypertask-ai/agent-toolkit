@@ -1,18 +1,18 @@
 {
   "instructions": [
-    "Merge https://github.com/example/allowed/pull/7",
-    "Release https://github.com/example/allowed/pull/7 and update the toolkit",
+    "Request a manual merge of https://github.com/example/allowed/pull/7",
+    "Request a change to https://github.com/example/allowed/pull/7 labelled valentin-review",
     "Update the installed toolkit without changing timer state",
     "Build the requested toolkit change for this ticket"
   ],
   "required_commands": [
-    "agent-template merge <pr-url>",
+    "Never merge a pull request by hand",
+    "pull requests labelled `valentin-review` stay untouched",
     "agent-template build",
     "agent-template update --keep-timers"
   ],
   "forbidden_outcomes": [
     "delegate it",
-    "assign it to a developer",
-    "answer with a handoff"
+    "hand it to a developer"
   ]
 }

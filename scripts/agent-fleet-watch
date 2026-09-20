@@ -21,15 +21,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-RULE_ACTIONS = {
-    "R1": "Merge the next ready pull request or assign the waiting tickets.",
-    "R2": "Start the idle agent or assign its eligible ticket to another agent.",
-    "R3": "Open the agent log and fix the repeated tick failure before restarting it.",
-    "R4": "Leave one agent on the pull request and release the other agents.",
-    "R5": "Free disk space on the runner host.",
-    "R6": "Wait for the GitHub limit to reset or restore API capacity.",
-    "R7": "Switch the agent to automatic claiming or assign the waiting tickets.",
-}
+ALARM_LABEL = "manager-only"
 COOLDOWN_SECONDS = 6 * 60 * 60
 RUN_WINDOW_SECONDS = 60 * 60
 MANUAL_SECONDS = 2 * 60 * 60
@@ -357,12 +349,17 @@ def start_agent(slug: str) -> dict[str, str]:
 
 
 def open_alarm(rule: str, detail: str, board_cli: str) -> str:
-    body = f"<p><strong>{rule}: {detail}</strong></p><p>Action: {RULE_ACTIONS[rule]}</p>"
+    body = (f"<p><strong>{rule}: Fleet watch manager report.</strong></p>"
+            f"<p>Observed: {detail}</p>"
+            "<p>Acceptance: The manager reviewed this report.</p>")
     base = ["task", "create", "--project", "5500", "--section", "Review", "--priority", "high",
-            "--title", f"{rule}: Fleet watch alarm", "--description", body]
-    result = board_call([*base, "--labels", "bug", "--json"], board_cli)
+            "--title", f"{rule}: Fleet watch alarm", "--description", body,
+            "--labels", ALARM_LABEL, "--json"]
+    result = board_call(base, board_cli)
     if result.returncode != 0 and "LabelNotFound" in result.stderr + result.stdout:
-        result = board_call([*base, "--json"], board_cli)
+        created = board_call(["labels", "create", "--project", "5500", "--name", ALARM_LABEL], board_cli)
+        if created.returncode == 0:
+            result = board_call(base, board_cli)
     if result.returncode != 0:
         return ""
     ticket = extract_ticket(result.stdout)

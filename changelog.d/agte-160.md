@@ -1,0 +1,1 @@
+- AGTE-160 makes fleet-watch alarms manager-only reports, keeps dev and QA runners off their protected tickets, blocks manual runner merges, and leaves `valentin-review` pull requests untouched.

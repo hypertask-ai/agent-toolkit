@@ -2196,6 +2196,7 @@ def normalize(row, state):
     user = row.get("user") if isinstance(row.get("user"), dict) else {}
     branch = head.get("ref") or ""
     login = user.get("login") or ""
+    labels = row.get("labels") if isinstance(row.get("labels"), list) else []
     return {
         "number": number,
         "state": state,
@@ -2206,6 +2207,8 @@ def normalize(row, state):
         "baseRefName": base.get("ref") or "",
         "author": {"login": login},
         "draft": bool(row.get("draft")),
+        "prLabels": [str(label.get("name") if isinstance(label, dict) else label).strip().casefold()
+                     for label in labels],
         "createdAt": row.get("created_at") or row.get("updated_at") or "",
         "updatedAt": row.get("updated_at") or "",
         "mergedAt": row.get("merged_at") if state == "MERGED" else None,
@@ -2595,6 +2598,25 @@ PYEOF
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue
     number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
+    if ROW="$pr" python3 -c '
+import json, os, sys
+row = json.loads(os.environ["ROW"])
+sys.exit(0 if "valentin-review" in row.get("prLabels", []) else 1)
+'; then
+      PR="$pr" python3 -c '
+import json, os
+pr = json.loads(os.environ["PR"])
+print(json.dumps({"action":"wait", "state":"protected", "wait_reason":"label valentin-review",
+                  "definition":"pull request labelled valentin-review is manager-only",
+                  "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
+                  "title":pr["title"], "branch":pr["headRefName"], "since":pr["createdAt"],
+                  "task_id":pr.get("task_id") or "", "board":pr.get("board") or "",
+                  "ticket_section":pr.get("ticket_section") or "", "labels":pr.get("labels") or [],
+                  "human_assignee_ids":pr.get("human_assignee_ids") or [],
+                  "pickup_slot":True, "unfixable":False}))
+'
+      continue
+    fi
     if live="$(_ht_pr_live_state "$repo" "$number" "$cache_dir")"; then
       rc=0
     else
@@ -3100,11 +3122,11 @@ adapter_run_prompt() {
   local title="$6" description="$7" latest="$8" why="${9:-}" finish_contract claim_contract
   if [ "${MAINTAINER:-off}" = "on" ]; then
     IFS= read -r -d '' finish_contract <<'EOF' || true
-FINISH IT AS THE SETUP MAINTAINER. A ticket asking for an allowlisted merge, release, update, or build is direct maintainer work:
-- Merge or release an existing pull request with `agent-template merge <pr-url>`.
+FINISH IT AS THE SETUP MAINTAINER. A ticket asking for an allowlisted update or build is direct maintainer work:
 - Start a requested code change with `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]`.
 - Deploy a merged toolkit release with `agent-template update --keep-timers`.
-Run the relevant command in this run. This replaces the ordinary developer pull request workflow. Do not create an implementation branch for a direct operation, delegate it, hand it to a developer, or say that a developer must release it. After a successful direct merge, post a `Done:` comment that names the result and links the pull request. A background build is not done when it starts; its completion checker posts the final result.
+Never merge a pull request by hand. Auto-merge or the supervisor handles merges. Never modify, review, close, or merge a pull request labelled `valentin-review`.
+Run the relevant command in this run. This replaces the ordinary developer pull request workflow. Do not create an implementation branch for a direct operation, delegate it, hand it to a developer, or say that a developer must release it. A background build is not done when it starts; its completion checker posts the final result.
 EOF
   else
     IFS= read -r -d '' finish_contract <<'EOF' || true
