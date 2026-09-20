@@ -2739,10 +2739,18 @@ PR_OPEN_TICKETS=""
 PR_FIX_DIAGNOSIS=""
 PR_REVERT_GUARD_ONLY="no"
 if declare -F adapter_pr_gate >/dev/null 2>&1; then
-  PR_GATES="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
-              "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" "$OPENED_PRS" 2>>"$LOG")" || die \
-    "cannot determine whether $SLUG owns a pull request" \
-    "read $LOG and restore GitHub or board access; no ticket was claimed"
+  if PR_GATES="$(adapter_pr_gate "$TOKEN_FILE" "$BOARD_ID" "$AGENT_ID" "$AGENT_NAME" \
+                   "$SLUG" "$PR_LIVE_CACHE" "$(dirname "$CONF")" "$OPENED_PRS" 2>>"$LOG")"; then
+    pr_gate_rc=0
+  else
+    pr_gate_rc=$?
+  fi
+  if [ "$pr_gate_rc" -eq 75 ]; then
+    PR_GATES=""
+  elif [ "$pr_gate_rc" -ne 0 ]; then
+    die "cannot determine whether $SLUG owns a pull request" \
+      "read $LOG and restore GitHub or board access; no ticket was claimed"
+  fi
 fi
 if [ -n "$PR_GATES" ]; then
   PR_GATE="$(printf '%s\n' "$PR_GATES" | sed -n '1p')"

@@ -1966,16 +1966,23 @@ raise SystemExit(0 if str(json.load(sys.stdin).get("state") or "").upper() == "M
 # adapter_ticket_merged_pr <token-file> <board-id> <task-id> <repo> <ref>
 adapter_ticket_merged_pr() {
   local token_file="$1" board_id="$2" task_id="$3" repo="$4" ref="$5"
-  local rows url comments comment_rc direct_failed="no"
+  local rows url comments comment_rc direct_failed="no" cache_rc
   [ -n "$repo" ] && [ -n "$ref" ] || return 2
-  if command -v gh >/dev/null 2>&1 \
-     && rows="$(gh pr list --repo "$repo" --state merged --search "$ref in:title" --limit 100 \
-       --json number,title,url 2>/dev/null)"; then
-    if ! url="$(ROWS="$rows" REF="$ref" python3 -c '
+  if command -v gh >/dev/null 2>&1; then
+    if rows="$(_ht_pr_cache_rows "$repo")"; then
+      cache_rc=0
+    else
+      cache_rc=$?
+    fi
+    if [ "$cache_rc" -eq 75 ]; then
+      return 75
+    elif [ "$cache_rc" -ne 0 ]; then
+      direct_failed="yes"
+    elif ! url="$(ROWS="$rows" REF="$ref" python3 -c '
 import json, os, re
 pattern = re.compile(r"^" + re.escape(os.environ["REF"]) + r"(?:$|[\s:])", re.I)
 for pr in json.loads(os.environ["ROWS"] or "[]"):
-    if pattern.match(str(pr.get("title") or "")) and pr.get("url"):
+    if str(pr.get("state") or "").upper() == "MERGED" and pattern.match(str(pr.get("title") or "")) and pr.get("url"):
         print(pr["url"])
         break
 ')"; then
@@ -1999,20 +2006,143 @@ for pr in json.loads(os.environ["ROWS"] or "[]"):
   return "$comment_rc"
 }
 
-# adapter_agent_has_open_pr <repo> <ref> <branch-prefix> <opened-prs>
+_ht_pr_cache_rows() (
+  local repo="$1" cache_dir cache_file lock_file now modified age tmp open_rc closed_rc reset reset_at
+  [ -n "$repo" ] && command -v gh >/dev/null 2>&1 || return 1
+  cache_dir="${AGENT_PR_CACHE_DIR:-$HOME/.local/state/agent-board-poll/pr-cache}"
+  cache_file="$cache_dir/${repo//\//__}.json"
+  lock_file="$cache_file.lock"
+  mkdir -p "$cache_dir"
+  exec 8>>"$lock_file"
+  flock 8
+  now="$(date +%s)"
+  if [ -s "$cache_file" ]; then
+    modified="$(stat -c %Y "$cache_file" 2>/dev/null || printf 0)"
+    age=$((now - modified))
+    if [ "$age" -ge 0 ] && [ "$age" -lt "${PR_CACHE_TTL_SECONDS:-90}" ] \
+       && python3 -c 'import json,sys; assert isinstance(json.load(open(sys.argv[1])).get("prs"), list)' "$cache_file" 2>/dev/null; then
+      python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["prs"]))' "$cache_file"
+      return 0
+    fi
+  fi
+
+  tmp="$(mktemp -d "$cache_dir/.refresh.XXXXXX")"
+  trap 'rm -rf "$tmp"' EXIT
+  set +e
+  gh api "repos/$repo/pulls?state=open&per_page=100" > "$tmp/open.json" 2> "$tmp/open.err"
+  open_rc=$?
+  if [ "$open_rc" -eq 0 ]; then
+    gh api "repos/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=100" \
+      > "$tmp/closed.json" 2> "$tmp/closed.err"
+    closed_rc=$?
+  else
+    closed_rc=0
+    : > "$tmp/closed.err"
+  fi
+  set -e
+  if [ "$open_rc" -ne 0 ] || [ "$closed_rc" -ne 0 ]; then
+    cat "$tmp/open.err" "$tmp/closed.err" > "$tmp/error"
+    if grep -Eqi 'rate.?limit|HTTP 429' "$tmp/error"; then
+      reset="$(gh api rate_limit --jq .rate.reset 2>/dev/null || true)"
+      if [[ "$reset" =~ ^[0-9]+$ ]]; then
+        reset_at="$(date -u -d "@$reset" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '%s' "$reset")"
+      else
+        reset_at="unknown"
+      fi
+      printf 'github rate limited until %s\n' "$reset_at" >&2
+      return 75
+    fi
+    printf 'ERROR: cannot refresh pull request cache for %s\n' "$repo" >&2
+    return 1
+  fi
+
+  REPO="$repo" NOW="${PR_GATE_NOW:-}" FETCHED_AT="$now" python3 - \
+    "$tmp/open.json" "$tmp/closed.json" "$cache_file.new" <<'PYEOF'
+import datetime
+import json
+import os
+import sys
+
+open_path, closed_path, output_path = sys.argv[1:]
+now_text = os.environ.get("NOW") or ""
+try:
+    now = datetime.datetime.fromisoformat(now_text.replace("Z", "+00:00"))
+except ValueError:
+    now = datetime.datetime.now(datetime.timezone.utc)
+if now.tzinfo is None:
+    now = now.replace(tzinfo=datetime.timezone.utc)
+cutoff = now - datetime.timedelta(hours=48)
+
+def parsed(value):
+    try:
+        result = datetime.datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        return result.replace(tzinfo=result.tzinfo or datetime.timezone.utc)
+    except ValueError:
+        return None
+
+def normalize(row, state):
+    number = row.get("number")
+    head = row.get("head") if isinstance(row.get("head"), dict) else {}
+    base = row.get("base") if isinstance(row.get("base"), dict) else {}
+    user = row.get("user") if isinstance(row.get("user"), dict) else {}
+    return {
+        "number": number,
+        "state": state,
+        "url": row.get("html_url") or "https://github.com/%s/pull/%s" % (os.environ["REPO"], number),
+        "title": row.get("title") or "",
+        "headRefName": head.get("ref") or "",
+        "baseRefName": base.get("ref") or "",
+        "author": {"login": user.get("login") or ""},
+        "draft": bool(row.get("draft")),
+        "createdAt": row.get("created_at") or row.get("updated_at") or "",
+        "updatedAt": row.get("updated_at") or "",
+        "mergedAt": row.get("merged_at") if state == "MERGED" else None,
+    }
+
+rows = [normalize(row, "OPEN") for row in json.load(open(open_path, encoding="utf-8"))]
+for row in json.load(open(closed_path, encoding="utf-8")):
+    merged = parsed(row.get("merged_at"))
+    if merged is not None and merged >= cutoff:
+        rows.append(normalize(row, "MERGED"))
+seen = set()
+rows = [row for row in rows if not (row["number"] in seen or seen.add(row["number"]))]
+with open(output_path, "w", encoding="utf-8") as handle:
+    json.dump({"fetched_at": int(os.environ["FETCHED_AT"]), "repo": os.environ["REPO"], "prs": rows}, handle)
+    handle.write("\n")
+PYEOF
+  mv "$cache_file.new" "$cache_file"
+  python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["prs"]))' "$cache_file"
+)
+
+_ht_distinct_agent_login() {
+  local configured="${GH_LOGIN:-}" host_login
+  [ -n "$configured" ] || return 0
+  host_login="$(gh api user --jq .login 2>/dev/null || true)"
+  [ -n "$host_login" ] && [ "${configured,,}" != "${host_login,,}" ] || return 0
+  printf '%s' "$configured"
+}
+
+# adapter_agent_has_open_pr <repo> <ref> <ignored-legacy-prefix> <opened-prs>
 adapter_agent_has_open_pr() {
-  local repo="$1" ref="$2" prefix="$3" opened_prs="$4" rows login
+  local repo="$1" ref="$2" opened_prs="$4" rows login cache_rc
   [ -n "$repo" ] && command -v gh >/dev/null 2>&1 || return 2
-  rows="$(gh pr list --repo "$repo" --state open --search "$ref" --limit 100 \
-    --json number,title,body,headRefName,author 2>/dev/null)" || return 2
-  login="${GITHUB_LOGIN:-$(gh api user --jq .login 2>/dev/null || true)}"
-  ROWS="$rows" REF="$ref" PREFIX="$prefix" SLUG="${AGENT_SLUG:-}" LOGIN="$login" \
-    REPO="$repo" OPENED="$opened_prs" python3 -c '
-import json, os, re, sys
+  if rows="$(_ht_pr_cache_rows "$repo")"; then
+    cache_rc=0
+  else
+    cache_rc=$?
+  fi
+  [ "$cache_rc" -eq 0 ] || { [ "$cache_rc" -eq 75 ] && return 75; return 2; }
+  login="$(_ht_distinct_agent_login)"
+  ROWS="$rows" REF="$ref" SLUG="${AGENT_SLUG:-}" LOGIN="$login" \
+    KIND="${AGENT_KIND:-${AGENT_ROLE:-${ROLE:-}}}" REPO="$repo" OPENED="$opened_prs" python3 -c '
+import json, os, sys
 ref = os.environ["REF"].casefold()
-prefix = os.environ["PREFIX"].casefold()
-slug_prefix = (os.environ["SLUG"] + "/").casefold() if os.environ["SLUG"] else ""
+slug = os.environ["SLUG"].casefold()
 login = os.environ["LOGIN"].casefold()
+qa = os.environ["KIND"].casefold() == "qa"
+prefixes = [slug + "/"] if slug else []
+if slug == "dev-2":
+    prefixes.extend(("dev-cursor-2/", "cursor-dev-2/"))
 owned = set()
 try:
     with open(os.environ["OPENED"], encoding="utf-8") as handle:
@@ -2023,16 +2153,20 @@ try:
 except OSError:
     pass
 for pr in json.loads(os.environ["ROWS"] or "[]"):
-    haystack = " ".join(str(pr.get(key) or "") for key in ("title", "body", "headRefName")).casefold()
+    if str(pr.get("state") or "").upper() != "OPEN":
+        continue
+    haystack = " ".join(str(pr.get(key) or "") for key in ("title", "headRefName")).casefold()
     if ref not in haystack:
+        continue
+    number = str(pr.get("number"))
+    if number in owned:
+        raise SystemExit(0)
+    if qa:
         continue
     branch = str(pr.get("headRefName") or "").casefold()
     author = pr.get("author") or {}
     author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
-    if ((prefix and branch.startswith(prefix)) or
-            (slug_prefix and branch.startswith(slug_prefix)) or
-            str(pr.get("number")) in owned or
-            (login and author_login == login)):
+    if any(branch.startswith(prefix) for prefix in prefixes) or (login and author_login == login):
         raise SystemExit(0)
 raise SystemExit(1)
 '
@@ -2101,10 +2235,9 @@ print(",".join(ids))')" || {
 # ---------- one ticket until live ----------
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
 # Prints one JSON object per pull request still owned by this agent, open PRs
-# before merged PRs awaiting QA. Ownership comes from the configured or
-# <slug>/ branch prefix, the opened-PR ledger, the agent's GitHub author login,
-# or a current assignment of the title's ticket when no other agent prefix is
-# present. Comments do not transfer ownership.
+# before merged PRs awaiting QA. Ownership comes only from the <slug>/ branch
+# prefix (plus dev-2's two historical aliases), the opened-PR ledger, or an
+# explicitly configured GH_LOGIN that differs from the host gh identity.
 #
 # An open PR with no owner among the living conf files is ignored and logged
 # once per UTC day through stderr, which core appends to the tick log.
@@ -2114,9 +2247,9 @@ print(",".join(ids))')" || {
 # with no deployment records use merged + contained as the documented fallback.
 adapter_pr_gate() (
   local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
-  local config_dir="${7:-}" opened_prs="${8:-}" repo="${PR_REPO:-}" prefix="${PR_BRANCH_PREFIX:-agent/$slug-}"
+  local config_dir="${7:-}" opened_prs="${8:-}" repo="${PR_REPO:-}"
   local state_dir released_prs tmp pr number live branch marker today owner_conf owner_slug one board_json pr_state
-  local offset path returned github_login
+  local offset path returned github_login host_login cache_rc agent_role
 
   [ -n "$repo" ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
@@ -2126,23 +2259,17 @@ adapter_pr_gate() (
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
 
-  if ! gh pr list --repo "$repo" --state open --limit 1000 \
-      --json number,state,url,title,body,headRefName,baseRefName,createdAt,author > "$tmp/open.json" \
-     || ! gh pr list --repo "$repo" --state merged --limit 100 \
-      --json number,state,url,title,body,headRefName,baseRefName,createdAt,mergedAt,author > "$tmp/merged.json"; then
-    printf 'ERROR: cannot list pull requests in %s for the one-ticket-until-live gate\n' "$repo" >&2
-    return 1
+  if pr="$(_ht_pr_cache_rows "$repo")"; then
+    cache_rc=0
+  else
+    cache_rc=$?
   fi
-  python3 - "$tmp/open.json" "$tmp/merged.json" <<'PYEOF' > "$tmp/prs.json"
+  [ "$cache_rc" -eq 0 ] || return "$cache_rc"
+  printf '%s\n' "$pr" > "$tmp/prs.json"
+  python3 - "$tmp/prs.json" <<'PYEOF' > "$tmp/open.json"
 import json, sys
-seen, rows = set(), []
-for path in sys.argv[1:]:
-    for row in json.load(open(path)):
-        if row.get("number") in seen:
-            continue
-        seen.add(row.get("number"))
-        rows.append(row)
-print(json.dumps(rows))
+print(json.dumps([row for row in json.load(open(sys.argv[1]))
+                  if str(row.get("state") or "").upper() == "OPEN"]))
 PYEOF
   if python3 - "$tmp/prs.json" <<'PYEOF'
 import json, sys
@@ -2152,11 +2279,20 @@ PYEOF
     return 0
   fi
 
-  # Keep every active identity with all ownership signals. GITHUB_LOGIN can pin
-  # an agent-specific gh identity; the current runner otherwise uses gh's own
-  # authenticated login.
-  github_login="${GITHUB_LOGIN:-$(gh api user --jq .login 2>/dev/null || true)}"
-  printf '%s\t%s\t%s\t%s\t%s\n' "$slug" "$prefix" "$agent_id" "$opened_prs" "$github_login" > "$tmp/owners.tsv"
+  # Author ownership is opt-in and valid only when the configured login differs
+  # from the shared host identity. An absent or unverifiable host login disables it.
+  host_login=""
+  if [ -n "${GH_LOGIN:-}" ] \
+     || { [ -n "$config_dir" ] && grep -qE '^GH_LOGIN=' "$config_dir"/*.conf 2>/dev/null; }; then
+    host_login="$(gh api user --jq .login 2>/dev/null || true)"
+  fi
+  github_login=""
+  if [ -n "${GH_LOGIN:-}" ] && [ -n "$host_login" ] \
+     && [ "${GH_LOGIN,,}" != "${host_login,,}" ]; then
+    github_login="$GH_LOGIN"
+  fi
+  agent_role="${AGENT_KIND:-${AGENT_ROLE:-${ROLE:-}}}"
+  printf '%s\t%s\t%s\t%s\t%s\n' "$slug" "$agent_id" "$opened_prs" "$github_login" "$agent_role" > "$tmp/owners.tsv"
   if [ -n "$config_dir" ] && [ -d "$config_dir" ]; then
     for owner_conf in "$config_dir"/*.conf; do
       [ -f "$owner_conf" ] || continue
@@ -2166,14 +2302,19 @@ PYEOF
         continue
       fi
       (
-        unset AGENT_SLUG AGENT_ID PR_BRANCH_PREFIX PR_REPO GITHUB_LOGIN
+        unset AGENT_SLUG AGENT_ID AGENT_KIND AGENT_ROLE ROLE PR_REPO GH_LOGIN GITHUB_LOGIN
         # shellcheck disable=SC1090
         . "$owner_conf"
         [ "${PR_REPO:-}" = "$repo" ] || exit 0
         owner_slug="${AGENT_SLUG:-$(basename "$owner_conf" .conf)}"
-        printf '%s\t%s\t%s\t%s\t%s\n' "$owner_slug" \
-          "${PR_BRANCH_PREFIX:-agent/$owner_slug-}" "${AGENT_ID:-}" \
-          "$state_dir/$owner_slug.opened-prs" "${GITHUB_LOGIN:-}"
+        github_login=""
+        if [ -n "${GH_LOGIN:-}" ] && [ -n "$host_login" ] \
+           && [ "${GH_LOGIN,,}" != "${host_login,,}" ]; then
+          github_login="$GH_LOGIN"
+        fi
+        agent_role="${AGENT_KIND:-${AGENT_ROLE:-${ROLE:-}}}"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$owner_slug" "${AGENT_ID:-}" \
+          "$state_dir/$owner_slug.opened-prs" "$github_login" "$agent_role"
       ) >> "$tmp/owners.tsv"
     done
   fi
@@ -2196,38 +2337,27 @@ PYEOF
     done
   done
 
-  PREFIX="$prefix" SLUG="$slug" AGENT_ID="$agent_id" REPO="$repo" OPENED_PRS="$opened_prs" \
-  RELEASED_PRS="$released_prs" BOARDS="$board_ids" \
+  SLUG="$slug" REPO="$repo" OPENED_PRS="$opened_prs" RELEASED_PRS="$released_prs" BOARDS="$board_ids" \
     python3 - "$tmp/prs.json" "$tmp/owners.tsv" "$tmp/tasks.jsonl" <<'PYEOF' > "$tmp/candidates.jsonl"
 import json, os, re, sys
 prs_path, owners_path, tasks_path = sys.argv[1:]
-slug = os.environ["SLUG"]
-prefix = os.environ["PREFIX"].casefold()
-agent_id = os.environ["AGENT_ID"]
+slug = os.environ["SLUG"].casefold()
 repo = os.environ["REPO"]
 owners = []
 with open(owners_path, encoding="utf-8") as handle:
     for line in handle:
-        owner_slug, owner_prefix, owner_id, state_path, login = line.rstrip("\n").split("\t", 4)
-        row = (owner_slug, owner_prefix.casefold(), owner_id, state_path, login.casefold())
+        owner_slug, owner_id, state_path, login, role = line.rstrip("\n").split("\t", 4)
+        row = (owner_slug.casefold(), owner_id, state_path, login.casefold(), role.casefold())
         if row not in owners:
             owners.append(row)
-assigned = {}
 tasks = {}
 with open(tasks_path, encoding="utf-8") as handle:
     for line in handle:
         for task in (json.loads(line).get("tasks") or []):
-            ref = str(task.get("ticketNumber") or "").upper()
-            ids = assigned.setdefault(ref, set())
-            tasks[ref] = task
-            for who in task.get("assignees") or []:
-                agent = who.get("agent") if isinstance(who, dict) else None
-                if isinstance(agent, dict) and agent.get("id"):
-                    ids.add(str(agent["id"]))
+            tasks[str(task.get("ticketNumber") or "").upper()] = task
 opened = set()
-path = os.environ.get("OPENED_PRS") or ""
 try:
-    with open(path, encoding="utf-8") as handle:
+    with open(os.environ.get("OPENED_PRS") or "", encoding="utf-8") as handle:
         for line in handle:
             fields = line.rstrip("\n").split("\t")
             if len(fields) >= 2 and fields[0] == repo:
@@ -2253,37 +2383,32 @@ def display_ticket(pr):
     ref = title_ticket(pr)
     if ref:
         return ref
-    haystack = " ".join(str(pr.get(key) or "") for key in ("body", "headRefName"))
-    match = ticket_pattern.search(haystack)
+    match = ticket_pattern.search(str(pr.get("headRefName") or ""))
     return match.group(1).upper() if match else "PR-%s" % pr["number"]
-def owned_prefixes(owner_slug, owner_prefix):
-    return tuple(value for value in (owner_prefix, (owner_slug + "/").casefold()) if value)
-def has_other_prefix(branch):
-    folded = branch.casefold()
-    for owner_slug, owner_prefix, _, _, _ in owners:
-        if owner_slug != slug and any(folded.startswith(value) for value in owned_prefixes(owner_slug, owner_prefix)):
-            return True
-    return folded.startswith("agent/") and not folded.startswith(prefix)
+def owned_prefixes(owner_slug):
+    values = [owner_slug + "/"] if owner_slug else []
+    if owner_slug == "dev-2":
+        values.extend(("dev-cursor-2/", "cursor-dev-2/"))
+    return tuple(values)
 with open(prs_path, encoding="utf-8") as handle:
     prs = json.load(handle)
+current = next((owner for owner in owners if owner[0] == slug and owner[4]),
+               next((owner for owner in owners if owner[0] == slug), (slug, "", "", "", "")))
 for pr in sorted(prs, key=lambda row: (str(row.get("state") or "").upper() != "OPEN", row.get("createdAt") or "")):
     state = str(pr.get("state") or "").upper()
-    if state not in ("OPEN", "MERGED") or str(pr.get("number")) in released:
+    number = str(pr.get("number"))
+    if state not in ("OPEN", "MERGED") or number in released:
         continue
-    branch = str(pr.get("headRefName") or "")
+    branch = str(pr.get("headRefName") or "").casefold()
     ref = title_ticket(pr)
     if ref in released_tickets or (state == "MERGED" and ref not in tasks):
         continue
-    current = next((owner for owner in owners if owner[0] == slug and owner[4]),
-                   next((owner for owner in owners if owner[0] == slug),
-                        (slug, prefix, agent_id, "", "")))
     author = pr.get("author") or {}
     author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
-    by_prefix = any(branch.casefold().startswith(value) for value in owned_prefixes(current[0], current[1]))
-    by_state = str(pr.get("number")) in opened
-    by_author = bool(current[4] and author_login == current[4] and not has_other_prefix(branch))
-    by_assignment = bool(ref and agent_id in assigned.get(ref, set()) and not has_other_prefix(branch))
-    if not (by_prefix or by_state or by_author or by_assignment):
+    by_state = number in opened
+    by_prefix = current[4] != "qa" and any(branch.startswith(value) for value in owned_prefixes(current[0]))
+    by_author = current[4] != "qa" and bool(current[3] and author_login == current[3])
+    if not (by_state or by_prefix or by_author):
         continue
     pr["ticket"] = display_ticket(pr)
     task = tasks.get(ref, {})
@@ -2300,35 +2425,22 @@ for pr in sorted(prs, key=lambda row: (str(row.get("state") or "").upper() != "O
     print(json.dumps(pr))
 PYEOF
 
-  # Orphans never become candidates. Prefix, assignment, and per-agent state
-  # are checked across all active confs before a warning is emitted.
+  # Orphans never become candidates. Branch, explicit login, and per-agent
+  # opened-PR state are checked across all active confs before a warning.
   today="$(date -u +%F)"
-  REPO="$repo" python3 - "$tmp/open.json" "$tmp/owners.tsv" "$tmp/tasks.jsonl" <<'PYEOF' > "$tmp/orphans.tsv"
-import json, os, re, sys
-open_path, owners_path, tasks_path = sys.argv[1:]
+  REPO="$repo" python3 - "$tmp/open.json" "$tmp/owners.tsv" <<'PYEOF' > "$tmp/orphans.tsv"
+import json, os, sys
+open_path, owners_path = sys.argv[1:]
 repo = os.environ["REPO"]
 owners = []
-active_ids = set()
 with open(owners_path, encoding="utf-8") as handle:
     for line in handle:
-        slug, prefix, agent_id, state_path, login = line.rstrip("\n").split("\t", 4)
-        row = (slug, prefix.casefold(), agent_id, state_path, login.casefold())
+        slug, agent_id, state_path, login, role = line.rstrip("\n").split("\t", 4)
+        row = (slug.casefold(), state_path, login.casefold(), role.casefold())
         if row not in owners:
             owners.append(row)
-        if agent_id:
-            active_ids.add(agent_id)
-assigned = {}
-with open(tasks_path, encoding="utf-8") as handle:
-    for line in handle:
-        for task in (json.loads(line).get("tasks") or []):
-            ref = str(task.get("ticketNumber") or "").upper()
-            ids = assigned.setdefault(ref, set())
-            for who in task.get("assignees") or []:
-                agent = who.get("agent") if isinstance(who, dict) else None
-                if isinstance(agent, dict) and agent.get("id"):
-                    ids.add(str(agent["id"]))
 opened = set()
-for _, _, _, path, _ in owners:
+for _, path, _, _ in owners:
     try:
         with open(path, encoding="utf-8") as handle:
             for line in handle:
@@ -2337,22 +2449,22 @@ for _, _, _, path, _ in owners:
                     opened.add(fields[1])
     except OSError:
         pass
-pattern = re.compile(r"(?<![0-9A-Za-z])([A-Z][A-Z0-9]{1,10}-[0-9]+)(?![0-9A-Za-z])", re.I)
+def prefixes(slug):
+    values = [slug + "/"] if slug else []
+    if slug == "dev-2":
+        values.extend(("dev-cursor-2/", "cursor-dev-2/"))
+    return tuple(values)
 for pr in json.load(open(open_path)):
     branch = str(pr.get("headRefName") or "")
     folded = branch.casefold()
     number = str(pr.get("number"))
-    prefix_owner = any(
-        any(folded.startswith(value) for value in (prefix, (slug + "/").casefold()) if value)
-        for slug, prefix, _, _, _ in owners)
     author = pr.get("author") or {}
     author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
-    author_owner = any(login and author_login == login for _, _, _, _, login in owners)
-    match = pattern.search(str(pr.get("title") or ""))
-    ref = match.group(1).upper() if match else ""
-    another_prefix = folded.startswith("agent/") and not prefix_owner
-    assigned_active = bool(ref and assigned.get(ref, set()) & active_ids and not another_prefix)
-    if prefix_owner or number in opened or author_owner or assigned_active:
+    prefix_owner = any(role != "qa" and any(folded.startswith(value) for value in prefixes(slug))
+                       for slug, _, _, role in owners)
+    author_owner = any(role != "qa" and login and author_login == login
+                       for _, _, login, role in owners)
+    if prefix_owner or number in opened or author_owner:
         continue
     print("%s\t%s" % (number, branch))
 PYEOF

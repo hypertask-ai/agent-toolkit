@@ -128,7 +128,7 @@ done < "$DIRECT_REPOS"
 
 for conf in "${CONF_FILES[@]}"; do
   (
-    unset AGENT_ID AGENT_NAME AGENT_SLUG BOARD_ADAPTER BOARD_ID BOARD_CLI TOKEN_FILE PR_REPO PR_BRANCH_PREFIX DONE_SECTION
+    unset AGENT_ID AGENT_NAME AGENT_SLUG AGENT_KIND AGENT_ROLE ROLE BOARD_ADAPTER BOARD_ID BOARD_CLI TOKEN_FILE PR_REPO PR_BRANCH_PREFIX GH_LOGIN GITHUB_LOGIN DONE_SECTION
     # shellcheck disable=SC1090
     . "$conf"
     [ "${BOARD_ADAPTER:-}" = "hypertask" ] || exit 0
@@ -188,12 +188,15 @@ PYEOF
       board="$(ROW="$row" python3 -c 'import json,os; print(json.loads(os.environ["ROW"]).get("board") or "")')"
       record="$STATE_DIR/run-records/$slug-$ref.json"
       if [ -f "$record" ] && { record_is_live "$record" || record_preserves_ticket "$record"; }; then continue; fi
-      set +e
-      adapter_agent_has_open_pr "${PR_REPO:-}" "$ref" "$PR_BRANCH_PREFIX" "$opened"
-      pr_rc=$?
-      set -e
+      if adapter_agent_has_open_pr "${PR_REPO:-}" "$ref" "$PR_BRANCH_PREFIX" "$opened"; then
+        pr_rc=0
+      else
+        pr_rc=$?
+      fi
       [ "$pr_rc" -ne 0 ] || continue
-      if [ "$pr_rc" -eq 2 ]; then
+      if [ "$pr_rc" -eq 75 ]; then
+        continue
+      elif [ "$pr_rc" -eq 2 ]; then
         health_log "$board" "Reconciler could not check open pull requests for $ref, so it left the ticket in $IN_PROGRESS_SECTION."
         continue
       fi
@@ -304,10 +307,11 @@ print(row.get("section") or "")
         fi
         record="$STATE_DIR/run-records/$slug-$ref.json"
         if [ -f "$record" ] && { record_is_live "$record" || record_preserves_ticket "$record"; }; then continue; fi
-        set +e
-        merged_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" "${PR_REPO:-}" "$ref" 2>>"$log")"
-        merged_rc=$?
-        set -e
+        if merged_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" "${PR_REPO:-}" "$ref" 2>>"$log")"; then
+          merged_rc=0
+        else
+          merged_rc=$?
+        fi
         if [ "$merged_rc" -eq 2 ]; then
           health_log "$board" "Reconciler could not check merged pull requests for $ref, so it left the ticket in $current."
           continue

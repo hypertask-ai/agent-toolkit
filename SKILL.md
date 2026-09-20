@@ -381,12 +381,15 @@ our own message rather than "command not found" three layers down.
 
 ## One ticket until live
 
-An agent can claim another normal ticket while it owns one open PR. A PR is
-owned when its branch starts with the agent's `PR_BRANCH_PREFIX` (default
-`agent/<slug>-`), when the ticket in its title is currently assigned to that
-agent and the branch has no other agent prefix, or when `<slug>.opened-prs`
-records that the runner first saw it during that agent's run. Shared GitHub
-authorship and comments do not transfer ownership.
+A PR is owned only when its branch starts with `<slug>/` (case-insensitive),
+when `<slug>.opened-prs` records that the runner saw it open during that agent's
+run, or when an explicit `GH_LOGIN` differs from the host `gh` login and matches
+the author. `dev-2` also recognizes `dev-cursor-2/` and `cursor-dev-2/`. QA
+agents recognize only PRs in their own opened-PR ledger. Board assignment and
+shared GitHub authorship do not transfer ownership. PR discovery uses a locked,
+host-wide REST cache per repository, refreshed at most every 90 seconds without
+PR bodies. A rate-limit response makes ownership unknown for that tick and does
+not fail it.
 
 Two open PRs fill the pickup slots and stop every new claim, including an
 `emergency`. The runner ranks that queue oldest first. A red or pending PR older
@@ -616,7 +619,8 @@ See `CONF.md` for the complete schema.
 | `RETRY_WINDOW_SECONDS` | length of that pre-PR window, default 21600 (six hours); never used for an owed PR |
 | `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
 | `PR_REPO` | **required.** the repository whose pull requests say whether a ticket is finished; `agent-board-poll` refuses to tick without it. Set it with `create-agent.sh --resume --pr-repo <org/name>` |
-| `PR_BRANCH_PREFIX` | branch prefix that proves this agent owns a PR, default `agent/<slug>-` |
+| `PR_BRANCH_PREFIX` | deprecated compatibility setting; ownership uses `<slug>/` and the opened-PR ledger |
+| `GH_LOGIN` | optional agent-specific PR author login, used only when it differs from the host `gh` login |
 | `TRIAGE` | `yes` to score a ticket before pickup; defaults to `yes` for `AGENT_KIND=dev` and `no` for everything else |
 | `TRIAGE_MODEL_CLI` | optional command that breaks a tie the rules could not; default `MODEL_CLI` |
 | `ADVISOR_MAX` | `agent-advisor` calls allowed per run, default 2 |

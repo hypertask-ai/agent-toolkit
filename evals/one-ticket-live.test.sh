@@ -186,8 +186,61 @@ if [ "$1 $2" = "pr view" ]; then
 fi
 if [ "$1" = "api" ]; then
   endpoint="$2"
+  if [[ "$endpoint" == repos/example/repo/pulls\?state=* ]]; then
+    if [ "$scenario" = "rate-limit" ]; then
+      printf 'API rate limit exceeded (HTTP 403)\n' >&2
+      exit 1
+    fi
+    REQUEST_STATE="${endpoint#*state=}"
+    REQUEST_STATE="${REQUEST_STATE%%&*}"
+    SCENARIO="$scenario" REQUEST_STATE="$REQUEST_STATE" python3 <<'PYEOF'
+import json
+import os
+
+scenario = os.environ["SCENARIO"]
+state = os.environ["REQUEST_STATE"]
+def row(number, ticket, branch, author="shared-bot", updated="2026-09-18T21:00:00Z", merged=None):
+    return {"number": number, "title": f"HTPR-{ticket} fix", "html_url": f"https://github.test/pull/{number}",
+            "head": {"ref": branch}, "base": {"ref": "production"}, "user": {"login": author},
+            "draft": False, "created_at": updated, "updated_at": updated, "merged_at": merged}
+rows = []
+merged_scenarios = {"deployed", "undeployed", "fallback", "base-missing", "qa-fail", "qa-passed"}
+if state == "closed":
+    if scenario in merged_scenarios:
+        rows = [row(1, 1, "dev-1/htpr-1", updated="2026-09-18T20:00:00Z", merged="2026-09-18T20:00:00Z")]
+elif scenario not in merged_scenarios:
+    if scenario in {"oldest", "two-green"}:
+        rows = [row(9, 9, "dev-1/htpr-9", updated="2026-09-18T21:00:00Z"),
+                row(10, 10, "dev-1/htpr-10", updated="2026-09-18T21:01:00Z")]
+    elif scenario == "stale-red-green":
+        rows = [row(9, 9, "dev-1/htpr-9", updated="2026-09-18T19:00:00Z"),
+                row(10, 10, "dev-1/htpr-10", updated="2026-09-18T21:01:00Z")]
+    elif scenario == "qa-claim":
+        rows = [row(3, 3, "dev-1/htpr-3", author="dev-one", updated="2026-01-01T00:00:00Z")]
+    elif scenario == "orphan":
+        rows = [row(4, 12, "retired-dev/htpr-4", author="retired-dev", updated="2026-01-01T00:00:00Z")]
+    elif scenario == "author-owned":
+        rows = [row(5, 5, "contributor/fix-5", author="dev-one", updated="2026-01-01T00:00:00Z")]
+    elif scenario == "custom-prefix":
+        rows = [row(6, 6, "cursor-dev-2/htpr-6", updated="2026-01-01T00:00:00Z")]
+    elif scenario == "state-owned":
+        rows = [row(7, 7, "legacy/fix-7", updated="2026-01-01T00:00:00Z")]
+    elif scenario == "shared-author":
+        rows = [row(11, 11, "legacy/fix-11", updated="2026-01-01T00:00:00Z")]
+    elif scenario == "foreign-prefix":
+        rows = [row(13, 13, "dev-2/htpr-13", updated="2026-01-01T00:00:00Z")]
+    elif scenario == "slug-prefix":
+        rows = [row(12, 12, "DeV-1/htpr-12-fix", updated="2026-01-01T00:00:00Z")]
+    elif scenario != "record-open":
+        updated = "2026-09-18T19:00:00Z" if scenario == "stale-red" else "2026-09-18T21:00:00Z"
+        rows = [row(1, 1, "dev-1/htpr-1", author="dev-one", updated=updated)]
+print(json.dumps(rows))
+PYEOF
+    exit 0
+  fi
   case "$endpoint" in
-    user) printf 'dev-one\n' ;;
+    user) printf 'shared-bot\n' ;;
+    rate_limit) printf '1790000000\n' ;;
     */pulls/*/comments*) printf '[]\n' ;;
     */compare/*)
       if [ "$scenario" = "base-missing" ]; then
@@ -239,7 +292,7 @@ elif [[ "$url" == *'/mcp/tasks?'* ]]; then
 {"tasks":[{"id":"task-1","ticketNumber":"HTPR-1","projectId":"15","section":"$ticket_section","title":"PR ticket","description":"fix it","assignees":$task1_assignees,"labels":$task1_labels,"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0},{"id":"task-5","ticketNumber":"HTPR-5","section":"Bugs","title":"Legacy branch ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
 JSON
 elif [[ "$url" == *'task_id=task-1'* ]] && [ "${PR_TEST_SCENARIO:-}" = "qa-fail" ]; then
-  printf '{"comments":[{"id":"qa-77","agent":{"id":"agent-qa"},"createdAt":"2026-01-03T00:00:00Z","text":"<p>Handoff: Dev One, checkout fails after deploy.</p>"}]}\n'
+  printf '{"comments":[{"id":"qa-77","agent":{"id":"agent-qa"},"createdAt":"2026-09-18T21:00:00Z","text":"<p>Handoff: Dev One, checkout fails after deploy.</p>"}]}\n'
 elif [[ "$url" == *'task_id=task-3'* ]]; then
   printf '{"comments":[{"agent":{"id":"agent-1","displayName":"Dev One"},"text":"<p>Claimed.</p>"}]}\n'
 else
@@ -278,6 +331,7 @@ PATH="$TMP/bin:$PATH"
 HOME="$TMP/home"
 PR_REPO="example/repo"
 export PR_GATE_NOW="2026-09-18T22:00:00Z"
+export PR_CACHE_TTL_SECONDS=0
 # shellcheck source=/dev/null
 . "$ROOT/adapters/hypertask/adapter.sh"
 die() { printf 'die: %s %s\n' "$*" >&2; return 1; }
@@ -288,7 +342,7 @@ AGENT_ID="agent-1"
 AGENT_KIND="dev"
 BOARD_ADAPTER="hypertask"
 PR_REPO="example/repo"
-GITHUB_LOGIN="dev-one"
+GH_LOGIN="dev-one"
 EOF
 cat > "$TMP/home/.config/hypertask-agents/qa-1.conf" <<'EOF'
 AGENT_SLUG="qa-1"
@@ -422,15 +476,15 @@ echo 'PASS LIVE answer is cached per PR for 60 seconds'
 
 qa_claim="$(run_gate qa-claim qa-1 'QA One')"
 [[ -z "$qa_claim" ]]
-echo 'PASS QA claim comment does not attribute another agent branch'
+echo 'PASS QA agent never binds to a development PR it did not open'
 
-assigned_owned="$(run_gate author-owned)"
-[[ "$assigned_owned" == *'"number": 5'* ]]
-echo 'PASS current ticket assignment attributes a legacy branch PR'
+explicit_author="$(run_gate author-owned)"
+[[ "$explicit_author" == *'"number": 5'* ]]
+echo 'PASS explicit agent login distinct from the host login attributes ownership'
 
 custom_prefix="$(run_gate custom-prefix dev-2 'Dev Two' 'cursor-dev-2/')"
 [[ "$custom_prefix" == *'"number": 6'* ]]
-echo 'PASS configured branch prefix attributes an owned PR'
+echo 'PASS dev-2 historical branch aliases attribute only to dev-2'
 
 printf 'example/repo\t7\tHTPR-7\n' > "$TMP/home/.local/state/agent-board-poll/dev-1.opened-prs"
 state_owned="$(run_gate state-owned)"
@@ -438,18 +492,32 @@ state_owned="$(run_gate state-owned)"
 echo 'PASS runner state attributes a legacy branch PR'
 
 shared_author="$(run_gate shared-author 2>/dev/null)"
-[[ "$shared_author" == *'"number": 11'* ]]
-echo 'PASS PR author login from the agent gh identity attributes ownership'
+[[ -z "$shared_author" ]]
+echo 'PASS shared host GitHub authorship does not transfer PR ownership'
+
+foreign_prefix="$(run_gate foreign-prefix 2>/dev/null)"
+[[ -z "$foreign_prefix" ]]
+echo 'PASS shared-login PR with a foreign branch prefix does not bind'
 
 slug_prefix="$(run_gate slug-prefix)"
 [[ "$slug_prefix" == *'"number": 12'* ]]
 [[ -z "$(run_gate slug-prefix dev-2 'Dev Two' 'cursor-dev-2/' 2>/dev/null)" ]]
-echo 'PASS slug branch prefix attributes only its matching agent'
+echo 'PASS slug branch prefix is case-insensitive and attributes only its matching agent'
+
+pr_cache="$TMP/home/.local/state/agent-board-poll/pr-cache/example__repo.json"
+rm -f "$pr_cache"
+: > "$TMP/gh-calls"
+PR_CACHE_TTL_SECONDS=90 GH_CALL_LOG="$TMP/gh-calls" PR_TEST_SCENARIO=pending _ht_pr_cache_rows example/repo >/dev/null
+PR_CACHE_TTL_SECONDS=90 GH_CALL_LOG="$TMP/gh-calls" PR_TEST_SCENARIO=red _ht_pr_cache_rows example/repo >/dev/null
+[[ "$(grep -cF 'api repos/example/repo/pulls?' "$TMP/gh-calls")" = 2 ]]
+[[ -f "$pr_cache" ]]
+! grep -q 'pr list\|body' "$TMP/gh-calls" "$pr_cache"
+echo 'PASS host-wide REST cache refreshes once per 90 seconds without PR bodies'
 
 orphan_log="$TMP/orphan.log"
 run_gate orphan >/dev/null 2>"$orphan_log"
 run_gate orphan >/dev/null 2>>"$orphan_log"
-[[ "$(grep -cF 'orphaned PR #4 (agent/retired-dev-htpr-4) has no owning agent' "$orphan_log")" = 1 ]]
+[[ "$(grep -cF 'orphaned PR #4 (retired-dev/htpr-4) has no owning agent' "$orphan_log")" = 1 ]]
 echo 'PASS unassigned PR with no active owner blocks nobody and logs once per day'
 
 oldest="$(run_gate oldest)"
@@ -486,6 +554,13 @@ TRIAGE="no"
 EOF
 state="$TMP/home/.local/state/agent-board-poll"
 mkdir -p "$state"
+rate_log_before="$([ ! -f "$state/dev-1.log" ] || wc -l < "$state/dev-1.log")"
+rate_log_before="${rate_log_before:-0}"
+rate_run="$(PR_TEST_SCENARIO=rate-limit BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$rate_run" != *'bound to PR'* && "$rate_run" == *'would pick up HTPR-2'* ]]
+[[ "$(tail -n "+$((rate_log_before + 1))" "$state/dev-1.log" | grep -c '^github rate limited until ' || true)" = 1 ]]
+echo 'PASS GitHub rate limit logs once, binds no PR, and does not fail the tick'
+
 multi_run="$(PR_TEST_SCENARIO=oldest HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$multi_run" == *'bound to PR #9 for HTPR-9: red'* ]]
 [[ "$multi_run" == *'would run a structured fix round for PR #9; no new ticket was ranked.'* ]]
@@ -666,4 +741,4 @@ PR_TEST_SCENARIO=record-open BOARD_TEST_SCENARIO=no-emergency RUN_COOLDOWN_SECON
 [[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "8" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.opened-prs")" = yes ]]
 echo 'PASS runner persists a PR first seen after its ticket run'
 
-echo '44 one-ticket-until-live checks passed'
+echo '47 one-ticket-until-live checks passed'
