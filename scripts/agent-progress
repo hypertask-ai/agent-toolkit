@@ -510,6 +510,37 @@ def pr_bug_title(finding: dict[str, Any]) -> str:
     return f"Bug: PR #{finding.get('pr_number')} stayed {finding.get('pr_state') or 'unmerged'} for two hours"
 
 
+def file_alarm(board_cli: str, title: str, description: str) -> str | None:
+    base = [board_cli, "task", "create", "--project", "5500", "--section", "Review",
+            "--priority", "high", "--title", title, "--description", description]
+    commands = [[*base, "--labels", "bug", "--json"], [*base, "--json"]]
+    for index, command in enumerate(commands):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print(f"fleet progress: alarm filing failed: {error}", file=sys.stderr)
+            return None
+        if result.returncode != 0:
+            error_text = result.stderr + result.stdout
+            if index == 0 and "LabelNotFound" in error_text:
+                continue
+            print(f"fleet progress: alarm filing failed: {error_text.strip()[:300]}", file=sys.stderr)
+            return None
+        raw = result.stdout
+        start, end = raw.find("{"), raw.rfind("}")
+        try:
+            value = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
+        except ValueError:
+            value = {}
+        task = value.get("task") if isinstance(value.get("task"), dict) else value
+        ref = str(task.get("ticketNumber") or "") if isinstance(task, dict) else ""
+        if TICKET_RE.fullmatch(ref):
+            return ref
+        print("fleet progress: alarm filing returned no ticket reference", file=sys.stderr)
+        return None
+    return None
+
+
 def file_pr_bug(board_cli: str, finding: dict[str, Any]) -> str | None:
     number = finding.get("pr_number")
     title = pr_bug_title(finding)
@@ -526,34 +557,7 @@ def file_pr_bug(board_cli: str, finding: dict[str, Any]) -> str | None:
         f"<p>First observed: {html.escape(str(finding['since']))}.</p>"
         f"{check_detail}"
     )
-    base = [board_cli, "task", "create", "--project", "5500", "--section", "Review",
-            "--priority", "high", "--title", title, "--description", description]
-    commands = [[*base, "--labels", "bug", "--json"], [*base, "--json"]]
-    for index, command in enumerate(commands):
-        try:
-            result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
-        except (OSError, subprocess.TimeoutExpired) as error:
-            print(f"fleet progress: PR bug filing failed: {error}", file=sys.stderr)
-            return None
-        if result.returncode != 0:
-            error_text = result.stderr + result.stdout
-            if index == 0 and "LabelNotFound" in error_text:
-                continue
-            print(f"fleet progress: PR bug filing failed: {error_text.strip()[:300]}", file=sys.stderr)
-            return None
-        raw = result.stdout
-        start, end = raw.find("{"), raw.rfind("}")
-        try:
-            value = json.loads(raw[start:end + 1]) if start >= 0 and end > start else {}
-        except ValueError:
-            value = {}
-        task = value.get("task") if isinstance(value.get("task"), dict) else value
-        ref = str(task.get("ticketNumber") or "") if isinstance(task, dict) else ""
-        if TICKET_RE.fullmatch(ref):
-            return ref
-        print("fleet progress: PR bug filing returned no ticket reference", file=sys.stderr)
-        return None
-    return None
+    return file_alarm(board_cli, title, description)
 
 
 def ticket_url(board: str, ref: str) -> str:
@@ -671,16 +675,20 @@ def alarm_telegram_notify(line: str) -> bool:
 
 def update_health_alarms(path: Path, entries: dict[str, Any], at: str) -> None:
     alarms = []
-    for entry in entries.values():
-        if not isinstance(entry, dict) or not entry.get("active") or not entry.get("bug_ticket"):
-            continue
-        alarms.append({
-            "ticket": entry["bug_ticket"],
-            "url": entry.get("bug_url"),
-            "summary": entry.get("alarm_title"),
-            "open_since": entry.get("alarm_open_since"),
-            "runner": entry.get("runner"),
-        })
+    host_state = load_json(path.parent / "host-alarms.json", {})
+    host_entries = host_state.get("alarms", {}) if isinstance(host_state, dict) else {}
+    combined = [entries, host_entries if isinstance(host_entries, dict) else {}]
+    for group in combined:
+        for entry in group.values():
+            if not isinstance(entry, dict) or not entry.get("active") or not entry.get("bug_ticket"):
+                continue
+            alarms.append({
+                "ticket": entry["bug_ticket"],
+                "url": entry.get("bug_url"),
+                "summary": entry.get("alarm_title"),
+                "open_since": entry.get("alarm_open_since"),
+                "runner": entry.get("runner"),
+            })
     alarms.sort(key=lambda item: str(item.get("open_since") or ""))
     with locked(path):
         health = load_json(path, {})
@@ -689,6 +697,70 @@ def update_health_alarms(path: Path, entries: dict[str, Any], at: str) -> None:
         health["alarms"] = alarms
         health["alarms_updated_at"] = at
         atomic_json(path, health)
+
+
+def command_alarm(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir)
+    current = now_utc(args.now)
+    at = iso(current)
+    state_path = state_dir / "host-alarms.json"
+    with locked(state_path):
+        state = load_json(state_path, {"schema_version": 1, "alarms": {}})
+        if not isinstance(state, dict):
+            state = {"schema_version": 1, "alarms": {}}
+        entries = state.setdefault("alarms", {})
+        if not isinstance(entries, dict):
+            entries = {}
+            state["alarms"] = entries
+        entry = entries.setdefault(args.key, {})
+        if args.active == "yes":
+            if entry and not entry.get("active"):
+                entry.clear()
+            entry.update({"active": True, "runner": args.runner, "last_seen_at": at})
+            if not entry.get("bug_ticket"):
+                ticket = file_alarm(args.board_cli, args.title, args.description)
+                if ticket:
+                    url = ticket_url("5500", ticket)
+                    entry.update({
+                        "bug_ticket": ticket, "bug_url": url, "bug_filed_at": at,
+                        "alarm_title": args.title, "alarm_line": f"{args.title}. {url}",
+                        "alarm_open_since": at,
+                    })
+            line = str(entry.get("alarm_line") or "")
+            ticket = str(entry.get("bug_ticket") or "")
+            if line and ticket and not entry.get("alarm_chat_notified_at"):
+                if chat_notify(line, ticket, "5500", args.token_file):
+                    entry["alarm_chat_notified_at"] = at
+            if line and not entry.get("alarm_telegram_notified_at"):
+                if alarm_telegram_notify(line):
+                    entry["alarm_telegram_notified_at"] = at
+        elif entry.get("active"):
+            entry["active"] = False
+            entry["resolved_at"] = at
+            ticket = str(entry.get("bug_ticket") or "")
+            if ticket and not entry.get("cleared_commented_at"):
+                cleared = current.strftime("%H:%M")
+                body = (
+                    f"<p><strong>Decision: cleared at {cleared} UTC.</strong></p>"
+                    "<p>Next: No further action is needed.</p>"
+                )
+                ok, _ = board_write(args.board_cli, "add", ticket, body, state_dir)
+                if ok:
+                    entry["cleared_commented_at"] = at
+            if ticket and entry.get("cleared_commented_at") and not entry.get("moved_done_at"):
+                if move_ticket(args.board_cli, ticket, "Done"):
+                    entry["moved_done_at"] = at
+        state["updated_at"] = at
+        atomic_json(state_path, state)
+
+    fleet_state = load_json(state_dir / "fleet-stalls.json", {})
+    fleet_entries = fleet_state.get("stalls", {}) if isinstance(fleet_state, dict) else {}
+    update_health_alarms(
+        state_dir / "board-health.json",
+        fleet_entries if isinstance(fleet_entries, dict) else {},
+        at,
+    )
+    return 0
 
 
 def notify(line: str) -> bool:
@@ -930,6 +1002,18 @@ def parser() -> argparse.ArgumentParser:
     supervise.add_argument("--toolkit-ticket", required=True)
     supervise.add_argument("--now")
     supervise.set_defaults(func=command_supervise)
+
+    alarm = commands.add_parser("alarm")
+    alarm.add_argument("--state-dir", required=True)
+    alarm.add_argument("--board-cli", required=True)
+    alarm.add_argument("--token-file", required=True)
+    alarm.add_argument("--key", required=True)
+    alarm.add_argument("--runner", required=True)
+    alarm.add_argument("--active", choices=("yes", "no"), required=True)
+    alarm.add_argument("--title", required=True)
+    alarm.add_argument("--description", required=True)
+    alarm.add_argument("--now")
+    alarm.set_defaults(func=command_alarm)
     return root
 
 

@@ -610,7 +610,7 @@ See `CONF.md` for the complete schema.
 | `MAINTAINER` | `on` to add allowlisted setup builds, merges, and advisor instructions, default `off` |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
 | `EXCLUDE_LABELS` | labels that make a ticket off limits, comma separated |
-| `WORKDIR_MODE` | `repo` (default) runs in `AGENT_REPO`; `per-run` gives each ticket its own checkout |
+| `WORKDIR_MODE` | `repo` (default) runs in `AGENT_REPO`; `per-run` gives each ticket its own checkout and removes it after the run unless it has unpushed work |
 | `WORKDIR_ROOT` | where `per-run` checkouts go, required when `WORKDIR_MODE=per-run` |
 | `RETRY_LIMIT` | failed attempts a ticket with no PR gets per window; default three plus the number of ladder commands; never used for an owed PR |
 | `RETRY_WINDOW_SECONDS` | length of that pre-PR window, default 21600 (six hours); never used for an owed PR |

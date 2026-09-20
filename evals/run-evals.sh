@@ -369,6 +369,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/run-watchdog.test.sh" ]; then
   echo "-- run watchdog and single-claim checks --"
   run_test "$HERE/run-watchdog.test.sh" bash "$HERE/run-watchdog.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/post-run-cleanup.test.sh" ]; then
+  echo ""
+  echo "-- post-run cleanup and disk guard checks --"
+  run_test "$HERE/post-run-cleanup.test.sh" bash "$HERE/post-run-cleanup.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/owner-comment-classification.test.sh" ]; then
   echo ""
   echo "-- owner comment classification behavioural checks --"

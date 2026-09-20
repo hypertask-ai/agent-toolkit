@@ -1,0 +1,1 @@
+- AGTE-136 cleans run worktrees and temporary files on every exit path, sweeps stale worktrees and generated artifacts, prunes Docker leftovers daily, alarms above 85% disk use, and blocks new runs above 95%.

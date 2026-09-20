@@ -590,6 +590,27 @@ In Progress. A merged changelog line naming the ticket triggers one `Shipped in
 update prints `feedback waiting: AGTE-n` while the ticket remains open. The
 paste-it-yourself fallback appears only when no bot token is configured.
 
+## Run cleanup and disk guard
+
+Every tick cleans before it ranks work. It sweeps isolated worktrees older than
+two days when no live run record owns them, removes clean or fully pushed
+worktrees, prunes generated build directories from stale worktrees kept for
+unpushed work, and runs `git worktree prune`. Once per UTC day it also prunes
+anonymous Docker volumes and dangling images when Docker is available. The tick
+writes one `cleanup: freed N MB, kept K worktrees` line to the runner log.
+
+The same cleanup function runs after success, failure, an explicit early exit,
+an error trap, a signal, and a watchdog termination. A worktree with uncommitted
+or unpushed work remains in place and logs `kept worktree <path>: unpushed
+commits`; everything else is removed with `git worktree remove --force`.
+Per-run temporary files and temporary directories are removed at the same time.
+
+Disk use is checked after cleanup. Above 85 percent, the runner creates one
+high-priority toolkit alarm through the same Review, agent-room, Telegram, and
+Board health path as pull request alarms. Above 95 percent, the tick starts no
+new run. When use returns to 85 percent or below, the alarm is cleared and moved
+to Done.
+
 ## Running it by hand
 
 - `agent-board-poll --once --dry-run <slug>` — see what it would pick up, and
