@@ -1,0 +1,1 @@
+- AGTE-147 keeps the fleet watch running when one configured board is unreadable, records skipped boards in fleet health, and fails only when no board can be read.
