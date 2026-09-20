@@ -1,0 +1,1 @@
+- AGTE-113 makes watchdog liveness evals reliable on busy hosts and verifies failed same-version updates are retried.
