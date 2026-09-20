@@ -877,6 +877,163 @@ log_once_per_day() {
   fi
 }
 
+ACTIVE_RUN_DIR=""
+ACTIVE_RUN_SOURCE=""
+ACTIVE_RUN_TEMP_PATHS=""
+ACTIVE_MODEL_WAIT_PID=""
+ACTIVE_MODEL_PROCESS_GROUP=""
+POST_RUN_CLEANING="no"
+DISK_USED_PERCENT=0
+CLEANUP_STALE_MINUTES="${CLEANUP_STALE_MINUTES:-2880}"
+CLEANUP_DOCKER="${CLEANUP_DOCKER:-yes}"
+
+register_run_temp() {
+  [ -n "$1" ] || return 0
+  ACTIVE_RUN_TEMP_PATHS="${ACTIVE_RUN_TEMP_PATHS}${ACTIVE_RUN_TEMP_PATHS:+$'\n'}$1"
+}
+
+# The one release point for a ticket run. It is safe to call from normal
+# completion, an error trap, a signal trap, or the watchdog that killed the
+# model process.
+post_run_cleanup() {
+  local mode="${1:-all}" had_errexit=no path
+  [ "$POST_RUN_CLEANING" = "no" ] || return 0
+  POST_RUN_CLEANING="yes"
+  case $- in *e*) had_errexit=yes ;; esac
+  set +e
+  if [ -n "$ACTIVE_RUN_DIR" ] && [ "$WORKDIR_MODE" = "per-run" ]; then
+    core_workdir_remove "$ACTIVE_RUN_SOURCE" "$ACTIVE_RUN_DIR" 2>>"$LOG"
+    ACTIVE_RUN_DIR=""
+    ACTIVE_RUN_SOURCE=""
+  fi
+  if [ "$mode" = "all" ]; then
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      case "$path" in
+        "$STATE_DIR"/*|"${TMPDIR:-/tmp}"/*) rm -rf -- "$path" ;;
+      esac
+    done <<< "$ACTIVE_RUN_TEMP_PATHS"
+    ACTIVE_RUN_TEMP_PATHS=""
+    ACTIVE_MODEL_WAIT_PID=""
+    ACTIVE_MODEL_PROCESS_GROUP=""
+  fi
+  POST_RUN_CLEANING="no"
+  [ "$had_errexit" = "yes" ] && set -e
+  return 0
+}
+
+interrupt_tick() {
+  local rc="$1"
+  trap - INT TERM
+  set +e
+  if [ -n "$ACTIVE_MODEL_WAIT_PID" ] && kill -0 "$ACTIVE_MODEL_WAIT_PID" 2>/dev/null; then
+    terminate_model_process "$ACTIVE_MODEL_WAIT_PID" "${ACTIVE_MODEL_PROCESS_GROUP:-$ACTIVE_MODEL_WAIT_PID}"
+  fi
+  post_run_cleanup
+  exit "$rc"
+}
+
+worktree_has_live_run() {
+  WORKTREE="$1" python3 - "$RUN_RECORD_DIR" <<'PYEOF'
+import json, os, pathlib, sys
+wanted = os.environ["WORKTREE"]
+for path in pathlib.Path(sys.argv[1]).glob("*.json"):
+    try:
+        row = json.load(open(path, encoding="utf-8"))
+        pid = int(row.get("pid") or 0)
+    except (OSError, ValueError, TypeError):
+        continue
+    workdir = str(row.get("workdir") or "")
+    if not workdir:
+        prefix = "%s-%s" % (row.get("slug") or "", row.get("ref") or "")
+        if pathlib.Path(wanted).name == prefix or pathlib.Path(wanted).name.startswith(prefix + "-"):
+            workdir = wanted
+    if row.get("status") != "running" or workdir != wanted or pid <= 0:
+        continue
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        continue
+    raise SystemExit(0)
+raise SystemExit(1)
+PYEOF
+}
+
+prune_kept_worktree_artifacts() {
+  find "$1" -type d \( -name node_modules -o -name .next -o -name dist -o -name build \) \
+    -prune -exec rm -rf -- {} + >/dev/null 2>&1 || true
+}
+
+sweep_stale_worktrees() {
+  local kept=0 dir
+  [ "$WORKDIR_MODE" = "per-run" ] && [ -d "$WORKDIR_ROOT" ] || { printf '0'; return 0; }
+  while IFS= read -r -d '' dir; do
+    worktree_has_live_run "$dir" && continue
+    core_workdir_remove "${AGENT_REPO:-}" "$dir" 2>>"$LOG"
+    if [ -e "$dir" ]; then
+      kept=$((kept + 1))
+      prune_kept_worktree_artifacts "$dir"
+    fi
+  done < <(find "$WORKDIR_ROOT" -mindepth 1 -maxdepth 1 -type d \
+    -mmin "+$CLEANUP_STALE_MINUTES" -print0 2>/dev/null)
+  git -C "${AGENT_REPO:-.}" worktree prune >/dev/null 2>&1 || true
+  printf '%s' "$kept"
+}
+
+cleanup_docker_once_daily() {
+  local marker_dir="$STATE_DIR/cleanup" marker="$STATE_DIR/cleanup/docker-$(date -u +%F)"
+  [ "$CLEANUP_DOCKER" = "yes" ] && command -v docker >/dev/null 2>&1 || return 0
+  mkdir -p "$marker_dir"
+  mkdir "$marker.lock" 2>/dev/null || return 0
+  if [ ! -f "$marker" ] \
+     && timeout 60 docker volume prune -f >/dev/null 2>&1 \
+     && timeout 60 docker image prune -f >/dev/null 2>&1; then
+    : > "$marker"
+  fi
+  rmdir "$marker.lock" 2>/dev/null || true
+}
+
+disk_stats() {
+  df -Pk "$1" 2>/dev/null | awk 'NR == 2 { value=$5; sub(/%$/, "", value); print value "\t" $4 "\t" $6 }'
+}
+
+update_disk_alarm() {
+  local active="$1" used="$2" mount="$3" key title description
+  [ "$DRY_RUN" = "no" ] || return 0
+  key="disk-$(printf '%s' "$mount" | sha256sum | cut -c1-12)"
+  title="Bug: agent host disk usage reached ${used}%"
+  description="<p><strong>The agent host filesystem is ${used}% full.</strong></p><p>The affected filesystem is recorded in the runner log.</p><p>New runs stop above 95% until cleanup frees space.</p>"
+  "$AGENT_PROGRESS" alarm --state-dir "$STATE_DIR" --board-cli "$BOARD_CLI" \
+    --token-file "$TOKEN_FILE" --key "$key" --runner "$SLUG" --active "$active" \
+    --title "$title" --description "$description" >>"$LOG" 2>&1 \
+    || log "disk alarm update failed at ${used}% used"
+}
+
+run_tick_cleanup() {
+  local disk_path before after mount kept freed
+  disk_path="${WORKDIR_ROOT:-${AGENT_REPO:-/}}"
+  while [ ! -e "$disk_path" ] && [ "$disk_path" != / ]; do disk_path="$(dirname "$disk_path")"; done
+  read -r DISK_USED_PERCENT before mount <<< "$(disk_stats "$disk_path")"
+  DISK_USED_PERCENT="${DISK_USED_PERCENT:-0}"
+  before="${before:-0}"
+  mount="${mount:-$disk_path}"
+  if [ "$DRY_RUN" = "yes" ]; then
+    kept=0
+  else
+    kept="$(sweep_stale_worktrees)"
+    cleanup_docker_once_daily
+  fi
+  read -r _ after _ <<< "$(disk_stats "$disk_path")"
+  after="${after:-$before}"
+  freed=$((after > before ? (after - before) / 1024 : 0))
+  log "cleanup: freed $freed MB, kept ${kept:-0} worktrees"
+  if [ "$DISK_USED_PERCENT" -gt 85 ]; then
+    update_disk_alarm yes "$DISK_USED_PERCENT" "$mount"
+  else
+    update_disk_alarm no "$DISK_USED_PERCENT" "$mount"
+  fi
+}
+
 report_board_health() {
   local board="$1" message="$2" health_ref
   health_ref="$(BOARD="$board" python3 - "$STATE_DIR/board-health.json" <<'PYEOF'
@@ -912,7 +1069,7 @@ write_run_record() {
     RECORD_BOARD="$board" RECORD_STARTED="$started_at" RECORD_PID="$$" RECORD_SLUG="$SLUG" \
     RECORD_AGENT="$AGENT_ID" RECORD_IN_PROGRESS="$IN_PROGRESS_SECTION" RECORD_OUTPUT="$output_file" \
     RECORD_REVIEW="$REVIEW_SECTION" RECORD_BLOCKED="$QA_BLOCKED_SECTION" RECORD_REASON="$reason" \
-    python3 - "$path" <<'PYEOF'
+    RECORD_WORKDIR="${RUN_DIR:-}" python3 - "$path" <<'PYEOF'
 import json, os, sys
 path = sys.argv[1]
 status = os.environ["RECORD_STATUS"]
@@ -943,6 +1100,8 @@ row.update({
 })
 if os.environ["RECORD_OUTPUT"]:
     row["output_file"] = os.environ["RECORD_OUTPUT"]
+if os.environ["RECORD_WORKDIR"]:
+    row["workdir"] = os.environ["RECORD_WORKDIR"]
 if os.environ["RECORD_REASON"]:
     row["reason"] = os.environ["RECORD_REASON"]
 elif status == "running":
@@ -1056,6 +1215,7 @@ watch_model_process() {
     fi
     if [ -n "$WATCHDOG_REASON" ]; then
       terminate_model_process "$wait_pid" "$process_group"
+      post_run_cleanup worktree
       break
     fi
     timeout "$poll_seconds" tail --pid="$wait_pid" -f -s 0.1 /dev/null 2>/dev/null
@@ -1103,8 +1263,9 @@ reply_contract_event() {
 finish_tick() {
   local rc=$? status_fields status_ticket status_at status_reason
   local -a progress_args
-  trap - EXIT
+  trap - EXIT ERR INT TERM
   set +e
+  post_run_cleanup
   if [ "$DRY_RUN" = "no" ]; then
     if [ -z "$PROGRESS_WAIT_STATE" ] && [ -s "$STATUS" ]; then
       status_fields="$(python3 - "$STATUS" <<'PYEOF'
@@ -1403,6 +1564,7 @@ run_reply_model() {
     printf 'reply runner could not create an empty working directory\n' > "$err_file"
     return 127
   }
+  register_run_temp "$reply_dir"
   chmod 0555 "$reply_dir"
   (
     cd "$reply_dir" || exit 127
@@ -1893,6 +2055,15 @@ fi
 # so replacing it would detach the metadata from the lock that protects it.
 : > "$LOCK"
 trap finish_tick EXIT
+trap 'post_run_cleanup' ERR
+trap 'interrupt_tick 130' INT
+trap 'interrupt_tick 143' TERM
+run_tick_cleanup
+if [ "$DISK_USED_PERCENT" -gt 95 ]; then
+  log "disk usage ${DISK_USED_PERCENT}%: no new run started above the 95% limit"
+  post_run_cleanup
+  exit 0
+fi
 
 MENTION="$(adapter_mention_token "$AGENT_ID")"
 answerer_agent_rows() {
@@ -1951,6 +2122,7 @@ if [ "$AGENT_KIND" = "qa" ]; then
 fi
 
 if run_advisor_instruction; then
+  post_run_cleanup
   exit 0
 fi
 check_maintainer_builds
@@ -2900,6 +3072,7 @@ if [ -n "$PR_GATE" ] && [ "$PR_GATE_ACTION" = "wait" ] && [ "$picked" -eq 0 ]; t
     *) log "waiting on PR #$PR_GATE_NUMBER: $PR_GATE_STATE" ;;
   esac
   [ "$DRY_RUN" = "no" ] || echo "waiting on PR #$PR_GATE_NUMBER: $PR_GATE_STATE; nothing was claimed."
+  post_run_cleanup
   exit 0
 fi
 
@@ -2945,6 +3118,7 @@ if [ "$DRY_RUN" = "yes" ]; then
     fi
   done
   echo "$picked ticket(s) would be picked up; nothing was started."
+  post_run_cleanup
   exit 0
 fi
 
@@ -3278,6 +3452,8 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
       write_failure_status "$ref" workdir "could not create a working directory under $WORKDIR_ROOT"
       continue
     }
+    ACTIVE_RUN_DIR="$RUN_DIR"
+    ACTIVE_RUN_SOURCE="${AGENT_REPO:-}"
   fi
 
   if [ "$is_pr_fix" = "yes" ]; then
@@ -3305,6 +3481,7 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
 
   ERRFILE="$STATE_DIR/$SLUG.stderr"
   RUN_OUTPUT="$RUN_OUTPUT_DIR/$SLUG-$ref.log"
+  register_run_temp "$ERRFILE"
   # Cleared before every run: the wrapper appends to it as this run posts
   # comments and moves, and only this run's own writes belong to the lifecycle
   # enforcement below once it finishes.
@@ -3332,7 +3509,7 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
     explain "claim-check $ref: skipped-because-gated ($claim_check_gate)"
   elif ! declare -F adapter_claimed_by_other >/dev/null 2>&1; then
     explain "claim-check $ref: error (adapter has no ownership re-read)"
-    [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+    post_run_cleanup
     continue
   else
     set +e
@@ -3341,12 +3518,12 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
     set -e
     if [ "$claim_check_rc" -ne 0 ]; then
       explain "claim-check $ref: error (could not re-read ticket)"
-      [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+      post_run_cleanup
       continue
     fi
     if [ -n "$claimant" ]; then
       explain "claim-check $ref: claimant $claimant"
-      [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+      post_run_cleanup
       continue
     fi
     explain "claim-check $ref: no claimant"
@@ -3358,13 +3535,13 @@ QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless 
       report_board_health "$board" "Run start could not assign $ref to $SLUG after two attempts."
       write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
       write_failure_status "$ref" assignment "could not assign the ticket before model invocation"
-      [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+      post_run_cleanup
       continue
     fi
     if ! move_ticket_or_report "$ref" "$IN_PROGRESS_SECTION" "$board" "run start"; then
       write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
       write_failure_status "$ref" move "could not move the ticket to $IN_PROGRESS_SECTION before model invocation"
-      [ "$WORKDIR_MODE" != "per-run" ] || core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
+      post_run_cleanup
       continue
     fi
   fi
@@ -3454,13 +3631,20 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
     FALLBACK_REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.fallback.html"
     LINKED_FALLBACK_FILE="$STATE_DIR/$SLUG-$ref.reply.fallback-linked.html"
     ERROR_FALLBACK_FILE="$STATE_DIR/$SLUG-$ref.reply.error-fallback.txt"
+    for reply_temp in "$REPLY_FILE" "$ORIGINAL_REPLY_FILE" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE" \
+      "$FALLBACK_REPLY_FILE" "$LINKED_FALLBACK_FILE" "$ERROR_FALLBACK_FILE"; do
+      register_run_temp "$reply_temp"
+    done
     rm -f "$ORIGINAL_REPLY_FILE" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE" \
       "$FALLBACK_REPLY_FILE" "$LINKED_FALLBACK_FILE" "$ERROR_FALLBACK_FILE"
     reply_posted=no
     shape_reason=""
     log "model route for $ref: $RUN_MODEL_RUNG ($RUN_MODEL_CLI; empty read-only workdir, 300s)"
-    run_reply_model "$PROMPT" "$REPLY_FILE" "$ERRFILE"
-    rc=$?
+    if run_reply_model "$PROMPT" "$REPLY_FILE" "$ERRFILE"; then
+      rc=0
+    else
+      rc=$?
+    fi
     if [ "$rc" -eq 0 ]; then
       cp "$REPLY_FILE" "$ORIGINAL_REPLY_FILE"
       if [ ! -s "$ORIGINAL_REPLY_FILE" ]; then
@@ -3482,8 +3666,11 @@ Return a non-empty HTML comment. Its first block must be <p>, its complete first
 
 Original draft, which must keep its meaning:
 $(cat "$ORIGINAL_REPLY_FILE")"
-      run_reply_model "$RETRY_PROMPT" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE"
-      retry_rc=$?
+      if run_reply_model "$RETRY_PROMPT" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE"; then
+        retry_rc=0
+      else
+        retry_rc=$?
+      fi
       retry_reason=""
       if [ "$retry_rc" -ne 0 ]; then
         retry_reason="reply retry exited $retry_rc"
@@ -3570,6 +3757,8 @@ $(cat "$ORIGINAL_REPLY_FILE")"
     mkdir -p "$ADVISOR_DIR"
     ADVISOR_CONTEXT="$ADVISOR_DIR/$SLUG-$ref.json"
     ADVISOR_COUNTER="$ADVISOR_DIR/$SLUG-$ref.count"
+    register_run_temp "$ADVISOR_CONTEXT"
+    register_run_temp "$ADVISOR_COUNTER"
     REF="$ref" URL="$url" TITLE="$title" DESCRIPTION="$description" TASK_ID="$task_id" \
     BOARD="$board" TOKEN_FILE="$TOKEN_FILE" BOARD_CLI="$BOARD_CLI" SLUG="$SLUG" \
     ADAPTER="$BOARD_ADAPTER" python3 -c '
@@ -3589,6 +3778,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       [ -n "$route_command" ] || continue
       route_count=$((route_count + 1))
       provider_err="$ERRFILE.provider-$route_count"
+      register_run_temp "$provider_err"
       : > "$provider_err"
       if ! core_command_available "$route_command"; then
         printf 'provider %s is configured but its command is not installed; skipping it\n' "$route_provider" >> "$provider_err"
@@ -3609,6 +3799,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         MODEL_ARGV=("${MODEL_ARGV[0]}" --mcp-config "$GRAFT_MCP_CONFIG" "${MODEL_ARGV[@]:1}")
       fi
       MODEL_PID_FILE="$RUN_OUTPUT_DIR/$SLUG-$ref-$route_count.pid"
+      register_run_temp "$MODEL_PID_FILE"
       rm -f "$MODEL_PID_FILE"
       (
         if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
@@ -3625,6 +3816,8 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
           bash "$MODEL_PID_FILE" "${MODEL_ARGV[@]}" "$PROMPT"
       ) >>"$RUN_OUTPUT" 2>"$provider_err" &
       model_wait_pid=$!
+      ACTIVE_MODEL_WAIT_PID="$model_wait_pid"
+      ACTIVE_MODEL_PROCESS_GROUP="$model_wait_pid"
       for _ in $(seq 1 100); do
         [ ! -s "$MODEL_PID_FILE" ] || break
         kill -0 "$model_wait_pid" 2>/dev/null || break
@@ -3635,9 +3828,16 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       else
         model_process_group="$model_wait_pid"
       fi
-      watch_model_process "$model_wait_pid" "$model_process_group" "$run_record" \
-        "$RUN_OUTPUT" "$provider_err" "$ref"
-      rc=$?
+      ACTIVE_MODEL_WAIT_PID="$model_wait_pid"
+      ACTIVE_MODEL_PROCESS_GROUP="$model_process_group"
+      if watch_model_process "$model_wait_pid" "$model_process_group" "$run_record" \
+        "$RUN_OUTPUT" "$provider_err" "$ref"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      ACTIVE_MODEL_WAIT_PID=""
+      ACTIVE_MODEL_PROCESS_GROUP=""
       rm -f "$MODEL_PID_FILE"
       cat "$provider_err" >> "$ERRFILE"
       if [ "$rc" -eq 0 ]; then
@@ -3877,9 +4077,7 @@ if rows:
     push_skill_commits "$ref" \
       || log "skill push commits step failed for $ref, continuing the tick"
   fi
-  if [ "$WORKDIR_MODE" = "per-run" ] && [ "$is_reply_only" = "no" ]; then
-    core_workdir_remove "${AGENT_REPO:-}" "$RUN_DIR" 2>>"$LOG" || true
-  fi
+  post_run_cleanup
 done
 
 log "tick finished: $picked eligible, $started started"

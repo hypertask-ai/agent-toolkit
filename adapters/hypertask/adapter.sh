@@ -2727,18 +2727,21 @@ adapter_workdir_checkout() {
 # failed to push it leaves evidence, not a hole.
 adapter_workdir_remove() {
   local source="$1" dir="$2"
+  if [ ! -e "$dir" ]; then
+    git -C "$source" worktree prune >/dev/null 2>&1 || true
+    return 0
+  fi
   if [ -d "$dir" ]; then
-    if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ]; then
-      printf 'the worktree %s has uncommitted changes, keeping it\n' "$dir" >&2
-      return 1
-    fi
-    # Commits reachable from HEAD that no remote-tracking ref holds.
-    if [ -n "$(git -C "$dir" log --oneline HEAD --not --remotes 2>/dev/null | head -1)" ]; then
-      printf 'the worktree %s holds commits no remote has, keeping it\n' "$dir" >&2
+    if [ -n "$(git -C "$dir" status --porcelain 2>/dev/null)" ] \
+       || [ -n "$(git -C "$dir" log --oneline HEAD --not --remotes 2>/dev/null | head -1)" ]; then
+      printf 'kept worktree %s: unpushed commits\n' "$dir" >&2
       return 1
     fi
   fi
-  git -C "$source" worktree remove --force "$dir" >/dev/null 2>&1 || true
+  if ! git -C "$source" worktree remove --force "$dir" >/dev/null 2>&1; then
+    printf 'kept worktree %s: git worktree remove failed\n' "$dir" >&2
+    return 1
+  fi
   git -C "$source" worktree prune >/dev/null 2>&1 || true
   return 0
 }
