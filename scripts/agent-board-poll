@@ -446,6 +446,7 @@ PROGRESS_ELIGIBLE_COUNT=0
 PROGRESS_ELIGIBLE_TICKET=""
 PROGRESS_ELIGIBLE_URL=""
 PROGRESS_COLLECTION_COMPLETE="no"
+RECONCILED_REFS=""
 touch "$SEEN" "$ATTEMPTS" "$POSTED" "$MOVED" "$OPENED_PRS" "$RELEASED_PRS" "$RUNS" "$OWNER_CLASSIFICATIONS"
 
 owner_classification_state() {
@@ -923,11 +924,16 @@ post_run_cleanup() {
 }
 
 interrupt_tick() {
-  local rc="$1"
+  local rc="$1" interrupted_dir="$ACTIVE_RUN_DIR"
   trap - INT TERM
   set +e
   if [ -n "$ACTIVE_MODEL_WAIT_PID" ] && kill -0 "$ACTIVE_MODEL_WAIT_PID" 2>/dev/null; then
     terminate_model_process "$ACTIVE_MODEL_WAIT_PID" "${ACTIVE_MODEL_PROCESS_GROUP:-$ACTIVE_MODEL_WAIT_PID}"
+  fi
+  if [ -n "$interrupted_dir" ] && [ "$WORKDIR_MODE" = "per-run" ]; then
+    log "interrupted run kept worktree $interrupted_dir for dead-run reconciliation"
+    ACTIVE_RUN_DIR=""
+    ACTIVE_RUN_SOURCE=""
   fi
   post_run_cleanup
   exit "$rc"
@@ -948,7 +954,11 @@ for path in pathlib.Path(sys.argv[1]).glob("*.json"):
         prefix = "%s-%s" % (row.get("slug") or "", row.get("ref") or "")
         if pathlib.Path(wanted).name == prefix or pathlib.Path(wanted).name.startswith(prefix + "-"):
             workdir = wanted
-    if row.get("status") != "running" or workdir != wanted or pid <= 0:
+    if workdir != wanted:
+        continue
+    if row.get("keep_worktree") is True:
+        raise SystemExit(0)
+    if row.get("status") != "running" or pid <= 0:
         continue
     try:
         os.kill(pid, 0)
@@ -957,6 +967,208 @@ for path in pathlib.Path(sys.argv[1]).glob("*.json"):
     raise SystemExit(0)
 raise SystemExit(1)
 PYEOF
+}
+
+dead_run_reason() {
+  python3 - "$1" <<'PYEOF'
+import json, pathlib, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+    pid = int(row.get("pid") or 0)
+except (OSError, TypeError, ValueError):
+    raise SystemExit
+if row.get("status") != "running":
+    raise SystemExit
+if pid <= 0:
+    print("pid is missing")
+    raise SystemExit
+proc = pathlib.Path("/proc") / str(pid)
+try:
+    stat = (proc / "stat").read_text(encoding="utf-8")
+except OSError:
+    print("pid is not running")
+    raise SystemExit
+fields = stat.rsplit(")", 1)[-1].split()
+if not fields or fields[0] == "Z":
+    print("pid is not running")
+    raise SystemExit
+start_ticks = fields[19] if len(fields) > 19 else ""
+expected_start = str(row.get("pid_start_ticks") or "")
+if expected_start and start_ticks != expected_start:
+    print("pid belongs to a different command")
+    raise SystemExit
+try:
+    argv = [part.decode("utf-8", "replace") for part in (proc / "cmdline").read_bytes().split(b"\0") if part]
+except OSError:
+    argv = []
+command = " ".join(argv)
+expected_command = str(row.get("pid_command") or "")
+if expected_command:
+    if command != expected_command:
+        print("pid belongs to a different command")
+else:
+    slug = str(row.get("slug") or "")
+    if not any("agent-board-poll" in part for part in argv) or (slug and slug not in argv):
+        print("pid belongs to a different command")
+PYEOF
+}
+
+run_record_reconciliation_action() {
+  python3 - "$RUN_RECORD_DIR/$SLUG-$1.json" <<'PYEOF'
+import json, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+print(row.get("reconciliation_action") or "")
+PYEOF
+}
+
+has_recorded_pr_binding() {
+  REF="$1" python3 - "$BLOCKED" <<'PYEOF'
+import json, os, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    raise SystemExit(1)
+wanted = os.environ["REF"].casefold()
+refs = [str(row.get("ticket") or "")]
+refs.extend(str(item.get("ticket") or "") for item in row.get("prs") or [] if isinstance(item, dict))
+raise SystemExit(0 if any(ref.casefold() == wanted for ref in refs) else 1)
+PYEOF
+}
+
+preserve_dead_run_worktree() {
+  local workdir="$1" started_at="$2" reason="$3"
+  [ -d "$workdir" ] || return 0
+  printf 'Run %s died (%s). This worktree is preserved for inspection.\n' \
+    "$started_at" "$reason" > "$workdir/.agent-run-preserved"
+}
+
+mark_dead_run_reconciled() {
+  RECORD_REASON="$2" RECORD_DEATH_COUNT="$3" RECORD_ACTION="$4" RECORD_WORKDIR="$5" \
+    python3 - "$1" <<'PYEOF'
+import datetime, json, os, sys
+path = sys.argv[1]
+row = json.load(open(path, encoding="utf-8"))
+row.update({
+    "status": "reconciled",
+    "reason": os.environ["RECORD_REASON"],
+    "death_count": int(os.environ["RECORD_DEATH_COUNT"]),
+    "reconciled_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "reconciliation_action": os.environ["RECORD_ACTION"],
+    "keep_worktree": True,
+})
+if os.environ["RECORD_WORKDIR"]:
+    row["workdir"] = os.environ["RECORD_WORKDIR"]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+}
+
+raise_dead_run_alarm() {
+  local ref="$1" started_at="$2" reason="$3" key title description
+  key="dead-run-$SLUG-$ref"
+  title="Bug: $ref runner died twice"
+  description="<p><strong>$ref had two runner processes die before they completed.</strong></p><p>The latest run started at $started_at and died because $reason.</p><p>The worktree path remains in the runner log for inspection.</p>"
+  "$AGENT_PROGRESS" alarm --state-dir "$STATE_DIR" --board-cli "$BOARD_CLI" \
+    --token-file "$TOKEN_FILE" --key "$key" --runner "$SLUG" --active yes \
+    --title "$title" --description "$description" >>"$LOG" 2>&1
+}
+
+reconcile_dead_runs() {
+  local record reason fields ref board origin started_at workdir run_kind task_id deaths record_agent
+  local row protection owner_state owner_state_classification intake comment_file action
+  for record in "$RUN_RECORD_DIR/$SLUG-"*.json; do
+    [ -f "$record" ] || continue
+    reason="$(dead_run_reason "$record")"
+    [ -n "$reason" ] || continue
+    fields="$(python3 - "$record" <<'PYEOF'
+import json, sys
+row = json.load(open(sys.argv[1], encoding="utf-8"))
+for key in ("ref", "board", "origin_section", "started_at", "workdir", "run_kind", "task_id", "death_count", "agent_id"):
+    print(row.get(key) or "")
+PYEOF
+)"
+    { IFS= read -r ref; IFS= read -r board; IFS= read -r origin; IFS= read -r started_at; \
+      IFS= read -r workdir; IFS= read -r run_kind; IFS= read -r task_id; IFS= read -r deaths; \
+      IFS= read -r record_agent; } <<< "$fields"
+    [ -n "$ref" ] && [ -n "$board" ] || { log "dead run record $record is missing its ticket or board"; continue; }
+    deaths=$(( ${deaths:-0} + 1 ))
+    [ -n "$workdir" ] || workdir="${WORKDIR_ROOT:+$WORKDIR_ROOT/$SLUG-$ref}"
+    RECONCILED_REFS="${RECONCILED_REFS}${RECONCILED_REFS:+$'\n'}$ref"
+    if [ "$DRY_RUN" = "yes" ]; then
+      explain "skip  $ref: run $started_at died ($reason); would reconcile before ranking"
+      continue
+    fi
+    preserve_dead_run_worktree "$workdir" "$started_at" "$reason"
+    if [ "$deaths" -ge 2 ]; then
+      if raise_dead_run_alarm "$ref" "$started_at" "$reason"; then
+        action="alarm"
+        mark_dead_run_reconciled "$record" "$reason" "$deaths" "$action" "$workdir"
+        log "dead run $ref at $started_at: $reason; alarm raised after death $deaths${workdir:+; kept worktree $workdir}"
+      else
+        log "dead run $ref at $started_at: alarm failed; reconciliation will retry next tick"
+      fi
+      continue
+    fi
+    row="$(adapter_list_candidates "$TOKEN_FILE" "$board" "*" 2>>"$LOG" | REF="$ref" python3 -c '
+import json, os, sys
+for line in sys.stdin:
+    try:
+        row = json.loads(line)
+    except ValueError:
+        continue
+    if str(row.get("ref") or "").casefold() == os.environ["REF"].casefold():
+        print(json.dumps(row))
+        break
+')"
+    [ -n "$row" ] || { log "dead run $ref could not be reconciled: ticket state is unavailable"; continue; }
+    protection="$(qa_protection_reason "$row" "$board")"
+    owner_state="$(owner_classification_state "$board" "$ref")"
+    read -r _ owner_state_classification <<< "$owner_state"
+    if [ -n "$protection" ] || [ "${owner_state_classification:-}" = "hold" ]; then
+      action="owner-hold"
+      mark_dead_run_reconciled "$record" "$reason" "$deaths" "$action" "$workdir"
+      log "dead run $ref at $started_at: $reason; owner hold preserved${workdir:+; kept worktree $workdir}"
+      continue
+    fi
+    if [ "$run_kind" = "pr-fix" ] || has_recorded_pr_binding "$ref"; then
+      action="pr-binding"
+      mark_dead_run_reconciled "$record" "$reason" "$deaths" "$action" "$workdir"
+      log "dead fix-round run $ref at $started_at: $reason; PR binding preserved${workdir:+; kept worktree $workdir}"
+      continue
+    fi
+    intake="$(qa_config_field "$board" fail_section)"
+    if [ -z "$intake" ]; then
+      log "dead run $ref could not be reconciled: board $board has no intake column"
+      continue
+    fi
+    if ! adapter_unassign_task "$BOARD_CLI" "$ref" "${record_agent:-$AGENT_ID}" >>"$LOG" 2>&1; then
+      report_board_health "$board" "Dead run reconciliation could not unassign $ref from $SLUG."
+      continue
+    fi
+    move_ticket_or_report "$ref" "$intake" "$board" "dead run reconciliation" || continue
+    comment_file="$(mktemp "$STATE_DIR/.dead-run-comment.XXXXXX")"
+    STARTED_AT="$started_at" REASON="$reason" python3 - "$comment_file" <<'PYEOF'
+import html, os, sys
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    handle.write("<p>Run %s died (%s); requeued</p>\n" % (
+        html.escape(os.environ["STARTED_AT"]), html.escape(os.environ["REASON"])))
+PYEOF
+    if ! post_ticket_comment "$ref" raw-file "$comment_file"; then
+      rm -f "$comment_file"
+      report_board_health "$board" "Dead run reconciliation requeued $ref, but its comment could not be posted."
+      continue
+    fi
+    rm -f "$comment_file"
+    action="requeued"
+    mark_dead_run_reconciled "$record" "$reason" "$deaths" "$action" "$workdir"
+    log "dead run $ref at $started_at: $reason; requeued to $intake${workdir:+; kept worktree $workdir}"
+  done
 }
 
 prune_kept_worktree_artifacts() {
@@ -1064,12 +1276,15 @@ move_ticket_or_report() {
 
 write_run_record() {
   local path="$1" status="$2" origin="$3" ref="$4" task_id="$5" board="$6" started_at="$7"
-  local output_file="${8:-}" reason="${9:-}"
+  local output_file="${8:-}" reason="${9:-}" run_kind="${10:-ticket}" pid_start pid_command
+  pid_start="$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null || true)"
+  pid_command="$(tr '\0' ' ' < "/proc/$$/cmdline" 2>/dev/null || true)"
   RECORD_STATUS="$status" RECORD_ORIGIN="$origin" RECORD_REF="$ref" RECORD_TASK="$task_id" \
     RECORD_BOARD="$board" RECORD_STARTED="$started_at" RECORD_PID="$$" RECORD_SLUG="$SLUG" \
     RECORD_AGENT="$AGENT_ID" RECORD_IN_PROGRESS="$IN_PROGRESS_SECTION" RECORD_OUTPUT="$output_file" \
     RECORD_REVIEW="$REVIEW_SECTION" RECORD_BLOCKED="$QA_BLOCKED_SECTION" RECORD_REASON="$reason" \
-    RECORD_WORKDIR="${RUN_DIR:-}" python3 - "$path" <<'PYEOF'
+    RECORD_WORKDIR="${RUN_DIR:-}" RECORD_RUN_KIND="$run_kind" RECORD_PID_START="$pid_start" \
+    RECORD_PID_COMMAND="$pid_command" python3 - "$path" <<'PYEOF'
 import json, os, sys
 path = sys.argv[1]
 status = os.environ["RECORD_STATUS"]
@@ -1085,7 +1300,7 @@ else:
                 "last_qa_failure_id", "second_opinion", "second_opinion_at",
                 "second_opinion_round", "consecutive_infra_errors",
                 "last_infra_error", "last_infra_error_at", "revert_guard_head",
-                "revert_guard_verdict", "revert_guard_verdict_at"):
+                "revert_guard_verdict", "revert_guard_verdict_at", "death_count"):
         if key in prior:
             row[key] = prior[key]
 row.update({
@@ -1096,6 +1311,8 @@ row.update({
     "in_progress_section": os.environ["RECORD_IN_PROGRESS"],
     "review_section": os.environ["RECORD_REVIEW"], "blocked_section": os.environ["RECORD_BLOCKED"],
     "started_at": os.environ["RECORD_STARTED"],
+    "run_kind": os.environ["RECORD_RUN_KIND"] if status == "running" else row.get("run_kind", os.environ["RECORD_RUN_KIND"]),
+    "pid_start_ticks": os.environ["RECORD_PID_START"], "pid_command": os.environ["RECORD_PID_COMMAND"],
     "last_output_at": row.get("last_output_at") or os.environ["RECORD_STARTED"],
     "waiting_on_pr": bool(row.get("waiting_on_pr")),
     "wait_state": row.get("wait_state"),
@@ -2060,6 +2277,12 @@ trap finish_tick EXIT
 trap 'post_run_cleanup' ERR
 trap 'interrupt_tick 130' INT
 trap 'interrupt_tick 143' TERM
+QA_BOARD_CONFIG=""
+if declare -F adapter_qa_board_config >/dev/null 2>&1; then
+  QA_BOARD_CONFIG="$(adapter_qa_board_config "$BOARD_CLI" "$BOARD_ID" \
+    "$QA_FAIL_SECTION" "$QA_BLOCKED_SECTION" 2>>"$LOG")" || QA_BOARD_CONFIG=""
+fi
+reconcile_dead_runs
 run_tick_cleanup
 if [ "$DISK_USED_PERCENT" -gt 95 ]; then
   log "disk usage ${DISK_USED_PERCENT}%: no new run started above the 95% limit"
@@ -2099,11 +2322,6 @@ if [ "$DRY_RUN" = "yes" ]; then
   echo "$SKILLS_LINE"
 fi
 
-QA_BOARD_CONFIG=""
-if declare -F adapter_qa_board_config >/dev/null 2>&1; then
-  QA_BOARD_CONFIG="$(adapter_qa_board_config "$BOARD_CLI" "$BOARD_ID" \
-    "$QA_FAIL_SECTION" "$QA_BLOCKED_SECTION" 2>>"$LOG")" || QA_BOARD_CONFIG=""
-fi
 if [ "$AGENT_KIND" = "qa" ]; then
   declare -F adapter_qa_board_config >/dev/null 2>&1 || die \
     "adapter $BOARD_ADAPTER cannot resolve QA lifecycle columns" \
@@ -2784,11 +3002,20 @@ while IFS= read -r row; do
     adapter_mark_tick_candidate "$task_id" "$row_board"
   fi
   ref="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["ref"])')"
+  if printf '%s\n' "$RECONCILED_REFS" | grep -qxF "$ref"; then
+    explain "skip  $ref: its dead run was reconciled before this ranking pass"
+    continue
+  fi
   title="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["title"])')"
   url="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["url"])')"
   section="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["section"])')"
   description="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["description"])')"
   assigned="$(ROW="$row" AID="$AGENT_ID" python3 -c 'import json,os;print("yes" if os.environ["AID"] in json.loads(os.environ["ROW"])["agent_ids"] else "no")')"
+  if [ "$assigned" = "yes" ] && [ "${section,,}" = "${IN_PROGRESS_SECTION,,}" ] \
+     && [ "$(run_record_reconciliation_action "$ref")" = "alarm" ]; then
+    explain "skip  $ref: two dead runs raised an alarm, so a third run needs intervention"
+    continue
+  fi
   trigger="$(row_field "$row" trigger)"
   is_pr_fix="no"
   [ "$trigger" = "pr_fix" ] && is_pr_fix="yes"
@@ -3833,7 +4060,8 @@ Second-opinion verdict: $REVERT_GUARD_DIAGNOSIS"
   fi
   record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
   if [ "$is_reply_only" = "no" ]; then
-    write_run_record "$run_record" running "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
+    [ "$is_pr_fix" = "yes" ] && run_kind="pr-fix" || run_kind="ticket"
+    write_run_record "$run_record" running "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT" "" "$run_kind"
     if [ "$atomic_claim" != "yes" ] \
        && ! adapter_assign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
       report_board_health "$board" "Run start could not assign $ref to $SLUG after two attempts."
