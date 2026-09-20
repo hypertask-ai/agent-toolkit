@@ -1,0 +1,1 @@
+- AGTE-157 keeps stdout-silent runs alive while runner stderr, CPU time, or worktree files continue changing.

@@ -1407,30 +1407,73 @@ terminate_model_process() {
   fi
 }
 
+model_output_marker() {
+  stat -c '%n:%Y:%s' "$@" 2>/dev/null || true
+}
+
+model_cpu_ticks() {
+  python3 - "$1" <<'PYEOF'
+import os, sys
+process_group = int(sys.argv[1])
+ticks = 0
+for name in os.listdir("/proc"):
+    if not name.isdigit():
+        continue
+    try:
+        stat = open(f"/proc/{name}/stat", encoding="utf-8").read()
+        fields = stat[stat.rfind(")") + 2:].split()
+        if int(fields[2]) == process_group or int(fields[3]) == process_group:
+            ticks += sum(int(fields[index]) for index in (11, 12, 13, 14))
+    except (OSError, ValueError, IndexError):
+        continue
+print(ticks)
+PYEOF
+}
+
+worktree_activity_marker() {
+  [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ] || return 0
+  { find "$RUN_DIR" -path "$RUN_DIR/.git" -prune -o -printf '%T@\n' 2>/dev/null || true; } \
+    | sort -nr | sed -n '1p'
+}
+
 watch_model_process() {
   local wait_pid="$1" process_group="$2" record="$3" output_file="$4" error_file="$5" ref="$6"
-  local poll_seconds now output_epoch silent_seconds run_seconds wait_state process_state monitor_rc rc
+  local poll_seconds now idle_seconds run_seconds wait_state process_state monitor_rc rc
+  local output_marker cpu_ticks worktree_marker last_output_marker last_cpu_ticks last_worktree_marker last_activity_epoch
   WATCHDOG_REASON=""
   poll_seconds="$RUN_STALL_SECONDS"
   [ "$RUN_MAX_SECONDS" -ge "$poll_seconds" ] || poll_seconds="$RUN_MAX_SECONDS"
   [ "$poll_seconds" -le 30 ] || poll_seconds=30
+  last_activity_epoch="$(date +%s)"
+  last_output_marker="$(model_output_marker "$output_file" "$error_file")"
+  last_cpu_ticks="$(model_cpu_ticks "$process_group")"
+  last_worktree_marker="$(worktree_activity_marker)"
   while kill -0 "$wait_pid" 2>/dev/null; do
     process_state="$(ps -o stat= -p "$wait_pid" 2>/dev/null | tr -d ' ')"
     [[ "$process_state" != Z* ]] || break
     now="$(date +%s)"
-    output_epoch="$(stat -c %Y "$output_file" "$error_file" 2>/dev/null | sort -nr | head -1)"
-    output_epoch="${output_epoch:-$now}"
-    silent_seconds=$((now - output_epoch))
+    output_marker="$(model_output_marker "$output_file" "$error_file")"
+    cpu_ticks="$(model_cpu_ticks "$process_group")"
+    worktree_marker="$(worktree_activity_marker)"
+    if [ "$output_marker" != "$last_output_marker" ] \
+        || [ "$cpu_ticks" != "$last_cpu_ticks" ] \
+        || [ "$worktree_marker" != "$last_worktree_marker" ]; then
+      last_activity_epoch="$now"
+    fi
+    last_output_marker="$output_marker"
+    last_cpu_ticks="$cpu_ticks"
+    last_worktree_marker="$worktree_marker"
+    idle_seconds=$((now - last_activity_epoch))
     run_seconds=$((now - run_started_epoch))
     wait_state=""
-    if [ "$run_seconds" -ge "$RUN_MAX_SECONDS" ] || [ "$silent_seconds" -ge "$RUN_STALL_SECONDS" ]; then
+    if [ "$run_seconds" -ge "$RUN_MAX_SECONDS" ] || [ "$idle_seconds" -ge "$RUN_STALL_SECONDS" ]; then
       wait_state="$(run_waiting_state "$ref")"
     fi
     update_run_record_activity "$record" "$output_file" "$error_file" "$process_group" "$wait_state"
     if [ -z "$wait_state" ] && [ "$run_seconds" -ge "$RUN_MAX_SECONDS" ]; then
       WATCHDOG_REASON="watchdog: over max run time"
-    elif [ -z "$wait_state" ] && [ "$silent_seconds" -ge "$RUN_STALL_SECONDS" ]; then
-      WATCHDOG_REASON="watchdog: no output for $(( (silent_seconds + 59) / 60 )) min"
+    elif [ -z "$wait_state" ] && [ "$idle_seconds" -ge "$RUN_STALL_SECONDS" ]; then
+      WATCHDOG_REASON="watchdog: no activity for $(( (idle_seconds + 59) / 60 )) min"
     fi
     if [ -n "$WATCHDOG_REASON" ]; then
       terminate_model_process "$wait_pid" "$process_group"

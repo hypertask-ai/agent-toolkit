@@ -80,7 +80,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `RETRY_LIMIT` | Total failed attempts allowed per window. By default this is three plus the number of `LADDER` commands. |
 | `RETRY_WINDOW_SECONDS` | Failure window, default 21600. |
 | `RUN_COOLDOWN_SECONDS` | Minimum seconds between runs of one ticket without a new external comment, default 1800. |
-| `RUN_STALL_SECONDS` | Maximum seconds a model process may produce no output before the watchdog stops it, default 1200. Runs waiting on their own PR checks are exempt. |
+| `RUN_STALL_SECONDS` | Maximum seconds a model process may show no stdout, stderr, CPU-time, or worktree activity before the watchdog stops it, default 1200. Runs waiting on their own PR checks are exempt. |
 | `RUN_MAX_SECONDS` | Maximum model process lifetime before the watchdog stops it, default 5400. Runs waiting on their own PR checks are exempt. |
 | `WORKDIR_MODE` | `repo` uses `AGENT_REPO`; `per-run` creates an isolated worktree and removes it after every run unless it contains unpushed work. Defaults to `repo`. |
 | `WORKDIR_ROOT` | Absolute parent directory for isolated worktrees. Required with `WORKDIR_MODE=per-run`. |

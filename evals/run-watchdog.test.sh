@@ -59,6 +59,23 @@ case "${MOCK_MODEL_MODE:-stall}" in
     trap 'touch "$MOCK_MODEL_TERM"; exit 143' TERM
     while :; do printf 'working\n'; sleep 0.2; done
     ;;
+  stderr)
+    for _ in $(seq 1 15); do printf 'progress\r' >&2; sleep 0.2; done
+    touch "$MOCK_MODEL_DONE"
+    ;;
+  cpu)
+    python3 - <<'PYEOF'
+import time
+end = time.monotonic() + 3
+while time.monotonic() < end:
+    pass
+PYEOF
+    touch "$MOCK_MODEL_DONE"
+    ;;
+  worktree)
+    for _ in $(seq 1 15); do touch "$MOCK_WORKTREE_FILE"; sleep 0.2; done
+    touch "$MOCK_MODEL_DONE"
+    ;;
 esac
 EOF
 cat > "$TMP/bin/hypertask" <<'EOF'
@@ -132,7 +149,7 @@ FLEET_PROGRESS_SUPERVISOR="off"
 EOF
 
 reset_case() {
-  rm -rf "$TMP/state"; mkdir -p "$TMP/state"
+  rm -rf "$TMP/state" "$TMP/repo"; mkdir -p "$TMP/state" "$TMP/repo"
   : > "$TMP/board.log"
   rm -f "$TMP/model-term" "$TMP/model-done"
   cat > "$TMP/tasks.json" <<'EOF'
@@ -145,21 +162,38 @@ run_tick() {
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_TASKS="$TMP/tasks.json" \
     ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_TERM="$TMP/model-term" \
-    MOCK_MODEL_DONE="$TMP/model-done" "$@" "$RUNNER" --once --explain dev
+    MOCK_MODEL_DONE="$TMP/model-done" MOCK_WORKTREE_FILE="$TMP/repo/progress" \
+    "$@" "$RUNNER" --once --explain dev
 }
 
 reset_case
 run_tick MOCK_MODEL_MODE=stall >"$TMP/stall.out" 2>&1
 record="$TMP/state/agent-board-poll/run-records/dev-TEST-1.json"
 if [ -f "$TMP/model-term" ] \
-   && [ "$(grep -c '^comment .*watchdog: no output for 1 min' "$TMP/board.log")" -eq 1 ] \
+   && [ "$(grep -c '^comment .*watchdog: no activity for 1 min' "$TMP/board.log")" -eq 1 ] \
    && grep -qxF 'unassign TEST-1 agent-dev' "$TMP/board.log" \
    && grep -qxF 'move TEST-1 Backlog' "$TMP/board.log" \
-   && RECORD="$record" python3 -c 'import json,os,sys; r=json.load(open(os.environ["RECORD"])); sys.exit(0 if r["status"]=="FAILED" and r["reason"]=="watchdog: no output for 1 min" and r.get("last_output_at") else 1)'; then
-  printf 'PASS %-36s %s\n' stalled-run-watchdog 'silent model is terminated, recorded, commented once, unassigned, and restored'
+   && RECORD="$record" python3 -c 'import json,os,sys; r=json.load(open(os.environ["RECORD"])); sys.exit(0 if r["status"]=="FAILED" and r["reason"]=="watchdog: no activity for 1 min" and r.get("last_output_at") else 1)'; then
+  printf 'PASS %-36s %s\n' stalled-run-watchdog 'inactive model is terminated, recorded, commented once, unassigned, and restored'
 else
   echo "FAIL stalled-run-watchdog log=$(cat "$TMP/board.log") record=$(cat "$record" 2>/dev/null) output=$(cat "$TMP/stall.out")"; exit 1
 fi
+
+run_liveness_case() {
+  local mode="$1" label="$2" description="$3"
+  reset_case
+  run_tick MOCK_MODEL_MODE="$mode" >"$TMP/$mode.out" 2>&1
+  if [ -f "$TMP/model-done" ] && [ ! -f "$TMP/model-term" ] \
+      && ! grep -q 'watchdog: no activity' "$TMP/board.log"; then
+    printf 'PASS %-36s %s\n' "$label" "$description"
+  else
+    echo "FAIL $label log=$(cat "$TMP/board.log") output=$(cat "$TMP/$mode.out")"; exit 1
+  fi
+}
+
+run_liveness_case stderr stderr-progress-liveness 'stderr progress keeps a stdout-silent model alive'
+run_liveness_case cpu cpu-time-liveness 'process-group CPU time keeps a silent model alive'
+run_liveness_case worktree worktree-change-liveness 'worktree changes keep a silent model alive'
 
 sed -i 's/RUN_STALL_SECONDS="1"/RUN_STALL_SECONDS="10"/; s/RUN_MAX_SECONDS="30"/RUN_MAX_SECONDS="2"/' "$TMP/config/dev.conf"
 reset_case
