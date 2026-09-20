@@ -1846,6 +1846,68 @@ raise SystemExit(1)
   return 1
 }
 
+# adapter_claim <token-file> <board-cli> <board> <ref> <agent-id>
+# Prints "held" when this agent owns the claim, or "backoff<TAB>reason" when
+# another agent owns it. Errors fail closed with no result.
+adapter_claim() {
+  local token_file="$1" board_cli="$2" board="$3" ref="$4" agent_id="$5"
+  local jitter settle task assignees other winner winner_name
+  jitter="${ADAPTER_CLAIM_TEST_JITTER_SECONDS:-$((RANDOM % 5 + 1))}"
+  settle="${ADAPTER_CLAIM_TEST_SETTLE_SECONDS:-2}"
+  [[ "$jitter" =~ ^[0-9]+$ ]] && [[ "$settle" =~ ^[0-9]+$ ]] || return 1
+  sleep "$jitter"
+
+  task="$(_ht_get "$token_file" "/mcp/tasks?ticket_number=${ref}")" || return 1
+  assignees="$(TASK="$task" BOARD="$board" REF="$ref" python3 -c '
+import json, os
+rows = json.loads(os.environ["TASK"]).get("tasks") or []
+task = next((row for row in rows
+             if str(row.get("ticketNumber") or "").casefold() == os.environ["REF"].casefold()
+             and str(row.get("projectId") or os.environ["BOARD"]) == os.environ["BOARD"]), None)
+if task is None:
+    raise SystemExit(1)
+for who in task.get("assignees") or []:
+    agent = who.get("agent") if isinstance(who, dict) else None
+    if isinstance(agent, dict) and agent.get("id"):
+        print("%s\t%s" % (agent["id"], agent.get("displayName") or agent.get("name") or agent["id"]))
+')" || return 1
+  other="$(printf '%s\n' "$assignees" | awk -F '\t' -v aid="$agent_id" '$1 != "" && $1 != aid { print $2; exit }')"
+  if [ -n "$other" ]; then
+    printf 'backoff\talready claimed by %s' "$other"
+    return 0
+  fi
+
+  adapter_assign_task "$board_cli" "$ref" "$agent_id" >/dev/null || return 1
+  sleep "$settle"
+  task="$(_ht_get "$token_file" "/mcp/tasks?ticket_number=${ref}")" || return 1
+  assignees="$(TASK="$task" BOARD="$board" REF="$ref" python3 -c '
+import json, os
+rows = json.loads(os.environ["TASK"]).get("tasks") or []
+task = next((row for row in rows
+             if str(row.get("ticketNumber") or "").casefold() == os.environ["REF"].casefold()
+             and str(row.get("projectId") or os.environ["BOARD"]) == os.environ["BOARD"]), None)
+if task is None:
+    raise SystemExit(1)
+for who in task.get("assignees") or []:
+    agent = who.get("agent") if isinstance(who, dict) else None
+    if isinstance(agent, dict) and agent.get("id"):
+        print("%s\t%s" % (agent["id"], agent.get("displayName") or agent.get("name") or agent["id"]))
+')" || return 1
+  printf '%s\n' "$assignees" | awk -F '\t' -v aid="$agent_id" '$1 == aid { found=1 } END { exit !found }' \
+    || return 1
+  other="$(printf '%s\n' "$assignees" | awk -F '\t' -v aid="$agent_id" '$1 != "" && $1 != aid { print $1; exit }')"
+  if [ -n "$other" ]; then
+    winner="$(printf '%s\n' "$assignees" | awk -F '\t' '$1 != "" { print $1 }' | LC_ALL=C sort | head -n1)"
+    if [ "$winner" != "$agent_id" ]; then
+      winner_name="$(printf '%s\n' "$assignees" | awk -F '\t' -v winner="$winner" '$1 == winner { print $2; exit }')"
+      adapter_unassign_task "$board_cli" "$ref" "$agent_id" >/dev/null || return 1
+      printf 'backoff\tlost deterministic tie-break to %s' "${winner_name:-$winner}"
+      return 0
+    fi
+  fi
+  printf 'held'
+}
+
 # adapter_current_section <board-cli> <ref>
 adapter_current_section() {
   local board_cli="$1" ref="$2" task
@@ -2757,7 +2819,7 @@ adapter_workdir_remove() {
 #                    <description> <latest-comment>
 adapter_run_prompt() {
   local skills_index="$1" agent_name="$2" board_cli="$3" ref="$4" url="$5"
-  local title="$6" description="$7" latest="$8" why="${9:-}" finish_contract
+  local title="$6" description="$7" latest="$8" why="${9:-}" finish_contract claim_contract
   if [ "${MAINTAINER:-off}" = "on" ]; then
     IFS= read -r -d '' finish_contract <<'EOF' || true
 FINISH IT AS THE SETUP MAINTAINER. A ticket asking for an allowlisted merge, release, update, or build is direct maintainer work:
@@ -2788,6 +2850,11 @@ EOF
   local primary="${SKILLS_INDEX_PRIMARY:-$skills_index}"
   local route_sh="$(dirname "$primary")/ticket-lifecycle/scripts/route.sh"
   local claim_sh="$(dirname "$primary")/ticket-lifecycle/scripts/claim-ticket.sh"
+  if [ "${AGENT_KIND:-dev}" = "dev" ]; then
+    claim_contract="The runner already won the claim, posted Claimed., and moved $ref to the working column. Do not claim it again."
+  else
+    claim_contract="Claim the ticket with \`$claim_sh $ref\` before you write any code. Never assign userId 6: only Valentin assigns Valentin."
+  fi
   if [ "${AGENT_KIND:-dev}" = "qa" ]; then
     cat <<EOF
 You are $agent_name. Verify one ticket, $ref, and do not change its implementation.
@@ -2825,8 +2892,7 @@ names them. It resolves a skill against both packs, so the paths it prints are
 real. The indexes are the fallback only if it prints NO_ROUTE: read
 $skills_index, in that order, company pack before your own.
 
-Claim the ticket with \`$claim_sh $ref\` before you write any code. Never
-assign userId 6: only Valentin assigns Valentin.
+$claim_contract
 
 $finish_contract
 
@@ -2837,9 +2903,10 @@ only when a human must answer; name what you need and end it with a question
 mark. Start one with \`Answer:\` when replying to a direct owner question or
 mention. Start one with \`Decision:\` for a fact the owner must know. Start one
 with \`Handoff:\` and name the receiving agent. Start one with \`Done:\` and
-explain what shipped with the pull request link. Claims, plans, progress, checks,
-retries, blockers, costs, and gate ledgers are run activity, not comments.
-The board wrapper redirects any unmarked comment to activity.
+explain what shipped with the pull request link. The runner's one claim message
+is mechanical; do not post another. Plans, progress, checks, retries, blockers,
+costs, and gate ledgers are run activity, not comments. The board wrapper
+redirects any unmarked comment to activity.
 
 When QUIET is on, do not @mention the board owner unless replying to a comment
 where the owner directly mentioned you. That direct reply keeps the owner mention

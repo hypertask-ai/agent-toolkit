@@ -51,7 +51,8 @@ run_test() {
   shift
   SUBTESTS_RUN=$((SUBTESTS_RUN + 1))
   output="$(mktemp "${TMPDIR:-/tmp}/agent-template-eval-subtest.XXXXXX")"
-  timeout "$TEST_TIMEOUT_SECONDS" "$@" 2>&1 | tee "$output"
+  ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 \
+    timeout "$TEST_TIMEOUT_SECONDS" "$@" 2>&1 | tee "$output"
   status="${PIPESTATUS[0]}"
   if [ "$status" -ne 0 ]; then
     if ! grep -qF "FAIL $(basename "$test_file") " "$output"; then
@@ -368,6 +369,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/run-watchdog.test.sh" ]; then
   echo ""
   echo "-- run watchdog and single-claim checks --"
   run_test "$HERE/run-watchdog.test.sh" bash "$HERE/run-watchdog.test.sh" || :
+fi
+if [ -z "$ONLY" ] && [ -x "$HERE/atomic-claim.test.sh" ]; then
+  echo ""
+  echo "-- atomic claim race checks --"
+  run_test "$HERE/atomic-claim.test.sh" bash "$HERE/atomic-claim.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/post-run-cleanup.test.sh" ]; then
   echo ""

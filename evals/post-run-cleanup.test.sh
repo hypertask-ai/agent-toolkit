@@ -87,7 +87,17 @@ case "$args" in
     printf 'create %s\n' "$*" >> "$MOCK_BOARD_LOG"
     printf '{"task":{"ticketNumber":"AGTE-999"}}\n'
     ;;
-  *' task assign '*) printf 'assign\n' >> "$MOCK_BOARD_LOG" ;;
+  *' task assign '*)
+    printf 'assign\n' >> "$MOCK_BOARD_LOG"
+    python3 - "$MOCK_TASKS" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+doc["tasks"][0]["assignees"] = [{"agent": {"id": "agent-dev", "displayName": "Dev"}}]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(doc, handle)
+PYEOF
+    ;;
   *' task unassign '*) printf 'unassign\n' >> "$MOCK_BOARD_LOG" ;;
   *' task move '*) printf 'move\n' >> "$MOCK_BOARD_LOG" ;;
   *' comment add '*) printf 'comment\n' >> "$MOCK_BOARD_LOG" ;;

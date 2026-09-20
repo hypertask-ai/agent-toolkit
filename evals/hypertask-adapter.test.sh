@@ -26,7 +26,9 @@ if printf '%s' "$maintainer_prompt" | grep -qF 'FINISH IT AS THE SETUP MAINTAINE
    && printf '%s' "$maintainer_prompt" | grep -qF 'Do not create an implementation branch for a direct operation, delegate it, hand it to a developer' \
    && printf '%s' "$maintainer_prompt" | grep -qF 'post a `Done:` comment that names the result and links the pull request' \
    && ! printf '%s' "$maintainer_prompt" | grep -qF 'branch off the production branch' \
-   && printf '%s' "$regular_prompt" | grep -qF 'branch off the production branch'; then
+   && printf '%s' "$regular_prompt" | grep -qF 'branch off the production branch' \
+   && printf '%s' "$regular_prompt" | grep -qF 'The runner already won the claim' \
+   && ! printf '%s' "$regular_prompt" | grep -qF 'claim-ticket.sh'; then
   ok maintainer-direct-action-prompt 'merge instructions execute in the maintainer run instead of entering developer PR workflow'
 else
   bad maintainer-direct-action-prompt "maintainer=$maintainer_prompt regular=$regular_prompt"
@@ -162,6 +164,59 @@ then
   ok response-uses-comment-gate 'an invalid quiet response is held unchanged without a rewrite call'
 else
   bad response-uses-comment-gate "calls=$(cat "$REWRITE_CALLS") payload=$(cat "$RUN_PAYLOAD") log=$(cat "$TMP/response.log")"
+fi
+
+CLAIM_SLEEP="$TMP/claim-sleep"
+CLAIM_READS="$TMP/claim-reads"
+: > "$CLAIM_SLEEP"
+printf '0\n' > "$CLAIM_READS"
+set +e
+claim_result="$(
+  unset ADAPTER_CLAIM_TEST_JITTER_SECONDS ADAPTER_CLAIM_TEST_SETTLE_SECONDS
+  sleep() { printf '%s\n' "$1" >> "$CLAIM_SLEEP"; }
+  adapter_assign_task() { return 0; }
+  _ht_get() {
+    local count
+    count="$(cat "$CLAIM_READS")"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$CLAIM_READS"
+    if [ "$count" -eq 1 ]; then
+      printf '%s\n' '{"tasks":[{"ticketNumber":"TEST-1","projectId":15,"assignees":[]}]}'
+    else
+      printf '%s\n' '{"tasks":[{"ticketNumber":"TEST-1","projectId":15,"assignees":[{"agent":{"id":"agent-a","displayName":"Agent A"}}]}]}'
+    fi
+  }
+  adapter_claim "$TMP/token" unused 15 TEST-1 agent-a
+)"
+claim_status=$?
+set -e
+first_sleep="$(sed -n '1p' "$CLAIM_SLEEP")"
+second_sleep="$(sed -n '2p' "$CLAIM_SLEEP")"
+if [ "$claim_status" -eq 0 ] && [ "$claim_result" = held ] \
+   && [[ "$first_sleep" =~ ^[1-5]$ ]] && [ "$second_sleep" = 2 ]; then
+  ok claim-jitter-and-settle 'an uncontended claim waits 1-5 seconds before its read and 2 seconds after assignment'
+else
+  bad claim-jitter-and-settle "status=$claim_status result=$claim_result sleeps=$(paste -sd, "$CLAIM_SLEEP")"
+fi
+
+CLAIM_ASSIGNED="$TMP/claim-assigned"
+set +e
+claim_result="$(
+  sleep() { :; }
+  adapter_assign_task() { touch "$CLAIM_ASSIGNED"; }
+  _ht_get() {
+    printf '%s\n' '{"tasks":[{"ticketNumber":"TEST-1","projectId":15,"assignees":[{"agent":{"id":"agent-b","displayName":"Agent B"}}]}]}'
+  }
+  ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 \
+    adapter_claim "$TMP/token" unused 15 TEST-1 agent-a
+)"
+claim_status=$?
+set -e
+if [ "$claim_status" -eq 0 ] && [ "$claim_result" = $'backoff\talready claimed by Agent B' ] \
+   && [ ! -e "$CLAIM_ASSIGNED" ]; then
+  ok claim-reread-before-assign 'a foreign agent arriving after the first guard makes the claim back off before assignment'
+else
+  bad claim-reread-before-assign "status=$claim_status result=$claim_result assigned=$([ -e "$CLAIM_ASSIGNED" ] && echo yes || echo no)"
 fi
 
 STOP_PAYLOAD="$TMP/stop-payload"
