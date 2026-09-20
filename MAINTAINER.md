@@ -383,49 +383,46 @@ pr-hygiene check merges a green PR that could not get auto-merge.
 
 ## One ticket until live
 
-Before normal pickup, the runner lists PRs owned by this agent. Ownership is
-proved by its `PR_BRANCH_PREFIX` (default `agent/<slug>-`), by a current board
-assignment for the ticket in the PR title when no other agent prefix is on the
-branch, or by `<slug>.opened-prs` recording that the runner first saw the PR
-during this agent's run. Shared GitHub authorship and comments do not transfer
-ownership.
+Before any normal or event-ticket ranking, the runner lists PRs owned by this
+agent. Ownership is proved by its `PR_BRANCH_PREFIX` (default
+`agent/<slug>-`), by a current board assignment for the ticket in the PR title
+when no other agent prefix is on the branch, or by `<slug>.opened-prs`
+recording that the runner first saw the PR during this agent's run. Shared
+GitHub authorship and comments do not transfer ownership.
 
-One owned open PR leaves one pickup slot free. Two owned open PRs fill the slots
-and stop every new claim, including an `emergency`; the runner ranks that queue
-oldest first. A red or pending PR older than two hours releases its slot because
-the agent has not been able to fix it, but remains monitored and appears on
-Board health. One green, red, or pending PR never blocks pickup. An open PR with
-no active owner is ignored by every gate. Once per UTC day, a tick logs
-`orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can decide
-who should take it.
+One owned PR is a hard binding. Pending checks, a green PR awaiting review or
+merge, and a merged PR awaiting QA all consume the tick; neither a normal poll
+nor `--ticket` event starts unrelated work. The binding ends only when QA moves
+the ticket to `DONE_SECTION` (default `Done`). An open PR with no active owner
+is ignored. Once per UTC day, a tick logs `orphaned PR #<n> (<branch>) has no
+owning agent` so the supervisor can decide who should take it.
 
-LIVE means all of the following:
+A red PR starts a structured fix round on its existing branch after fetching
+and rebasing the PR base. The ticket receives the literal `Fix round N:` marker,
+the durable run record increments `fix_rounds`, and the prompt includes exact
+failed check names, reviewer concerns, and the last 80 failed-log lines for each
+failing check and run. PR fix runs bypass the attempts ladder and manager
+handoff, but retain the per-ticket cooldown. A QA agent's `Handoff:` after merge
+is another red round on the same counter; an already-counted QA comment cannot
+increment it twice. A QA repair opens a follow-up PR from the same branch.
 
-1. The PR is merged.
-2. The merge commit is contained in the PR's base branch.
-3. The newest GitHub deployment for that base in environment `Production` was
-   created after the merge, has status `success`, and its deployed commit
-   contains the merge.
+Before round three, or after three hours from the first red round, the runner
+asks `SECOND_OPINION_CLI` for one independent diagnosis. It refuses a reviewer
+from the development worker's provider family and posts the literal
+`Second opinion:` marker. A concrete diagnosis is included in one final fix
+round. A `not fixable here because ...` verdict, or a red result after that
+final round, releases the ticket without another development run: comment on
+and close the PR while preserving its branch, add `needs-human`, move the ticket
+to `OWNER_REVIEW_SECTION` (default `Review`), unassign the agent, and record the
+release. Every step must succeed before normal pickup resumes.
 
-The result is cached for 60 seconds per PR. If the repository has no GitHub
-deployment records, the logged fallback is merged plus base-contains-merge.
-A repository that has deployment records but no qualifying Production success
-is not LIVE.
-
-At the two-PR limit, a red PR starts another fix run with exact failed check
-names, failed-run logs, and verbatim reviewer `CONCERNS`. Pending checks log
-`waiting on PR #<n>: checks pending` and start nothing. At two hours, either
-state files one deduplicated toolkit bug, appears on Board health, and releases
-its pickup slot. A red PR's report includes its exact failed check names. A
-green open PR uses one slot but does not block pickup by itself. A merged but
-undeployed PR still starts nothing. The attempts file, retry limit, six-hour
-cooldown, model escalation, and manager hand-off do not apply to PR fix runs.
-
-The owner-facing blocking state is one JSON line at
-`~/.local/state/agent-board-poll/<slug>.blocked`. Its top-level fields describe
-the oldest blocking debt, and `prs` lists every blocking owned PR in rank order.
-The runner removes this file when no PR blocks pickup. Monitored PRs remain in
-the progress snapshot so Product Bot can report them after two hours.
+The owner-facing binding state is one JSON line at
+`~/.local/state/agent-board-poll/<slug>.blocked`. Released PRs are recorded in
+`<slug>.released-prs`, so eventual GitHub list results and older merged repair
+PRs cannot bind the agent again. The runner removes the blocked file only after
+QA passes or the complete human-release sequence succeeds. Two-hour PR alarms
+and Board health reporting remain observational; they never release this
+binding.
 
 ## What wakes it
 

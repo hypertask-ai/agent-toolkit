@@ -69,6 +69,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `WATCH_SECTIONS` | Comma-separated watched columns. QA agents include `QA` by default and on template update. |
 | `IN_PROGRESS_SECTION` | Destination while a model run is live, default `In Progress`. |
 | `REVIEW_SECTION` | Destination after the run opens a pull request, default `AI Review`. |
+| `OWNER_REVIEW_SECTION` | Destination when structured PR repair concludes that only a human can resolve the failure, default `Review`. |
 | `DONE_SECTION` | Destination when the reconciler finds a merged pull request whose title starts with the ticket reference, a linked merged pull request, or a matching direct base-branch commit. Defaults to `Done`. |
 | `QA_FAIL_SECTION` | QA failure destination. Defaults to the board's first intake column. Failed QA also clears every assignee. |
 | `QA_BLOCKED_SECTION` | Blocked or cannot-test destination, default `Agent Blocked (Infra)`. |
@@ -82,6 +83,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `RUN_MAX_SECONDS` | Maximum model process lifetime before the watchdog stops it, default 5400. Runs waiting on their own PR checks are exempt. |
 | `TRIAGE` | Whether to score difficulty before pickup. |
 | `TRIAGE_MODEL_CLI` | Optional tie-break scoring command, default `MODEL_CLI`. |
+| `SECOND_OPINION_CLI` | Independent PR diagnosis command, default `claude --print --model opus`. It must use a different provider family from the development worker. |
 | `ADVISOR_MAX` | Research calls per run, default 2 when `RESEARCH_CLI` exists. |
 | `CHAT` | `on` enables the host chat lane, including the agent's pending room feed. With `BOARD_ID` also set, it enables the ticket-ack lane: an acknowledgement within one 60-second tick while the runner is busy on that ticket, later edited in place with the full answer. |
 | `ROOM_DAILY_TURN_BUDGET` | Maximum agent-room replies per room and UTC day across this host; default `20`, and `0` disables room replies. |
