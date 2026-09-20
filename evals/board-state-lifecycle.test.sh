@@ -23,6 +23,26 @@ if [ "${1:-} ${2:-}" = "pr view" ]; then
   printf '{"state":"%s","url":"https://github.com/example/repo/pull/%s"}\n' "${MOCK_PR_STATE:-OPEN}" "$3"
   exit 0
 fi
+if [ "${1:-}" = api ] && [[ "${2:-}" == repos/example/repo/pulls\?state=* ]]; then
+  case "${2:-}" in
+    *state=open*)
+      if [ -s "$MOCK_PR_OPEN" ]; then
+        printf '[{"number":9,"title":"TEST-1: change","html_url":"https://github.com/example/repo/pull/9","head":{"ref":"dev/TEST-1"},"base":{"ref":"main"},"user":{"login":"bot"},"draft":false,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","merged_at":null}]\n'
+      else
+        printf '[]\n'
+      fi
+      ;;
+    *)
+      if [ -n "${MOCK_MERGED_PR_TITLE:-}" ]; then
+        now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '[{"number":999,"title":"%s","html_url":"https://github.com/example/repo/pull/999","head":{"ref":"human/change"},"base":{"ref":"main"},"user":{"login":"human"},"draft":false,"created_at":"%s","updated_at":"%s","merged_at":"%s"}]\n' "$MOCK_MERGED_PR_TITLE" "$now" "$now" "$now"
+      else
+        printf '[]\n'
+      fi
+      ;;
+  esac
+  exit 0
+fi
 if [ "${1:-} ${2:-}" = "pr list" ]; then
   case " $* " in
     *' --state merged '*)
@@ -157,7 +177,7 @@ reset_case() {
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"Backlog","title":"Change it","description":"Open a PR","assignees":[],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
 EOF
 }
-run_env=(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" MOCK_BOARD_LOG="$TMP/board.log" MOCK_PR_OPEN="$TMP/pr-open" MOCK_MODEL_PID="$TMP/model.pid" MOCK_GIT_LOG="$TMP/git.log")
+run_env=(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" AGENT_PR_CACHE_DIR="$TMP/state/pr-cache" COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" MOCK_BOARD_LOG="$TMP/board.log" MOCK_PR_OPEN="$TMP/pr-open" MOCK_MODEL_PID="$TMP/model.pid" MOCK_GIT_LOG="$TMP/git.log")
 
 reset_case
 env "${run_env[@]}" MOCK_MODEL_MODE=sleep "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/run.out" 2>&1 &

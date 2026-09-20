@@ -187,6 +187,10 @@ EOF
 cat > "$BIN/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_LOG"
+if [ "${1:-}" = api ] && [[ "${2:-}" == repos/example/allowed/pulls\?state=* ]]; then
+  printf '[]\n'
+  exit 0
+fi
 case "$1 $2" in
   'pr view')
     if [ "${GH_MODE:-red}" = green ]; then

@@ -389,12 +389,17 @@ pr-hygiene check merges a green PR that could not get auto-merge.
 
 ## One ticket until live
 
-Before any normal or event-ticket ranking, the runner lists PRs owned by this
-agent. Ownership is proved by `<slug>/`, its configured `PR_BRANCH_PREFIX`
-(default `agent/<slug>-`), `<slug>.opened-prs`, or the PR author's login matching
-the agent's `GITHUB_LOGIN` (falling back to the identity authenticated by `gh`).
-A current board assignment remains a fallback when no other agent prefix is on
-the branch.
+Before any normal or event-ticket ranking, the runner reads the host-wide PR
+cache for the repository. The first tick after 90 seconds refreshes it under a
+lock with two REST calls: open PRs and PRs merged in the last 48 hours. The cache
+contains no PR bodies. A GitHub rate-limit response logs its reset time and makes
+PR ownership unknown for that tick, so no PR binds an agent and the tick continues.
+
+Ownership is proved only by `<slug>/` (case-insensitive), `<slug>.opened-prs`, or
+an explicitly configured `GH_LOGIN` that differs from the host `gh` login.
+`dev-2` also recognizes its historical `dev-cursor-2/` and `cursor-dev-2/`
+branches. QA agents recognize only PRs recorded in their own opened-PR ledger.
+Board assignment and shared GitHub authorship never transfer PR ownership.
 
 One owned PR is a hard binding. Pending checks, a green PR awaiting review or
 merge, and a merged PR awaiting QA all consume the tick; neither a normal poll
