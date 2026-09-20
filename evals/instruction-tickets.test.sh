@@ -79,7 +79,7 @@ printf 'agent-token\n' > "$TMP/token"
 
 run_template() {
   HOME="$HOME_DIR" XDG_STATE_HOME="$STATE_DIR" AGENT_CONFIG_DIR="$CONF_DIR" \
-    BOARD_FIXTURE="$BOARD_FIXTURE" PATH="$TMP/bin:$PATH" AGENT_SLUG= \
+    BOARD_FIXTURE="$BOARD_FIXTURE" PATH="$TMP/bin:/usr/bin:/bin" AGENT_SLUG= \
     "$ROOT/scripts/agent-template" "$@"
 }
 
@@ -134,7 +134,7 @@ printf '0\n' > "$BOARD_FIXTURE/create-count"
 : > "$BOARD_FIXTURE/assigned"
 install_once() {
   HOME="$HOME_DIR" XDG_STATE_HOME="$STATE_DIR" AGENT_CONFIG_DIR="$CONF_DIR" \
-    BOARD_FIXTURE="$BOARD_FIXTURE" SECTION_MODE=fallback PATH="$TMP/bin:$PATH" \
+    BOARD_FIXTURE="$BOARD_FIXTURE" SECTION_MODE=fallback PATH="$TMP/bin:/usr/bin:/bin" \
     SKIP_TEMPLATE_EVALS=yes SKIP_COMPANY_SKILLS=yes \
     AGENT_TEMPLATE_INSTALL_STATE="$STATE_DIR/install-state" \
     bash "$ROOT/install.sh" --dest "$TMP/installed-skill" --bin "$TMP/installed-bin" --no-host-notes

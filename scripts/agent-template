@@ -23,7 +23,7 @@
 #   agent-template build list
 #   agent-template build reconcile
 #
-#   agent-template merge <pr-url>
+#   agent-template merge <pr-url>  # always refused; runners cannot merge by hand
 #
 #   agent-template instruct <slug> <text|-> [--ticket <url>]
 #
@@ -883,7 +883,9 @@ Right before opening the pull request, pull $base_branch, rebase your branch, an
 For the agent toolkit, never edit VERSION or CHANGELOG.md in a pull request; add one changelog.d/<name>.md fragment instead.
 Run the repository's tests and checks before opening the pull request.
 Open a pull request against $base_branch and immediately run \`gh pr merge --auto --squash <pr>\` so it can merge itself when checks pass.
-Wait for green with \`gh pr checks --watch --interval 30\` for at most 10 minutes; if auto-merge is unavailable, squash merge the green pull request yourself.
+Never merge a pull request by hand. If auto-merge is unavailable, leave the pull request open for the supervisor.
+Never modify, review, close, or merge a pull request labelled \`valentin-review\`.
+Wait for green with \`gh pr checks --watch --interval 30\` for at most 10 minutes.
 After merge, run \`agent-template update --keep-timers\` only when this build changes the agent toolkit.
 Remove the worktree when finished and report the result in fewer than 10 lines.
 
@@ -964,58 +966,7 @@ fi
 
 if [ "${SUBCOMMAND:-feedback}" = "merge" ]; then
   maintainer_authorize "$@"
-  [ "$#" -eq 1 ] || manager_refuse "merge refused: use agent-template merge <pr-url>"
-  pr_url="$1"
-  if [[ "$pr_url" =~ ^https://github.com/([^/]+/[^/]+)/pull/([0-9]+)$ ]]; then
-    github_slug="${BASH_REMATCH[1]}"
-  else
-    manager_refuse "merge refused: use a full GitHub pull request URL"
-  fi
-  repo_row="$(maintainer_repo_by_slug "$github_slug")" \
-    || manager_refuse "merge refused: repository $github_slug is not in repos.allow"
-  IFS=$'\t' read -r _ _ _ base_branch _ <<< "$repo_row"
-  view="$(gh pr view "$pr_url" --json isDraft,state,baseRefName,statusCheckRollup 2>/dev/null)" \
-    || manager_refuse "merge refused: could not read $pr_url"
-  reason="$(PR_VIEW="$view" BASE_BRANCH="$base_branch" python3 - <<'PYEOF'
-import json
-import os
-
-try:
-    row = json.loads(os.environ["PR_VIEW"])
-except ValueError:
-    print("GitHub returned invalid pull request data")
-    raise SystemExit
-if row.get("isDraft"):
-    print("pull request is a draft")
-elif row.get("state") != "OPEN":
-    print("pull request is not open")
-elif row.get("baseRefName") != os.environ["BASE_BRANCH"]:
-    print("base branch is not %s" % os.environ["BASE_BRANCH"])
-else:
-    checks = row.get("statusCheckRollup") or []
-    red = []
-    pending = []
-    for check in checks:
-        name = check.get("name") or check.get("context") or "unnamed check"
-        conclusion = str(check.get("conclusion") or check.get("state") or "").upper()
-        status = str(check.get("status") or "").upper()
-        if (status and status != "COMPLETED") or conclusion in {"EXPECTED", "PENDING"}:
-            pending.append(name)
-        elif conclusion not in {"SUCCESS", "NEUTRAL", "SKIPPED"}:
-            red.append(name)
-    if not checks:
-        print("no checks are reported")
-    elif pending:
-        print("checks are pending: " + ", ".join(pending))
-    elif red:
-        print("checks are not green: " + ", ".join(red))
-PYEOF
-)"
-  [ -z "$reason" ] || manager_refuse "merge refused: $reason"
-  gh pr merge "$pr_url" --squash >/dev/null \
-    || manager_refuse "merge failed: GitHub refused the squash merge"
-  echo "merged: $pr_url"
-  exit 0
+  manager_refuse "merge refused: runners never merge pull requests by hand"
 fi
 
 if [ "${SUBCOMMAND:-feedback}" = "instruct" ]; then

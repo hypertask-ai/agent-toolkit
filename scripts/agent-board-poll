@@ -253,13 +253,12 @@ MAINTAINER_GUIDANCE=""
 if [ "$MAINTAINER" = "on" ]; then
   MAINTAINER_GUIDANCE='SETUP MAINTAINER CONTRACT:
 You execute setup changes. A session or advisor supplies instructions but never edits on your behalf.
-An instruction to merge, release, update, or build on an allowlisted repository is yours to execute in this run. Never delegate it, hand it to a developer, or answer that a developer must release it.
+An instruction to update or build on an allowlisted repository is yours to execute in this run. Never delegate it, hand it to a developer, or answer that a developer must release it.
 Use `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]` for every change to the agent toolkit, supervisor rules, analytics site, app, CLI, or Slack bot. Never run hax or codex directly.
 Write each build specification with four explicit parts: Ticket, What, Done when, and Guardrails.
 Use `agent-template build status [id]` and `agent-template build list` to inspect work. If asked what you did, answer from build list and its recorded output, not from memory.
-A request to merge, release, update, or build is yours to execute in this run. Never delegate it, assign it to a developer, or answer with a handoff.
-Use `agent-template merge <pr-url>` when asked to merge or release an existing allowlisted pull request. It refuses drafts and non-green checks.
-Use `agent-template build` for a requested build. Use `agent-template update --keep-timers` for a requested toolkit update and after a toolkit merge or release.
+Never merge a pull request by hand. Auto-merge or the supervisor handles merges, and pull requests labelled `valentin-review` stay untouched.
+Use `agent-template build` for a requested build. Use `agent-template update --keep-timers` for a requested toolkit update after its pull request merges.
 The repository allowlist is the complete boundary. Do not change a repo that is absent from it.'
 fi
 
@@ -1653,7 +1652,10 @@ qa_protection_reason() {
   ROW="$row" OWNER="$owner" python3 -c '
 import json, os
 row = json.loads(os.environ["ROW"])
-if "valentin" in {str(value).strip().casefold() for value in row.get("labels") or []}:
+labels = {str(value).strip().casefold() for value in row.get("labels") or []}
+if "manager-only" in labels:
+    print("label manager-only")
+elif "valentin" in labels:
     print("label valentin")
 elif os.environ["OWNER"] and os.environ["OWNER"] in {str(value) for value in row.get("human_assignee_ids") or []}:
     print("board owner assignment")
@@ -3918,9 +3920,8 @@ $MAINTAINER_GUIDANCE
 MAINTAINER COMMANDS:
 - \`agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]\`.
 - \`agent-template build status [id]\` and \`agent-template build list\`.
-- \`agent-template merge <pr-url>\`.
 - \`agent-template update --keep-timers\` after a toolkit build merges.
-Run the requested maintainer command now. Never answer with a plan, delegation, or developer handoff. After a successful direct merge, post a \`Done:\` comment that names the result and links the pull request. A background build is not done when it starts; its completion checker posts the final result."
+Run the requested maintainer command now. Never answer with a plan, delegation, or developer handoff. Never merge a pull request by hand or touch one labelled \`valentin-review\`. A background build is not done when it starts; its completion checker posts the final result."
   fi
 
   if [ "$GRAFT" = "on" ] && [ "$is_reply_only" = "no" ]; then

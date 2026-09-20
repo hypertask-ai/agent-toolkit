@@ -100,7 +100,9 @@ assert "agent-template build --repo <key>" not in manager_prompt
 assert "agent-template build --repo <key>" in maintainer_prompt
 assert "agent-template build status [id]" in maintainer_prompt
 assert "agent-template build list" in maintainer_prompt
-assert "agent-template merge <pr-url>" in maintainer_prompt
+assert "Never merge a pull request by hand" in maintainer_prompt
+assert "labelled `valentin-review`" in maintainer_prompt
+assert "agent-template merge <pr-url>" not in maintainer_prompt
 assert "agent-template update --keep-timers" in maintainer_prompt
 assert "Never launch a model harness directly" in maintainer_prompt
 print("PASS agent-chat-manager-command-contract")
