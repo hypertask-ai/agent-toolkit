@@ -18,6 +18,117 @@ _hypertask_base_install_board_cli() (
   adapter_install_board_cli "$@"
 )
 
+_hypertask_base_run_prompt() (
+  # shellcheck disable=SC1091
+  . "$CORE_ROOT/adapters/hypertask/adapter.sh"
+  adapter_run_prompt "$@"
+)
+
+adapter_run_prompt() {
+  _hypertask_base_run_prompt "$@"
+  if [ "${AGENT_KIND:-dev}" = "qa" ]; then
+    cat <<'EOF'
+
+The verdict marker is mandatory: the verdict comment must begin with exactly
+`Done:`, `Handoff:`, or `Question:`. A QA response without one is incomplete.
+EOF
+  fi
+}
+
+_hypertask_base_ticket_comments() (
+  # shellcheck disable=SC1091
+  . "$CORE_ROOT/adapters/hypertask/adapter.sh"
+  adapter_ticket_comments "$@"
+)
+
+_hypertask_qa_comment_has_verdict() {
+  COMMENTS="$1" IDS="$2" python3 -c '
+import html, json, os, re
+ids = set(os.environ["IDS"].split())
+rows = [row for row in json.loads(os.environ["COMMENTS"]) if str(row.get("id") or "") in ids]
+if not rows:
+    raise SystemExit(1)
+row = max(rows, key=lambda item: (item.get("createdAt") or "", item.get("id") or 0))
+plain = html.unescape(re.sub(r"<[^>]+>", " ", str(row.get("html") or "")))
+raise SystemExit(0 if re.match(r"\s*(Done|Handoff|Question):", plain, re.I) else 1)
+'
+}
+
+_hypertask_qa_retry_comments() {
+  COMMENTS="$1" OLD_IDS="$2" NEW_IDS="$3" python3 -c '
+import html, json, os, re
+rows = json.loads(os.environ["COMMENTS"])
+old_ids = set(os.environ["OLD_IDS"].split())
+new_ids = set(os.environ["NEW_IDS"].split()) - old_ids
+old_rows = [row for row in rows if str(row.get("id") or "") in old_ids]
+new_rows = [row for row in rows if str(row.get("id") or "") in new_ids]
+def marked(row):
+    plain = html.unescape(re.sub(r"<[^>]+>", " ", str(row.get("html") or "")))
+    return re.match(r"\s*(Done|Handoff|Question):", plain, re.I)
+marked_rows = [row for row in new_rows if marked(row)]
+if old_rows and marked_rows:
+    old = max(old_rows, key=lambda item: (item.get("createdAt") or "", item.get("id") or 0))
+    retry = max(marked_rows, key=lambda item: (item.get("createdAt") or "", item.get("id") or 0)).copy()
+    retry["id"] = old.get("id")
+    rows = [row for row in rows if row is not old]
+    rows.append(retry)
+print(json.dumps(rows))
+'
+}
+
+_hypertask_retry_qa_verdict() {
+  local retry_prompt retry_rc
+  retry_prompt="$PROMPT
+
+QA VERDICT RETRY:
+Your posted QA response is incomplete because it does not begin with the mandatory verdict marker.
+Do not repeat the tests or change the implementation. Post exactly one corrected verdict comment now: begin it with Done: if QA passed, Handoff: if QA failed, or Question: if QA cannot proceed. Make the matching board move; the runner will supply it if needed."
+  log "QA verdict retry for $ref: posted comment had no QA verdict marker"
+  set +e
+  (
+    if [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
+    export PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}"
+    export TMPDIR="$MODEL_ACTIVITY_DIR"
+    export AGENT_NAME AGENT_ID AGENT_BOARD_CLI="$BOARD_CLI" AGENT_QA_MOVE=yes
+    export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
+    export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
+    export AGENT_OPENED_PRS="$OPENED_PRS" AGENT_HELD_COMMENT_FILE="$MODEL_ACTIVITY_DIR/held-comment.html"
+    export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
+    export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
+    export AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER"
+    export AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI"
+    timeout "$RUN_MAX_SECONDS" "${MODEL_ARGV[@]}" "$retry_prompt"
+  ) >>"$RUN_OUTPUT" 2>>"$ERRFILE"
+  retry_rc=$?
+  set -e
+  if [ "$retry_rc" -eq 0 ]; then
+    log "QA verdict retry for $ref completed"
+  else
+    printf 'QA verdict retry exited %s\n' "$retry_rc" >> "$ERRFILE"
+    log "QA verdict retry for $ref exited $retry_rc"
+  fi
+}
+
+adapter_ticket_comments() {
+  local comments posted_ids retry_ids retry_marker
+  comments="$(_hypertask_base_ticket_comments "$@")" || return
+  if [ "${AGENT_KIND:-dev}" = "qa" ] && [ "${worker_exited:-no}" = "yes" ] \
+     && [ "${is_pr_fix:-no}" = "no" ] && [ "${is_reply_only:-no}" = "no" ] \
+     && [ -n "${POSTED:-}" ] && [ -r "$POSTED" ]; then
+    posted_ids="$(awk -v ref="${ref:-}" '$1 == ref { print $2 }' "$POSTED")"
+    retry_marker="${MODEL_ACTIVITY_DIR:-${STATE_DIR:-/tmp}}/.qa-verdict-retry-attempted"
+    if [ -n "$posted_ids" ] && [ ! -e "$retry_marker" ] \
+       && ! _hypertask_qa_comment_has_verdict "$comments" "$posted_ids"; then
+      : > "$retry_marker"
+      _hypertask_retry_qa_verdict
+      comments="$(_hypertask_base_ticket_comments "$@")" || return
+      retry_ids="$(awk -v ref="${ref:-}" '$1 == ref { print $2 }' "$POSTED")"
+      comments="$(_hypertask_qa_retry_comments "$comments" "$posted_ids" "$retry_ids")"
+    fi
+  fi
+  printf '%s' "$comments"
+}
+
 # Install the normal identity wrapper at its configured path, then put final
 # runner-written comments through the ticket-link formatter before that wrapper.
 adapter_install_board_cli() {
@@ -185,6 +296,12 @@ PYEOF
 adapter_move_task() {
   local board_cli="$1" ref="$2" section="$3" attempt task current baseline monitor release_destination=no
   local owner_review="${OWNER_REVIEW_SECTION:-Review}" done_section="${DONE_SECTION:-Done}"
+  if [ "${AGENT_KIND:-dev}" = "qa" ] && [ "${worker_exited:-no}" = "yes" ] \
+     && [ -e "${MODEL_ACTIVITY_DIR:-/nonexistent}/.qa-verdict-retry-attempted" ] \
+     && [[ ! "${run_verdict:-}" =~ ^(Done|Handoff|Question)$ ]] \
+     && [ "${section,,}" = "${QA_BLOCKED_SECTION,,}" ]; then
+    section="${origin_section:-QA}"
+  fi
   if [ "${section,,}" = "${owner_review,,}" ]; then
     release_destination=yes
   elif declare -p PR_RELEASE_SECTIONS >/dev/null 2>&1; then

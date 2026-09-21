@@ -34,10 +34,19 @@ EOF
 cat > "$TMP/bin/model" <<'EOF'
 #!/usr/bin/env bash
 printf 'model ran\n' >> "$MOCK_MODEL_LOG"
+printf '%s\n--- prompt ---\n' "${!#}" >> "${MOCK_PROMPT_LOG:-/dev/null}"
 case "$MOCK_VERDICT" in
   Done) text='<p><strong>Done: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>' ;;
   Handoff) text='<p><strong>Handoff: Dev must fix the failing payment step.</strong></p><p>Next: Fix the payment step.</p>' ;;
   Question) text='<p><strong>Question: QA needs test credentials.</strong></p><p>Can the manager provide them?</p>' ;;
+  MissingThenDone)
+    if [ "$(wc -l < "$MOCK_MODEL_LOG")" -eq 1 ]; then
+      text='<p><strong>Decision: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>'
+    else
+      text='<p><strong>Done: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>'
+    fi
+    ;;
+  Missing) text='<p><strong>Decision: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>' ;;
 esac
 "$AGENT_BOARD_CLI" comment add TEST-1 --text "$text" >/dev/null
 EOF
@@ -129,7 +138,7 @@ run_case() {
   if [ "$move_fail" = "yes" ]; then
     printf '%s\n' '{"boards":{"15":{"ref":"BOARD-HEALTH"}}}' > "$TMP/state/agent-board-poll/board-health.json"
   fi
-  : > "$TMP/board.log"; : > "$TMP/model.log"
+  : > "$TMP/board.log"; : > "$TMP/model.log"; : > "$TMP/prompts.log"
   cat > "$TMP/tasks.json" <<EOF
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"QA","title":"Verify checkout","description":"Test every acceptance step","assignees":$assignees,"labels":$labels,"commentCount":1}]}
 EOF
@@ -139,6 +148,7 @@ EOF
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT="$verdict" \
     MOCK_MOVE_FAIL="$move_fail" MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
+    MOCK_PROMPT_LOG="$TMP/prompts.log" \
     "$ROOT/scripts/agent-board-poll" --once qa-runner > "$TMP/out" 2>&1 || true
 }
 
@@ -154,6 +164,29 @@ if [ -x "$AGENT_IDENTITY_SHIM_DIR/qa-runner/hypertask" ] \
   ok qa-identity-shim-isolated 'the QA runner cannot collide with host identity shims'
 else
   bad qa-identity-shim-isolated 'the QA eval wrote its identity shim outside the private directory'
+fi
+
+run_case MissingThenDone '[]' '{"comments":[]}'
+if [ "$(wc -l < "$TMP/model.log")" -eq 2 ] \
+   && grep -qF 'The verdict marker is mandatory' "$TMP/prompts.log" \
+   && grep -qF 'QA VERDICT RETRY:' "$TMP/prompts.log" \
+   && grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
+   && ! grep -qF 'exit=65' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-missing-marker-retry 'an unmarked response gets one retry and a marked retry completes'
+else
+  bad qa-missing-marker-retry "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+
+printf 'QA_BLOCKED_SECTION="HT Manager Review"\n' >> "$TMP/config/qa-runner.conf"
+run_case Missing '[]' '{"comments":[]}'
+sed -i '/^QA_BLOCKED_SECTION=/d' "$TMP/config/qa-runner.conf"
+if [ "$(wc -l < "$TMP/model.log")" -eq 2 ] \
+   && grep -qF 'run FAILED TEST-1 exit=65' "$TMP/state/agent-board-poll/qa-runner.log" \
+   && grep -qxF 'move TEST-1 QA' "$TMP/board.log" \
+   && ! grep -qF 'move TEST-1 HT Manager Review' "$TMP/board.log"; then
+  ok qa-missing-marker-stays-in-qa 'one failed retry exits 65 without parking the ticket in manager review'
+else
+  bad qa-missing-marker-stays-in-qa "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 
 run_case Handoff '[]' '{"comments":[]}'
