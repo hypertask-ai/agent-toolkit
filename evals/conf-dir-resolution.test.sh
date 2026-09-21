@@ -33,6 +33,7 @@ cat > "$TMP/bin/board" <<'EOF'
 printf '%s\n' "$*" >> "$BOARD_LOG"
 case "$*" in
   '--json project show 5500') printf '%s\n' '{"project":{"defaultSections":["Inbox"],"sections":[{"section_title":"Inbox"}]}}' ;;
+  'project labels 5500') printf '%s\n' '{"labels":[{"name":"bug"},{"name":"adapter:hypertask"}]}' ;;
   task\ create*) printf '%s\n' '{"task":{"id":"task-101","ticketNumber":"AGTE-101","projectId":5500,"uniqueIndex":101}}' ;;
   'task assign AGTE-101 --self') printf '%s\n' '{}' ;;
 esac

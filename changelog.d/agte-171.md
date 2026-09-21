@@ -1,0 +1,1 @@
+- AGTE-171 keeps the requested kind on feedback tickets. Filing reuses an existing kind label or creates it once, and an authenticated board refusal now returns an error without a manual-paste payload.
