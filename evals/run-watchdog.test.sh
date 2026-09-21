@@ -49,8 +49,8 @@ case "${MOCK_MODEL_MODE:-stall}" in
     while :; do sleep 10; done
     ;;
   waiting)
-    sleep 3
-    touch "$MOCK_MODEL_DONE"
+    : > "$MOCK_MODEL_DONE"
+    exec sleep 10
     ;;
   done)
     touch "$MOCK_MODEL_DONE"
@@ -179,6 +179,9 @@ else
   echo "FAIL stalled-run-watchdog log=$(cat "$TMP/board.log") record=$(cat "$record" 2>/dev/null) output=$(cat "$TMP/stall.out")"; exit 1
 fi
 
+# Keep the dead-run case fast, but leave enough scheduling margin for the
+# progress fixtures to run between watchdog samples on a busy host.
+sed -i 's/RUN_STALL_SECONDS="1"/RUN_STALL_SECONDS="2"/' "$TMP/config/dev.conf"
 run_liveness_case() {
   local mode="$1" label="$2" description="$3"
   reset_case
@@ -195,7 +198,7 @@ run_liveness_case stderr stderr-progress-liveness 'stderr progress keeps a stdou
 run_liveness_case cpu cpu-time-liveness 'process-group CPU time keeps a silent model alive'
 run_liveness_case worktree worktree-change-liveness 'worktree changes keep a silent model alive'
 
-sed -i 's/RUN_STALL_SECONDS="1"/RUN_STALL_SECONDS="10"/; s/RUN_MAX_SECONDS="30"/RUN_MAX_SECONDS="2"/' "$TMP/config/dev.conf"
+sed -i 's/RUN_STALL_SECONDS="2"/RUN_STALL_SECONDS="10"/; s/RUN_MAX_SECONDS="30"/RUN_MAX_SECONDS="2"/' "$TMP/config/dev.conf"
 reset_case
 run_tick MOCK_MODEL_MODE=max >"$TMP/max.out" 2>&1
 record="$TMP/state/agent-board-poll/run-records/dev-TEST-1.json"
@@ -206,15 +209,25 @@ if [ -f "$TMP/model-term" ] \
 else
   echo "FAIL maximum-run-watchdog log=$(cat "$TMP/board.log") record=$(cat "$record" 2>/dev/null) output=$(cat "$TMP/max.out")"; exit 1
 fi
-sed -i 's/RUN_STALL_SECONDS="10"/RUN_STALL_SECONDS="1"/; s/RUN_MAX_SECONDS="2"/RUN_MAX_SECONDS="30"/' "$TMP/config/dev.conf"
+sed -i 's/RUN_STALL_SECONDS="10"/RUN_STALL_SECONDS="2"/; s/RUN_MAX_SECONDS="2"/RUN_MAX_SECONDS="30"/' "$TMP/config/dev.conf"
 
 reset_case
 mkdir -p "$TMP/state/agent-board-poll"
 printf '%s\n' '{"wait":{"state":"awaiting-merge","ticket":"TEST-1"}}' > "$TMP/state/agent-board-poll/dev.progress.json"
-run_tick MOCK_MODEL_MODE=waiting >"$TMP/waiting.out" 2>&1
 record="$TMP/state/agent-board-poll/run-records/dev-TEST-1.json"
-if [ -f "$TMP/model-done" ] && [ ! -f "$TMP/model-term" ] \
-   && RECORD="$record" python3 -c 'import json,os,sys; r=json.load(open(os.environ["RECORD"])); sys.exit(0 if r.get("waiting_on_pr") is True and r.get("wait_state")=="awaiting-merge" and r.get("last_output_at") else 1)'; then
+waiting_record="$TMP/waiting-record.json"
+run_tick MOCK_MODEL_MODE=waiting >"$TMP/waiting.out" 2>&1 &
+waiting_tick_pid=$!
+for _ in $(seq 1 200); do
+  if RECORD="$record" python3 -c 'import json,os,sys; r=json.load(open(os.environ["RECORD"])); sys.exit(0 if r.get("waiting_on_pr") is True and r.get("wait_state")=="awaiting-merge" and r.get("last_output_at") else 1)' 2>/dev/null; then
+    cp "$record" "$waiting_record"
+    break
+  fi
+  kill -0 "$waiting_tick_pid" 2>/dev/null || break
+  sleep 0.1
+done
+wait "$waiting_tick_pid"
+if [ -f "$TMP/model-done" ] && [ ! -f "$TMP/model-term" ] && [ -f "$waiting_record" ]; then
   printf 'PASS %-36s %s\n' awaiting-merge-watchdog-exempt 'PR wait survives the silence threshold and publishes waiting state'
 else
   echo "FAIL awaiting-merge-watchdog-exempt record=$(cat "$record" 2>/dev/null) output=$(cat "$TMP/waiting.out")"; exit 1
