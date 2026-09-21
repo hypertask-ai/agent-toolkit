@@ -189,8 +189,11 @@ write_conf "$state"
 seed_failures "$state" TEST-1 4
 run_poll "$state" "$capture" --once >"$TMP/model.out" 2>"$TMP/model.err" || true
 if grep -q '^model-only --fixed ' "$capture" \
+   && grep -qF 'Never run `gh run watch` or `gh pr checks --watch`.' "$capture" \
+   && grep -qF 'GitHub polling tighter than 90 seconds is forbidden.' "$capture" \
+   && grep -qF 'run `sleep 90`, then make one REST call' "$capture" \
    && ! grep -Eq '^(rung-one|rung-two|override-command) ' "$capture"; then
-  ok no-ladder-model-only "four failures still run only MODEL_CLI"
+  ok no-ladder-model-only "run prompt forbids tight GitHub polling"
 else
   bad no-ladder-model-only "launch=$(cat "$capture" 2>/dev/null || true)"
 fi

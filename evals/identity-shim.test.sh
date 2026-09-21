@@ -63,6 +63,22 @@ command -v ht >> "$RESOLVED_CAPTURE"
 command -v htbot >> "$RESOLVED_CAPTURE"
 command -v gh >> "$RESOLVED_CAPTURE"
 hypertask --json status > "$TOKEN_CAPTURE"
+if gh run watch 42 --repo example/repo > /dev/null 2> "$RUN_WATCH_ERROR"; then
+  printf '0\n' > "$RUN_WATCH_RC"
+else
+  printf '%s\n' "$?" > "$RUN_WATCH_RC"
+fi
+if gh pr checks 7 --watch --repo example/repo > /dev/null 2> "$PR_WATCH_ERROR"; then
+  printf '0\n' > "$PR_WATCH_RC"
+else
+  printf '%s\n' "$?" > "$PR_WATCH_RC"
+fi
+if gh run list --repo example/repo --interval 89 > /dev/null 2> "$SHORT_INTERVAL_ERROR"; then
+  printf '0\n' > "$SHORT_INTERVAL_RC"
+else
+  printf '%s\n' "$?" > "$SHORT_INTERVAL_RC"
+fi
+gh pr checks 7 --repo example/repo >/dev/null
 gh pr create --repo example/repo --title test --body test > "$PR_CREATE_OUTPUT"
 cat "$AGENT_OPENED_PRS" > "$PR_OWNERSHIP_CAPTURE"
 printf 'after-pr-create\n' >> "$GH_CAPTURE"
@@ -151,7 +167,10 @@ run_poll() {
     GRAPHQL_MERGE_ERROR="$TMP/graphql-merge.error" PROTECTED_PR_RC="$TMP/protected-pr.rc" \
     PROTECTED_PR_ERROR="$TMP/protected-pr.error" PROTECTED_API_RC="$TMP/protected-api.rc" \
     PROTECTED_API_ERROR="$TMP/protected-api.error" MERGED_PR_RC="$TMP/merged-pr.rc" \
-    CLOSED_PR_RC="$TMP/closed-pr.rc" \
+    CLOSED_PR_RC="$TMP/closed-pr.rc" RUN_WATCH_RC="$TMP/run-watch.rc" \
+    RUN_WATCH_ERROR="$TMP/run-watch.error" PR_WATCH_RC="$TMP/pr-watch.rc" \
+    PR_WATCH_ERROR="$TMP/pr-watch.error" SHORT_INTERVAL_RC="$TMP/short-interval.rc" \
+    SHORT_INTERVAL_ERROR="$TMP/short-interval.error" \
     PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test
 }
 
@@ -163,6 +182,21 @@ if run_poll > "$TMP/run.out" 2> "$TMP/run.err" \
   ok identity-shim-first-on-path "board and GitHub commands resolve inside the agent shim"
 else
   bad identity-shim-first-on-path "resolved paths: $(paste -sd, "$TMP/resolved" 2>/dev/null || true)"
+fi
+
+if [ "$(cat "$TMP/run-watch.rc")" -ne 0 ] \
+   && [ "$(cat "$TMP/pr-watch.rc")" -ne 0 ] \
+   && [ "$(cat "$TMP/short-interval.rc")" -ne 0 ] \
+   && grep -qF 'gh run watch is not allowed' "$TMP/run-watch.error" \
+   && grep -qF 'gh pr checks --watch is not allowed' "$TMP/pr-watch.error" \
+   && grep -qF 'intervals must be at least 90 seconds' "$TMP/short-interval.error" \
+   && ! grep -qF 'run watch 42' "$TMP/gh-calls" \
+   && ! grep -qF 'pr checks 7 --watch' "$TMP/gh-calls" \
+   && ! grep -qF 'run list --repo example/repo --interval 89' "$TMP/gh-calls" \
+   && grep -qxF 'pr checks 7 --repo example/repo' "$TMP/gh-calls"; then
+  ok identity-shim-polling-blocked 'watchers and sub-90-second intervals never reach GitHub'
+else
+  bad identity-shim-polling-blocked "run=$(cat "$TMP/run-watch.rc" 2>/dev/null) checks=$(cat "$TMP/pr-watch.rc" 2>/dev/null) interval=$(cat "$TMP/short-interval.rc" 2>/dev/null) calls=$(cat "$TMP/gh-calls")"
 fi
 
 if GH_CALLS="$TMP/gh-calls" python3 -c '
