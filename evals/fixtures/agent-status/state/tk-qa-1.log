@@ -10,3 +10,5 @@
 2026-09-18T09:00:01+00:00 model route for AGTE-81: model (cursor-agent --model cursor-grok-fast)
 2026-09-18T09:05:00+00:00 run done AGTE-81 exit=0
 2026-09-18T09:05:01+00:00 QA run fallback moved AGTE-81 to Done from verdict Done
+2026-09-18T10:20:00+00:00 run start AGTE-84 key=8400:1 dir=. graft=off attempt=1: assigned
+2026-09-18T10:20:01+00:00 model route for AGTE-84: model (cursor-agent --model cursor-grok-fast)
