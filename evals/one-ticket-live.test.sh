@@ -16,6 +16,14 @@ set -euo pipefail
 [ -z "${BOARD_CALL_LOG:-}" ] || printf '%s\n' "$*" >> "$BOARD_CALL_LOG"
 if [ "${1:-}" = "--token" ] && [ "$#" -ge 2 ]; then shift 2; fi
 [ -z "${ACTION_LOG:-}" ] || printf 'board %s\n' "$*" >> "$ACTION_LOG"
+if [ "${1:-} ${2:-} ${3:-}" = "--json section list" ]; then
+  if [ "${SECTION_SCENARIO:-manager}" = "invalid" ]; then
+    printf '%s\n' '[{"name":"Bugs"},{"name":"In Progress"}]'
+  else
+    printf '%s\n' '[{"name":"Bugs"},{"name":"In Progress"},{"name":"HT Manager Review"}]'
+  fi
+  exit 0
+fi
 if [ "${1:-} ${2:-} ${3:-}" = "--json comment list" ] \
    && [ -e "${MODEL_OPEN_MARKER:-/no-marker}" ]; then
   printf '%s\n' '{"comments":[{"id":"opened-8","agent":{"displayName":"Dev One"},"text":"<p><strong>Handoff: The pull request is ready for review.</strong></p><p><a href=\"https://github.com/example/repo/pull/8\">https://github.com/example/repo/pull/8</a></p><p>Next: Review the linked change.</p>"}]}'
@@ -26,7 +34,10 @@ if [ "${1:-} ${2:-}" = "task create" ]; then
   exit 0
 fi
 if [ "${1:-}" = "--json" ] && [ "${2:-} ${3:-}" = "task get" ]; then
-  printf '{"task":{"ticketNumber":"%s","section":"Bugs","assignees":[{"agent":{"id":"agent-1"}}]}}\n' "${4:-HTPR-1}"
+  printf '{"task":{"ticketNumber":"%s","projectId":"15","section":"Bugs","assignees":[{"agent":{"id":"agent-1"}}]}}\n' "${4:-HTPR-1}"
+fi
+if [ "${1:-} ${2:-}" = "task move" ] && [ "${MOVE_FAIL:-no}" = "yes" ]; then
+  exit 1
 fi
 if [ "${1:-} ${2:-}" = "task unassign" ] && [ -n "${UNASSIGNED_MARKER:-}" ]; then
   touch "$UNASSIGNED_MARKER"
@@ -642,6 +653,18 @@ TRIAGE="no"
 EOF
 state="$TMP/home/.local/state/agent-board-poll"
 mkdir -p "$state"
+set +e
+invalid_release_output="$(SECTION_SCENARIO=invalid AGENT_PR_CACHE_DIR="$TMP/invalid-release-cache" \
+  PR_TEST_SCENARIO=pending BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" \
+  PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" \
+  "$ROOT/scripts/agent-board-poll" --dry-run dev-1 2>&1)"
+invalid_release_rc=$?
+set -e
+[[ "$invalid_release_rc" -ne 0 ]]
+[[ "$invalid_release_output" == *'cannot determine whether dev-1 owns a pull request'* ]]
+grep -qF 'ERROR: PR release destination "Review" does not exist on board 15' "$state/dev-1.log"
+echo 'PASS invalid PR release destination fails loudly at startup'
+
 rate_log_before="$([ ! -f "$state/dev-1.log" ] || wc -l < "$state/dev-1.log")"
 rate_log_before="${rate_log_before:-0}"
 rate_run="$(AGENT_PR_CACHE_DIR="$TMP/tick-rate-cache" PR_TEST_SCENARIO=rate-limit \
@@ -772,7 +795,7 @@ python3 - "$TMP/actions" <<'PYEOF'
 import sys
 lines = open(sys.argv[1], encoding="utf-8").read().splitlines()
 need = ["gh pr comment 1", "board task update HTPR-1 --labels label-needs-human",
-        "board task move HTPR-1 --section Review",
+        "board task move HTPR-1 --section HT Manager Review",
         "board task unassign HTPR-1 --assignee agent-1", "gh pr close 1"]
 positions = [next(i for i, line in enumerate(lines) if value in line) for value in need]
 assert positions == sorted(positions), (lines, positions)
@@ -785,6 +808,26 @@ rm -rf "$state/pr-live-cache"
 released_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-released_run" PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$released_run" != *'bound to PR #1'* ]]
 echo 'PASS released PR state prevents eventual GitHub results from rebinding'
+
+grep -qF 'PR release destination "Review" does not exist on board 15; using "HT Manager Review"' "$state/dev-1.log"
+echo 'PASS board 15 releases use its available manager lane'
+
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$state/dev-1.released-prs" "$state/dev-1.runs" "$TMP/board-comments" \
+  "$TMP/worker-prompts" "$TMP/reviewer-prompts" "$TMP/actions" "$TMP/unassigned"
+run_actual red
+run_actual red
+MOVE_FAIL=yes SECOND_OPINION_RESULT='not fixable here because the repository secret is owner-only.' run_actual red
+grep -qF 'Second opinion: not fixable here because the repository secret is owner-only.' "$TMP/board-comments"
+grep -qF 'gh pr comment 1' "$TMP/actions"
+[[ "$(grep -cF 'board task move HTPR-1 --section HT Manager Review' "$TMP/actions")" = 2 ]]
+grep -qF 'board task unassign HTPR-1 --assignee agent-1' "$TMP/actions"
+[[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "1" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.released-prs")" = yes ]]
+grep -qF 'PR release could not move HTPR-1 to HT Manager Review; agent unbound and verdict retained' "$state/dev-1.log"
+grep -qF 'release of PR #1 stopped after the ticket move failed; agent unbound' "$state/dev-1.log"
+! grep -qF 'release of PR #1 failed; binding remains' "$state/dev-1.log"
+[ ! -e "$state/dev-1.blocked" ]
+echo 'PASS failed PR release move retains the verdict and clears both agent bindings'
 
 rm -rf "$state/run-records" "$state/pr-live-cache"
 rm -f "$state/dev-1.released-prs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/actions"
@@ -833,4 +876,4 @@ AGENT_PR_CACHE_DIR="$TMP/record-open-pr-cache" PR_TEST_SCENARIO=record-open \
 [[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "8" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.opened-prs")" = yes ]]
 echo 'PASS runner persists a PR first seen after its ticket run'
 
-echo '50 one-ticket-until-live checks passed'
+echo '53 one-ticket-until-live checks passed'

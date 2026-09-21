@@ -478,7 +478,11 @@ here because ...` verdict, or a red result after that final round, releases the
 ticket without another development run: comment on and close the PR while
 preserving its branch, add `needs-human`, move the ticket to
 `OWNER_REVIEW_SECTION` (default `Review`), unassign the agent, and record the
-release. Every step must succeed before normal pickup resumes.
+release. At startup, each configured board validates that destination; a board
+without the default `Review` column uses its live `HT Manager Review` lane, and
+any other missing destination is logged as an error before work starts. If the
+ticket move later fails, the verdict remains posted and the runner still clears
+the ticket assignment and PR binding so normal pickup can resume.
 
 The owner-facing binding state is one JSON line at
 `~/.local/state/agent-board-poll/<slug>.blocked`. Released PRs are recorded in
