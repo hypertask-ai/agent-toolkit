@@ -9,12 +9,28 @@ _hypertask_base_pr_gate() (
   adapter_pr_gate "$@"
 )
 
-adapter_pr_gate() {
+_hypertask_checked_pr_gate() {
   local rc
   _hypertask_base_pr_gate "$@" && return 0
   rc=$?
   [ "$rc" -ne 75 ] || return 1
   return "$rc"
+}
+
+_hypertask_base_install_board_cli() (
+  # shellcheck disable=SC1091
+  . "$CORE_ROOT/adapters/hypertask/adapter.sh"
+  adapter_install_board_cli "$@"
+)
+
+# Install the normal identity wrapper at its configured path, then put final
+# runner-written comments through the ticket-link formatter before that wrapper.
+adapter_install_board_cli() {
+  local caller="${SELF:-}"
+  _hypertask_base_install_board_cli "$@" || return
+  [ "${caller##*/}" = agent-board-poll ] || return 0
+  export AGENT_RUNNER_BOARD_CLI_TARGET="$3"
+  BOARD_CLI="$CORE_ROOT/scripts/hypertask-runner-cli"
 }
 
 _hypertask_cached_project_prefix() {
@@ -102,6 +118,133 @@ print(prefix.upper())
 
   _hypertask_cache_project_prefix "$cache" "$base" "$project_id" "$prefix"
   printf '%s-%s' "$prefix" "$number"
+}
+
+# Keep the board adapter's full ownership lookup, then apply the pickup policy
+# here so runtime policy can evolve without coupling core to Hypertask.
+adapter_pr_gate() (
+  local slug="$5" opened_prs="${8:-}" state_dir rows rc monitor root
+  root="${CORE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+  state_dir="$(dirname "${opened_prs:-${6%/*}/none}")"
+  monitor="$state_dir/$slug.monitored-prs.json"
+  if rows="$(CORE_ROOT="$root" _hypertask_checked_pr_gate "$@")"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  mkdir -p "$state_dir"
+  ROWS="$rows" NOW="${PR_GATE_NOW:-}" MONITOR="$monitor" python3 - <<'PYEOF'
+import datetime
+import json
+import os
+
+rows = [json.loads(line) for line in os.environ["ROWS"].splitlines() if line.strip()]
+try:
+    now = datetime.datetime.fromisoformat(os.environ.get("NOW", "").replace("Z", "+00:00"))
+except ValueError:
+    now = datetime.datetime.now(datetime.timezone.utc)
+if now.tzinfo is None:
+    now = now.replace(tzinfo=datetime.timezone.utc)
+
+
+def age(row):
+    try:
+        value = datetime.datetime.fromisoformat(str(row.get("since") or "").replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.timezone.utc)
+        return (now - value).total_seconds()
+    except ValueError:
+        return 0
+
+
+for row in rows:
+    stale = row.get("state") in {"red", "pending"} and age(row) >= 2 * 60 * 60
+    if stale:
+        row["action"] = "observe"
+        row["pickup_slot"] = False
+        row["unfixable"] = True
+
+open_slots = [row for row in rows
+              if row.get("pickup_slot") is True
+              and row.get("state") in {"red", "pending", "awaiting-review"}]
+gates = [row for row in rows if not row.get("unfixable")]
+if len(open_slots) < 2:
+    gates = [row for row in gates if row.get("state") != "awaiting-review"]
+
+# Prefer repairable failures when multiple open PRs fill the available slots.
+gates.sort(key=lambda row: (row.get("action") != "fix", str(row.get("since") or "")))
+path = os.environ["MONITOR"]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(rows, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+for row in gates:
+    print(json.dumps(row, sort_keys=True))
+PYEOF
+)
+
+# A release is already complete when the live ticket reached Done or moved
+# away from the section captured with its PR gate.
+adapter_move_task() {
+  local board_cli="$1" ref="$2" section="$3" attempt task current baseline monitor release_destination=no
+  local owner_review="${OWNER_REVIEW_SECTION:-Review}" done_section="${DONE_SECTION:-Done}"
+  if [ "${section,,}" = "${owner_review,,}" ]; then
+    release_destination=yes
+  elif declare -p PR_RELEASE_SECTIONS >/dev/null 2>&1; then
+    local board
+    for board in "${!PR_RELEASE_SECTIONS[@]}"; do
+      if [ "${section,,}" = "${PR_RELEASE_SECTIONS[$board],,}" ]; then
+        release_destination=yes
+        break
+      fi
+    done
+  fi
+
+  if [ "$release_destination" = yes ]; then
+    task="$($board_cli --json task get "$ref" 2>/dev/null)" || return 1
+    current="$(TASK="$task" python3 -c '
+import json, os
+raw = os.environ["TASK"]
+start, end = raw.find("{"), raw.rfind("}")
+doc = json.loads(raw[start:end + 1])
+task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+print(task.get("section") or "")
+')" || return 1
+    monitor="${STATE_DIR:-}/$SLUG.monitored-prs.json"
+    if [ -r "$monitor" ]; then
+      baseline="$(REF="$ref" python3 - "$monitor" <<'PYEOF'
+import json, os, sys
+try:
+    rows = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    rows = []
+row = next((item for item in rows if str(item.get("ticket") or "").casefold()
+            == os.environ["REF"].casefold()), {})
+print(row.get("ticket_section") or "")
+PYEOF
+)"
+    fi
+    if [ "${current,,}" = "${done_section,,}" ]; then
+      printf 'PR release skipped move for %s: ticket is already in %s\n' "$ref" "$current"
+      return 0
+    fi
+    if [ "${current,,}" = "${section,,}" ]; then
+      printf 'PR release skipped move for %s: ticket is already in %s\n' "$ref" "$current"
+      return 0
+    fi
+    if [ -n "${baseline:-}" ] && [ "${current,,}" != "${baseline,,}" ]; then
+      printf 'PR release skipped move for %s: ticket was moved by a human from %s to %s\n' \
+        "$ref" "$baseline" "$current"
+      return 0
+    fi
+  fi
+
+  for attempt in 1 2; do
+    "$board_cli" task move "$ref" --section "$section" && return 0
+  done
+  return 1
 }
 
 # Print the live owner-review destination for one board. An unreadable section

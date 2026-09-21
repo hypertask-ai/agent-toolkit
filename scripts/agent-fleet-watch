@@ -268,10 +268,22 @@ def failed_ticks(log_path: Path) -> tuple[int, dt.datetime | None]:
     return count, since
 
 
-def active_fix_round(state_dir: Path, slug: str) -> bool:
+def run_in_flight(state_dir: Path, slug: str, conf: dict[str, str], current: dt.datetime) -> bool:
+    try:
+        stall_seconds = int(conf.get("RUN_STALL_SECONDS", "1200"))
+    except ValueError:
+        stall_seconds = 1200
+    if stall_seconds <= 0:
+        stall_seconds = 1200
     for path in (state_dir / "run-records").glob(f"{slug}-*.json"):
         row = read_json(path, {})
-        if isinstance(row, dict) and row.get("status") == "running" and row.get("run_kind") == "pr-fix":
+        if not isinstance(row, dict) or row.get("status") != "running":
+            continue
+        try:
+            updated_at = dt.datetime.fromtimestamp(path.stat().st_mtime, dt.timezone.utc)
+        except OSError:
+            continue
+        if (current - updated_at).total_seconds() < stall_seconds:
             return True
     return False
 
@@ -459,12 +471,14 @@ def main() -> int:
             if isinstance(task, dict):
                 tasks_by_board[str(task.get("board") or task.get("projectId") or "")].append(task)
         intake = intake_sections(args.config_dir, root, agents, readable_boards)
+        intake_tasks: dict[str, list[dict[str, Any]]] = {}
         unassigned: dict[str, list[dict[str, Any]]] = {}
         for board in readable_boards:
             names = {name.casefold() for name in intake.get(board, set())}
-            unassigned[board] = [task for task in tasks_by_board.get(board, [])
-                                 if str(task.get("section") or "").casefold() in names
-                                 and int(task.get("assignee_count") or 0) == 0]
+            intake_tasks[board] = [task for task in tasks_by_board.get(board, [])
+                                   if str(task.get("section") or "").casefold() in names]
+            unassigned[board] = [task for task in intake_tasks[board]
+                                 if int(task.get("assignee_count") or 0) == 0]
 
         repo_votes: dict[str, Counter[str]] = defaultdict(Counter)
         for agent in agents:
@@ -500,15 +514,15 @@ def main() -> int:
         failed_tick_metrics: dict[str, int] = {}
         for agent in agents:
             slug = agent["slug"]
+            conf = agent["config"]
             completed_count, completed_at = recent_completed(
                 state_dir / f"{slug}.log", state_dir / f"{slug}.progress.json", current)
-            live_runs[slug] = completed_count
+            live_runs[slug] = int(bool(completed_count) or run_in_flight(state_dir, slug, conf, current))
             failures, failure_since = failed_ticks(state_dir / f"{slug}.log")
             failed_tick_metrics[slug] = failures
             if failures >= 3:
                 add_breach(breaches, "R3", f"Agent {slug} has failed three consecutive timer ticks.",
                            failure_since, current)
-            conf = agent["config"]
             watched = {item.strip().casefold() for item in conf.get("WATCH_SECTIONS", "").split(",") if item.strip()}
             eligible = False
             for board in agent["boards"]:
@@ -525,7 +539,7 @@ def main() -> int:
                         break
                 if eligible:
                     break
-            if eligible and completed_count == 0 and not active_fix_round(state_dir, slug):
+            if eligible and live_runs[slug] == 0:
                 since = completed_at or current - dt.timedelta(seconds=RUN_WINDOW_SECONDS)
                 action = start_agent(slug)
                 actions.append(action)
@@ -586,7 +600,7 @@ def main() -> int:
         frozen = bool(fleet_agents) and all(
             agent["config"].get("CLAIM_UNASSIGNED", "no") == "no" for agent in fleet_agents)
         intake_empty = (readable_board_set == set(boards)
-                        and not any(unassigned.get(board) for board in readable_boards))
+                        and not any(intake_tasks.get(board) for board in readable_boards))
         if frozen and intake_empty:
             changed_times = []
             for agent in fleet_agents:

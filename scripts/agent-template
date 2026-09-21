@@ -358,7 +358,7 @@ manager_authorize() {
 }
 
 manager_owner_request() {
-  local ticket="$1" temporary task_file project_file comments_file project_id
+  local ticket="$1" request_kind="$2" temporary task_file project_file comments_file project_id
   case "$ticket" in *-[0-9]*) ;; *) manager_refuse "$SUBCOMMAND refused: $ticket is not a ticket reference" ;; esac
   [ -x "$MANAGER_BOARD_CLI" ] \
     || manager_refuse "$SUBCOMMAND refused: manager $MANAGER_CALLER has no executable BOARD_CLI"
@@ -384,8 +384,8 @@ PYEOF
     || { rm -rf "$temporary"; manager_refuse "$SUBCOMMAND refused: could not read board owner for $ticket"; }
   "$MANAGER_BOARD_CLI" --json comment list "$ticket" > "$comments_file" 2>/dev/null \
     || { rm -rf "$temporary"; manager_refuse "$SUBCOMMAND refused: could not read comments on $ticket"; }
-  mapfile -t request_fields < <(python3 - "$project_file" "$comments_file" <<'PYEOF'
-import base64, html, json, sys
+  mapfile -t request_fields < <(python3 - "$project_file" "$comments_file" "$request_kind" <<'PYEOF'
+import base64, html, json, re, sys
 from html.parser import HTMLParser
 
 class Text(HTMLParser):
@@ -400,11 +400,32 @@ class Text(HTMLParser):
 
 project_doc = json.load(open(sys.argv[1], encoding="utf-8"))
 comments_doc = json.load(open(sys.argv[2], encoding="utf-8"))
+request_kind = sys.argv[3]
 project = project_doc.get("project") or project_doc
 owner = project.get("owner") if isinstance(project.get("owner"), dict) else {}
 owner_id = str(project.get("ownerId") or owner.get("id") or owner.get("userId") or "")
 if not owner_id:
     raise SystemExit(1)
+
+def plain_text(raw):
+    parser = Text()
+    parser.feed(raw)
+    parser.close()
+    return " ".join(html.unescape("".join(parser.parts)).split())
+
+def requests_change(text):
+    lowered = text.casefold()
+    if request_kind == "stop":
+        action = r"(?:stop|pause|freeze|shut\s+down|turn\s+off|disable)"
+    elif request_kind == "manual":
+        action = r"(?:manual|pause|freeze|hold)"
+    else:
+        return False
+    if not re.search(rf"\b{action}\b", lowered):
+        return False
+    refusal = rf"\b(?:do\s+not|don['’]?t|never|must\s+not|should\s+not|cancel)\b.{{0,60}}\b{action}\b"
+    return not re.search(refusal, lowered)
+
 rows = comments_doc.get("comments") if isinstance(comments_doc, dict) else comments_doc
 candidates = []
 for index, row in enumerate(rows or []):
@@ -414,18 +435,12 @@ for index, row in enumerate(rows or []):
     if not isinstance(creator, dict) or creator.get("agent") or creator.get("agentId"):
         continue
     creator_id = str(creator.get("id") or creator.get("userId") or row.get("creatorId") or row.get("authorId") or "")
-    raw = str(row.get("text") or row.get("content") or row.get("body") or "")
-    if creator_id == owner_id and raw.strip():
-        candidates.append((str(row.get("createdAt") or row.get("updatedAt") or ""), index, raw))
+    quote = plain_text(str(row.get("text") or row.get("content") or row.get("body") or ""))
+    if creator_id == owner_id and quote and requests_change(quote):
+        candidates.append((str(row.get("createdAt") or row.get("updatedAt") or ""), index, quote))
 if not candidates:
     raise SystemExit(1)
-raw = max(candidates)[2]
-parser = Text()
-parser.feed(raw)
-parser.close()
-quote = " ".join(html.unescape("".join(parser.parts)).split())
-if not quote:
-    raise SystemExit(1)
+quote = max(candidates)[2]
 owner_name = str(owner.get("displayName") or owner.get("name") or "board owner")
 encode = lambda value: base64.b64encode(value.encode()).decode()
 print(owner_id)
@@ -452,14 +467,16 @@ manager_report_approved_change() {
   local detail="$1" quoted body
   quoted="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$OWNER_REQUEST_QUOTE")"
   manager_log_call "$MANAGER_CALLER" "approved_change=$detail owner_request=$quoted"
-  body="$(python3 - "$detail" "$OWNER_REQUEST_ID" "$OWNER_REQUEST_NAME" "$OWNER_REQUEST_QUOTE" <<'PYEOF'
+  body="$(python3 - "$detail" "$OWNER_REQUEST_ID" "$OWNER_REQUEST_NAME" "$OWNER_REQUEST_BOARD" "$OWNER_REQUEST_QUOTE" <<'PYEOF'
 import html, sys
-change, owner_id, owner_name, request = sys.argv[1:]
+change, owner_id, owner_name, board, request = sys.argv[1:]
 mention = (f'<span data-type="mention" class="mention" data-id="{html.escape(owner_name, quote=True)}" '
-           f'data-label="name-{html.escape(owner_id, quote=True)}">{html.escape(owner_name)}</span>')
+           f'data-label="name-{html.escape(owner_id, quote=True)}" uniqueindex="" '
+           f'projectid="{html.escape(board, quote=True)}">{html.escape(owner_name)}</span>')
 print(f'<p><strong>Decision: Agent mode change alarm.</strong> {mention}</p>'
       f'<p>Change: {html.escape(change)}.</p>'
-      f'<p>Owner request: <q>{html.escape(request)}</q></p>')
+      f'<p>Owner request: <q>{html.escape(request)}</q></p>'
+      '<p>Next: No owner action is needed.</p>')
 PYEOF
 )"
   AGENT_COMMENT_VERBATIM=yes "$MANAGER_BOARD_CLI" comment add "$OWNER_REQUEST_TICKET" --text "$body" >/dev/null 2>&1 \
@@ -563,7 +580,7 @@ if [ "${SUBCOMMAND:-feedback}" = "ctl" ]; then
       || manager_refuse "ctl refused: use agent-template ctl start|status <slug>"
   fi
   if [ "$action" = "stop" ]; then
-    manager_owner_request "$4"
+    manager_owner_request "$4" stop
     manager_request_matches_conf "$target_conf"
   fi
   timer="agent-board-poll@$target.timer"
@@ -686,7 +703,7 @@ if [ "${SUBCOMMAND:-feedback}" = "mode" ]; then
   if [ "$mode" = "manual" ]; then
     [ -n "$request_ticket" ] \
       || manager_refuse "mode refused: manual mode requires --owner-request <ticket>"
-    manager_owner_request "$request_ticket"
+    manager_owner_request "$request_ticket" manual
   elif [ -n "$request_ticket" ]; then
     manager_refuse "mode refused: --owner-request is only used for manual mode"
   fi
@@ -1050,7 +1067,7 @@ For the agent toolkit, never edit VERSION or CHANGELOG.md in a pull request; add
 Run the repository's tests and checks before opening the pull request.
 Open a pull request against $base_branch and immediately run \`gh pr merge --auto --squash <pr>\` so it can merge itself when checks pass.
 Never merge a pull request by hand. If auto-merge is unavailable, leave the pull request open for the supervisor.
-Never modify, review, close, or merge a pull request labelled \`valentin-review\`.
+Never modify, review, close, or merge an open pull request labelled \`valentin-review\`.
 Wait for green with \`gh pr checks --watch --interval 30\` for at most 10 minutes.
 After merge, run \`agent-template update --keep-timers\` only when this build changes the agent toolkit.
 Remove the worktree when finished and report the result in fewer than 10 lines.
@@ -2528,12 +2545,42 @@ if [ "$SECTION_MATCH" = fallback ]; then
 fi
 FEEDBACK_BOARD_SECTION="$RESOLVED_SECTION"
 
-# The real board CLI (`hypertask task create`, checked against its own
-# `capabilities --json` catalog) has no --description-file option, only
-# --description <text>. The call used to send --description-file anyway,
-# which this CLI rejects as an unknown flag: STATUS came back non-zero on
-# every single post, and every feedback call fell through to the
-# print-and-paste fallback and looked like "always refused", token and all.
+if ! PROJECT_LABELS="$("$BOARD_CLI" project labels "$FEEDBACK_BOARD_ID" 2>&1)"; then
+  die "could not read labels for feedback board $FEEDBACK_BOARD_ID" "check the bot wrapper can read project labels"
+fi
+KIND_LABEL="$(LABELS_JSON="$PROJECT_LABELS" WANTED_KIND="$KIND" python3 -c '
+import json, os
+want = os.environ["WANTED_KIND"].strip().casefold()
+doc = json.loads(os.environ["LABELS_JSON"])
+for label in doc.get("labels") or doc.get("project", {}).get("labels") or []:
+    name = str(label.get("name") or "").strip()
+    if name.casefold() == want:
+        print(name)
+        break')"
+if [ -z "$KIND_LABEL" ]; then
+  if "$BOARD_CLI" labels create --project "$FEEDBACK_BOARD_ID" --name "$KIND" >/dev/null 2>&1; then
+    KIND_LABEL="$KIND"
+  else
+    # Another filer may have created it between the read and create calls.
+    PROJECT_LABELS="$("$BOARD_CLI" project labels "$FEEDBACK_BOARD_ID" 2>/dev/null || true)"
+    KIND_LABEL="$(LABELS_JSON="$PROJECT_LABELS" WANTED_KIND="$KIND" python3 -c '
+import json, os
+want = os.environ["WANTED_KIND"].strip().casefold()
+try:
+    doc = json.loads(os.environ["LABELS_JSON"])
+except json.JSONDecodeError:
+    doc = {}
+for label in doc.get("labels") or doc.get("project", {}).get("labels") or []:
+    name = str(label.get("name") or "").strip()
+    if name.casefold() == want:
+        print(name)
+        break')"
+    [ -n "$KIND_LABEL" ] \
+      || die "could not create the '$KIND' feedback label" "check that the bot wrapper can manage labels on project $FEEDBACK_BOARD_ID"
+  fi
+fi
+LABELS="$KIND_LABEL${LABELS#"$KIND"}"
+
 BODY_TEXT="$(cat "$BODY_FILE")"
 if OUT="$("$BOARD_CLI" task create \
       --project "$FEEDBACK_BOARD_ID" \
@@ -2544,22 +2591,6 @@ if OUT="$("$BOARD_CLI" task create \
   STATUS=0
 else
   STATUS=$?
-fi
-# A label this board's project does not carry (board 2462 had none of
-# $LABELS) used to fail the whole post, which fell through to the
-# print-and-paste fallback and looked like "feedback never posts". The
-# ticket itself matters more than the label: retry once with no label instead
-# of losing the post over a non-actionable board configuration detail.
-if [ "$STATUS" -ne 0 ] && printf '%s' "$OUT" | grep -qi "LabelNotFound"; then
-  if OUT="$("$BOARD_CLI" task create \
-        --project "$FEEDBACK_BOARD_ID" \
-        --section "$FEEDBACK_BOARD_SECTION" \
-        --title "$TITLE" \
-        --description "$BODY_TEXT" --json 2>&1)"; then
-    STATUS=0
-  else
-    STATUS=$?
-  fi
 fi
 if [ "$STATUS" -eq 0 ]; then
   FILED_LINE="$(printf '%s\n' "$OUT" | python3 -c '
@@ -2593,10 +2624,8 @@ else:
   log_feedback "$FILED_REF" "$BOARD_CLI"
   append_proposed_case "${FILED_URL:-$FEEDBACK_BOARD_URL}"
 else
-  echo "the board refused the ticket, so here it is to paste by hand:" >&2
-  printf '%s\n' "$OUT" >&2
-  print_and_paste
+  printf 'ERROR: the board refused the feedback ticket: %s\n' "$OUT" >&2
   log_feedback
   append_proposed_case "$FEEDBACK_BOARD_URL (not filed: the board refused it)"
-  exit 0
+  exit "$STATUS"
 fi

@@ -249,14 +249,16 @@ action. Dev and QA runners skip that label. The watch sends no toast, chat-room
 message, or Telegram message. When a rule recovers, its open alarm moves to `Done`.
 
 The eight rules cover: three hours without a merge while unassigned intake work
-waits during local daytime; an eligible agent with no completed run for one hour;
-three failed runner ticks in a row; duplicate agent bindings to one pull request;
-host disk use above 85 percent; exhausted GitHub REST capacity; an agent left in
-manual claiming mode for two hours while unassigned intake work waits; and the
-whole readable fleet left in manual mode for longer than 30 minutes while intake
-is empty. The one-hour idle-agent rule queues an immediate poll for every affected agent. Its
-alarm, durable rule state, health snapshot, and summary log record each start
-and whether systemd accepted it.
+waits during local daytime; an eligible agent with no completed run for one hour
+and no run in flight; three failed runner ticks in a row; duplicate agent bindings
+to one pull request; host disk use above 85 percent; exhausted GitHub REST
+capacity; an agent left in manual claiming mode for two hours while unassigned
+intake work waits; and the whole readable fleet left in manual mode for longer
+than 30 minutes while intake is empty. A running record counts as in flight while
+the watchdog has refreshed it within that agent's `RUN_STALL_SECONDS` limit. The
+one-hour idle-agent rule queues an immediate poll only when eligible work waits
+and no run is in flight. Its alarm, durable rule state, health snapshot, and
+summary log record each start and whether systemd accepted it.
 
 Every pass atomically writes
 `~/.local/state/agent-board-poll/fleet-health.json`. The Agents page can read its
@@ -348,7 +350,12 @@ code-shaped tokens, commit hashes, em dashes, linked ticket and PR references,
 and the last block. It tries one 60-second rewrite with `CHAT_CLI` or
 `RESEARCH_CLI`, then checks again. A second failure logs the draft and
 reasons, emits the `Question held: did not pass the plain-language check`
-activity, and sends no raw comment.
+activity, and sends no raw comment. When a closing `Done:` or `Handoff:` comment
+is held, the runner keeps its draft until the worker exits. If that run merged
+its pull request, the runner refreshes GitHub, links the draft's ticket and pull
+request references, checks it again, and posts it. A rewrite failure leaves the
+comment held. In either case, the merged pull request makes the run successful
+and moves the ticket to Done.
 
 Direct human questions use the fixed high-effort Codex Sol reply route instead
 of the conf provider. The five-minute process uses `hax --raw`, which provides
@@ -434,27 +441,34 @@ without auto-merge for 30 minutes.
 Before any normal or event-ticket ranking, the runner reads one host-wide PR
 cache for the repository. The first tick after 60 seconds refreshes it under a
 lock and paginates every open PR plus merges from the last 48 hours. Each row
-stores the PR number, title, branch, author, and labels, with no body. A pull
-request labelled `valentin-review` becomes a protected wait: the runner does not
-review, modify, close, or merge it. The runner command shim also refuses manual
-merges and checks this label before any pull request mutation. A GitHub rate-limit
-response records its reset time for the repository. Every runner skips GitHub
-calls until then, treats ownership as unknown, and continues its tick.
+stores the PR number, title, branch, author, and labels, with no body. The binding
+gate filters those rows to open PRs before ownership and labels are evaluated. A
+pull request labelled `valentin-review` becomes a protected wait only while it is
+open: the runner confirms its current state, then does not review, modify, close,
+or merge it. The runner command shim also refuses manual merges and checks this
+label before any pull request mutation. A GitHub rate-limit response records its
+reset time for the repository. Every runner skips GitHub calls until then, treats
+ownership as unknown, and continues its tick.
 
-Ownership is proved only by `<slug>/` (case-insensitive), `<slug>.opened-prs`, or
-an explicitly configured `GH_LOGIN` that differs from the host `gh` login.
-`dev-2` also recognizes its historical `dev-cursor-2/` and `cursor-dev-2/`
-branches. QA agents recognize only PRs recorded in their own opened-PR ledger.
+Ownership is proved only when a branch starts with the agent slug, directly or
+after `agent/` (case-insensitive), by `<slug>.opened-prs`, or by an explicitly
+configured `GH_LOGIN` that differs from the host `gh` login. Slash, hyphen, and
+underscore separators count without allowing `dev-2` to claim `dev-20`.
+`dev-2` also recognizes its historical `dev-cursor-2` and `cursor-dev-2` names.
+The runner records a PR in the ledger before its successful `gh pr create`
+command returns, so a later watchdog stop cannot orphan it. QA agents recognize
+only PRs recorded in their own opened-PR ledger.
 Board assignment and shared GitHub authorship never transfer PR ownership.
 
-One owned PR is a hard binding. Pending checks, a green PR awaiting review or
-merge, and a merged PR awaiting QA all consume the tick; neither a normal poll
-nor `--ticket` event starts unrelated work. A PR whose ticket is in the blocked
-section, has any human assignee, or is held by the owner remains bound but starts
-no fix round. The binding ends only when QA moves the ticket to `DONE_SECTION`
-(default `Done`). An open PR with no active owner is ignored. Once per UTC day,
-a tick logs `orphaned PR #<n> (<branch>) has no owning agent` so the supervisor
-can decide who should take it.
+A red or pending PR stops pickup for its first two hours, then remains monitored
+while new work can start. One green PR awaiting review or merge is monitored
+without stopping pickup; two open PRs fill the pickup slots. A merged or closed
+PR never binds an agent, regardless of labels, deployment state, ticket section,
+or QA result. A PR whose ticket is in the blocked section, has any human assignee,
+or is held by the owner remains bound but starts no fix round while the PR is
+open. An open PR with no active owner is ignored. Once per UTC day, a tick logs
+`orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can decide
+who should take it.
 
 A red PR resolves its current base and head with `gh pr view`, then fetches both
 from the `PR_REPO` GitHub URL instead of the checkout's `origin`. Fetch or
@@ -467,10 +481,8 @@ recorded only after that worker process exits. Its later `Fix round N:` ticket
 comment reports either the pushed commit or `no push: <reason>`. The prompt
 includes exact failed check names, reviewer concerns, and the last 80 failed-log
 lines for each failing check and run. PR fix runs bypass the attempts ladder and
-manager handoff, but retain the per-ticket cooldown. A QA agent's `Handoff:`
-after merge is another red round on the same counter; an already-counted QA
-comment cannot increment it twice. A QA repair opens a follow-up PR from the
-same branch.
+manager handoff, but retain the per-ticket cooldown. They stop as soon as the PR
+merges or closes.
 
 Before round three, or after three hours from the first red round, the runner
 asks `SECOND_OPINION_CLI` for one independent diagnosis. A lone `revert-guard`
@@ -494,10 +506,10 @@ the ticket assignment and PR binding so normal pickup can resume.
 The owner-facing binding state is one JSON line at
 `~/.local/state/agent-board-poll/<slug>.blocked`. Released PRs are recorded in
 `<slug>.released-prs`, so eventual GitHub list results and older merged repair
-PRs cannot bind the agent again. The runner removes the blocked file only after
-QA passes or the complete human-release sequence succeeds. Two-hour PR alarms
-and Board health reporting remain observational; they never release this
-binding.
+PRs cannot bind the agent again. The runner removes the blocked file when no
+open PR blocks pickup or the complete human-release sequence succeeds. Two-hour
+PR alarms and Board health reporting remain observational; they never release
+this binding.
 
 ## What wakes it
 

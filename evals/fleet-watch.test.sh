@@ -104,6 +104,9 @@ EOF
 cat > "$TMP/tasks.jsonl" <<'EOF'
 {"id":101,"ref":"TEST-101","board":"15","section":"Bugs","title":"Waiting work","assignee_count":0,"agent_ids":[]}
 EOF
+cat > "$TMP/assigned-tasks.jsonl" <<'EOF'
+{"id":102,"ref":"TEST-102","board":"15","section":"Bugs","title":"Assigned work","assignee_count":1,"agent_ids":["another-agent"]}
+EOF
 : > "$TMP/empty-tasks.jsonl"
 for slug in dev-1 dev-2 dev-3; do
   cat > "$STATE/$slug.progress.json" <<EOF
@@ -117,6 +120,10 @@ cat > "$STATE/dev-1.log" <<'EOF'
 EOF
 : > "$STATE/dev-2.log"
 : > "$STATE/dev-3.log"
+cat > "$STATE/run-records/dev-2-TEST-2.json" <<'EOF'
+{"status":"running","run_kind":"ticket","started_at":"2026-09-20T10:50:00Z"}
+EOF
+touch -d '2026-09-20 11:50:00 UTC' "$STATE/run-records/dev-2-TEST-2.json"
 cat > "$STATE/dev-1.blocked" <<'EOF'
 {"pr":77,"ticket":"TEST-77","state":"red","since":"2026-09-20T10:00:00Z"}
 EOF
@@ -160,11 +167,12 @@ health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
 assert health["ok"] is False
 assert health["metrics"]["merges_3h"] == {"15": 0}
 assert health["metrics"]["live_runs"]["dev-1"] == 0
+assert health["metrics"]["live_runs"]["dev-2"] == 1
 assert health["metrics"]["failed_ticks"]["dev-1"] == 3
 assert health["metrics"]["disk_pct"] == 86
 assert health["metrics"]["github_remaining"] == 20
 assert [(row["agent"], row["action"], row["status"]) for row in health["actions"]] == [
-    ("dev-1", "start", "started"), ("dev-2", "start", "started")]
+    ("dev-1", "start", "started")]
 state = json.load(open(os.path.join(os.environ["STATE"], "fleet-watch-state.json")))
 assert state["rules"]["R2"]["actions"] == health["actions"]
 board = [json.loads(line) for line in open(os.environ["BOARD"])]
@@ -185,7 +193,7 @@ for create in creates:
 r2 = next(row for row in creates if row[row.index("--title") + 1].startswith("R2:"))
 r2_body = r2[r2.index("--description") + 1]
 assert "started an immediate poll for agent dev-1" in r2_body
-assert "started an immediate poll for agent dev-2" in r2_body
+assert "agent dev-2" not in r2_body
 for comment in comments:
     body = comment[comment.index("--text") + 1]
     assert body.startswith("<p><strong>R")
@@ -196,10 +204,9 @@ assert len(calls) == 2
 starts = [json.loads(line) for line in open(os.environ["SYSLOG"])]
 assert starts == [
     ["--user", "--no-block", "start", "agent-board-poll@dev-1.service"],
-    ["--user", "--no-block", "start", "agent-board-poll@dev-2.service"],
 ]
 log = open(os.path.join(os.environ["STATE"], "fleet-watch.log")).read().splitlines()
-assert "actions=dev-1:start-started,dev-2:start-started" in log[-1]
+assert "actions=dev-1:start-started" in log[-1]
 PYEOF
 then
   ok fleet-watch-contract 'health metrics, alarm shape, and two-call GitHub budget are enforced'
@@ -216,14 +223,37 @@ else
   bad fleet-watch-dedupe "active rules wrote again: $before/$after board calls"
 fi
 
+: > "$TMP/systemctl.log"
+touch -d '2026-09-20 11:30:00 UTC' "$STATE/run-records/dev-2-TEST-2.json"
+watch "$TMP/tasks.jsonl" stale 86 >/dev/null
+if STATE="$STATE" SYSLOG="$TMP/systemctl.log" python3 - <<'PYEOF'
+import json, os
+health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
+assert health["metrics"]["live_runs"]["dev-2"] == 0
+assert [row["agent"] for row in health["actions"]] == ["dev-1", "dev-2"]
+starts = [json.loads(line)[-1] for line in open(os.environ["SYSLOG"])]
+assert starts == ["agent-board-poll@dev-1.service", "agent-board-poll@dev-2.service"]
+PYEOF
+then
+  ok fleet-watch-stale-live-run 'a running record older than its stall limit remains eligible for R2'
+else
+  bad fleet-watch-stale-live-run 'a stale running record incorrectly counted as active'
+fi
+
 printf '%s\n' '2026-09-20T11:30:00+00:00 tick finished: 0 eligible, 0 started' >> "$STATE/dev-1.log"
 rm -f "$STATE/dev-1.blocked" "$STATE/dev-2.blocked"
+: > "$TMP/systemctl.log"
 watch "$TMP/empty-tasks.jsonl" recent 20 >/dev/null
 moves="$(python3 -c 'import json,sys; print(sum(json.loads(line)[:2] == ["task","move"] for line in open(sys.argv[1])))' "$TMP/board.log")"
 if [ "$moves" -eq 6 ]; then
   ok fleet-watch-clear 'recovered rules move all six active alarms to Done'
 else
   bad fleet-watch-clear "expected 6 Done moves, got $moves"
+fi
+if [ ! -s "$TMP/systemctl.log" ]; then
+  ok fleet-watch-no-eligible-work 'R2 starts no poll when eligible work is absent'
+else
+  bad fleet-watch-no-eligible-work "R2 started a poll without eligible work: $(cat "$TMP/systemctl.log")"
 fi
 
 : > "$TMP/gh.log"
@@ -263,7 +293,7 @@ health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
 assert health["ok"] is True and health["breaches"] == []
 assert health["metrics"]["merges_3h"] == {"15": 1}
 lines = open(os.path.join(os.environ["STATE"], "fleet-watch.log")).read().splitlines()
-assert len(lines) == 6
+assert len(lines) == 7
 assert lines[-1].endswith("ok=true breaches=none")
 PYEOF
 then
@@ -274,6 +304,27 @@ fi
 
 sed -i 's/^CLAIM_UNASSIGNED="yes"$/CLAIM_UNASSIGNED="no"/' "$CONF/dev-1.conf" "$CONF/dev-2.conf"
 touch -d '2026-09-20T11:00:00Z' "$CONF/dev-1.conf" "$CONF/dev-2.conf" "$CONF/dev-3.conf"
+STATE="$STATE" python3 - <<'PYEOF'
+import json, os
+path = os.path.join(os.environ["STATE"], "fleet-watch-state.json")
+state = json.load(open(path))
+state["freeze_since"] = "2026-09-20T11:29:00Z"
+json.dump(state, open(path, "w"))
+PYEOF
+watch "$TMP/assigned-tasks.jsonl" recent 20 >/dev/null
+if STATE="$STATE" python3 - <<'PYEOF'
+import json, os
+state_dir = os.environ["STATE"]
+health = json.load(open(os.path.join(state_dir, "fleet-health.json")))
+state = json.load(open(os.path.join(state_dir, "fleet-watch-state.json")))
+assert not any(row["rule"] == "R8" for row in health["breaches"])
+assert "freeze_since" not in state
+PYEOF
+then
+  ok fleet-watch-nonempty-intake 'assigned intake work prevents the empty-intake freeze alarm'
+else
+  bad fleet-watch-nonempty-intake 'assigned intake work was incorrectly treated as empty intake'
+fi
 STATE="$STATE" python3 - <<'PYEOF'
 import json, os
 path = os.path.join(os.environ["STATE"], "fleet-watch-state.json")

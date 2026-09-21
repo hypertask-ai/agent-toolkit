@@ -103,6 +103,33 @@ PYEOF
 )"
   if [ -n "$created" ]; then
     IFS=$'\t' read -r repo number <<< "$created"
+    if [ -n "${AGENT_OPENED_PRS:-}" ] && [ -n "${AGENT_RUN_REF:-}" ]; then
+      if ! OPENED_PRS="$AGENT_OPENED_PRS" REPO="$repo" NUMBER="$number" REF="$AGENT_RUN_REF" python3 - <<'PYEOF'
+import fcntl
+import os
+
+path = os.environ["OPENED_PRS"]
+repo = os.environ["REPO"]
+number = os.environ["NUMBER"]
+ref = os.environ["REF"]
+with open(path, "a+", encoding="utf-8") as handle:
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    handle.seek(0)
+    recorded = any(
+        fields[:2] == [repo, number]
+        for fields in (line.rstrip("\\n").split("\\t") for line in handle)
+        if len(fields) >= 2
+    )
+    if not recorded:
+        handle.write(f"{repo}\\t{number}\\t{ref}\\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+PYEOF
+      then
+        printf 'pull request opened but ownership could not be recorded: %s\n' "$output" >&2
+        exit 2
+      fi
+    fi
     payload="$(configured_labels "$repo")"
     if [ "$payload" != '{"labels":[]}' ]; then
       if ! printf '%s\n' "$payload" \
@@ -124,16 +151,18 @@ if [ "${1:-}" = "pr" ] && [ "${2:-}" = "merge" ]; then
   fi
 fi
 check_pr_labels() {
-  local target="$1" repo="$2" labels
+  local target="$1" repo="$2" details state labels
   local view=("$REAL_GH" pr view)
   [ -z "$target" ] || view+=("$target")
   [ -z "$repo" ] || view+=(--repo "$repo")
-  labels="$("${view[@]}" --json labels --jq '.labels[].name' 2>/dev/null)" || {
-    echo "pull request change refused: labels could not be verified" >&2
+  details="$("${view[@]}" --json state,labels --jq '.state, (.labels[].name)' 2>/dev/null)" || {
+    echo "pull request change refused: state and labels could not be verified" >&2
     exit 2
   }
-  if printf '%s\n' "$labels" | grep -qix 'valentin-review'; then
-    echo "pull request change refused: label valentin-review is manager-only" >&2
+  state="$(printf '%s\n' "$details" | sed -n '1p')"
+  labels="$(printf '%s\n' "$details" | sed '1d')"
+  if [ "$state" = "OPEN" ] && printf '%s\n' "$labels" | grep -qix 'valentin-review'; then
+    echo "pull request change refused: open PR label valentin-review is manager-only" >&2
     exit 2
   fi
 }

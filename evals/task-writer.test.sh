@@ -27,6 +27,14 @@ if [ "${1:-} ${2:-} ${3:-}" = "--json project show" ]; then
   printf '%s\n' '{"project":{"id":5500,"sections":[{"section_title":"Backlog"},{"section_title":"In Progress"},{"section_title":"Review"},{"section_title":"Done"}]}}'
   exit 0
 fi
+if [ "${1:-} ${2:-} ${3:-}" = "project labels 5500" ]; then
+  printf '%s\n' '{"labels":[{"name":"bug"},{"name":"adapter:hypertask"}]}'
+  exit 0
+fi
+if [ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-} ${6:-}" = "labels create --project 5500 --name change" ]; then
+  printf '%s\n' '{"label":{"name":"change"}}'
+  exit 0
+fi
 if [ "${1:-} ${2:-}" = "task create" ]; then
   shift 2
   while [ "$#" -gt 0 ]; do

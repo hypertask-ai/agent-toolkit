@@ -1,0 +1,1 @@
+- AGTE-164 keeps Fleet watch R2 quiet while an eligible agent has a fresh run in flight, and starts an immediate poll only when work waits without an active run.

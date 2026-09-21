@@ -112,7 +112,7 @@ case "$*" in
     printf '%s\n' '{"tasks":[{"ticketNumber":"OWNER-1","projectId":15,"assignees":[{"id":6,"displayName":"Owner"}]}]}' ;;
   'task get OPEN-1')
     printf '%s\n' '{"tasks":[{"ticketNumber":"OPEN-1","projectId":15,"assignees":[]}]}' ;;
-  'task get REQUEST-1'|'task get REQUEST-2')
+  'task get REQUEST-1'|'task get REQUEST-2'|'task get REQUEST-3'|'task get REQUEST-4')
     printf '%s\n' "{\"tasks\":[{\"ticketNumber\":\"${3}\",\"projectId\":15,\"assignees\":[]}] }" ;;
   'project show 15')
     printf '%s\n' '{"project":{"id":15,"ownerId":6,"owner":{"id":6,"displayName":"Owner"}}}' ;;
@@ -120,11 +120,24 @@ case "$*" in
     printf '%s\n' '{"comments":[{"id":41,"createdAt":"2026-09-20T10:00:00Z","creator":{"id":7,"displayName":"Other"},"text":"Do not use this."},{"id":42,"createdAt":"2026-09-20T11:00:00Z","creator":{"id":6,"displayName":"Owner"},"text":"<p>Please freeze the worker fleet.</p>"}]}' ;;
   '--json comment list REQUEST-2')
     printf '%s\n' '{"comments":[{"id":43,"createdAt":"2026-09-20T11:30:00Z","creator":{"id":7,"displayName":"Other"},"text":"Please stop the worker."}]}' ;;
+  '--json comment list REQUEST-3')
+    printf '%s\n' '{"comments":[{"id":44,"createdAt":"2026-09-20T11:40:00Z","creator":{"id":6,"displayName":"Owner"},"text":"Please investigate the worker."}]}' ;;
+  '--json comment list REQUEST-4')
+    printf '%s\n' '{"comments":[{"id":45,"createdAt":"2026-09-20T11:50:00Z","creator":{"id":6,"displayName":"Owner"},"text":"Do not stop the worker."}]}' ;;
   '--json project show 5500')
     printf '%s\n' '{"project":{"id":5500,"sections":[{"section_title":"Backlog"},{"section_title":"In Progress"},{"section_title":"Review"},{"section_title":"Done"}]}}' ;;
+  'project labels 5500')
+    if [ -f "$IDEA_LABEL_STATE" ]; then
+      printf '%s\n' '{"labels":[{"name":"adapter:hypertask"},{"name":"bug"},{"name":"Idea"}]}'
+    else
+      printf '%s\n' '{"labels":[{"name":"adapter:hypertask"},{"name":"bug"}]}'
+    fi ;;
+  'labels create --project 5500 --name idea')
+    : > "$IDEA_LABEL_STATE"
+    printf '%s\n' '{"label":{"name":"idea"}}' ;;
   task\ create*)
-    if [ "${BOARD_LABEL_WARNING:-no}" = "yes" ] && [[ "$*" == *' --labels '* ]]; then
-      printf '%s\n' 'LabelNotFound: adapter:hypertask'
+    if [ "${BOARD_TASK_REFUSAL:-no}" = "yes" ]; then
+      printf '%s\n' 'TaskCreateFailed'
       exit 1
     fi
     printf '%s\n' '{"task":{"ticketNumber":"AGTE-99","projectId":5500,"uniqueIndex":99}}' ;;
@@ -136,7 +149,8 @@ chmod +x "$TMP/bin/systemctl" "$TMP/bin/board"
 
 run_template() {
   HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF_DIR" \
-    SYSTEMCTL_LOG="$TMP/systemctl.log" BOARD_LOG="$TMP/board.log" PATH="$TMP/bin:$PATH" \
+    SYSTEMCTL_LOG="$TMP/systemctl.log" BOARD_LOG="$TMP/board.log" \
+    IDEA_LABEL_STATE="$TMP/idea-label" PATH="$TMP/bin:$PATH" \
     "$ROOT/scripts/agent-template" "$@"
 }
 
@@ -201,11 +215,27 @@ else
   bad ctl-stop-rejects-nonowner-comment "rc=$nonowner_stop_rc output=$nonowner_stop systemctl=$(cat "$TMP/systemctl.log")"
 fi
 
+for request in REQUEST-3 REQUEST-4; do
+  set +e
+  unrelated_stop="$(AGENT_SLUG=manager run_template ctl stop worker --owner-request "$request" 2>&1)"
+  unrelated_stop_rc=$?
+  set -e
+  if [ "$unrelated_stop_rc" -ne 0 ] \
+     && [ "$unrelated_stop" = "ctl refused: $request has no owner-authored request comment" ] \
+     && [ ! -s "$TMP/systemctl.log" ]; then
+    ok "ctl-stop-rejects-$request" "an unrelated or negated owner comment cannot authorize a stop"
+  else
+    bad "ctl-stop-rejects-$request" "rc=$unrelated_stop_rc output=$unrelated_stop systemctl=$(cat "$TMP/systemctl.log")"
+  fi
+done
+
 approved_stop="$(AGENT_SLUG=manager run_template ctl stop worker --owner-request REQUEST-1)"
 if [ "$approved_stop" = 'ctl stop worker: stopped agent-board-poll@worker.timer and agent-board-poll@worker.service' ] \
    && grep -q '^--user stop agent-board-poll@worker.timer agent-board-poll@worker.service$' "$TMP/systemctl.log" \
    && grep -qF 'comment add REQUEST-1 --text <p><strong>Decision: Agent mode change alarm.</strong>' "$TMP/board.log" \
-   && grep -qF '<q>Please freeze the worker fleet.</q>' "$TMP/board.log"; then
+   && grep -qF 'uniqueindex="" projectid="15"' "$TMP/board.log" \
+   && grep -qF '<q>Please freeze the worker fleet.</q>' "$TMP/board.log" \
+   && grep -qF '<p>Next: No owner action is needed.</p>' "$TMP/board.log"; then
   ok ctl-stop-owner-approved "owner request is verified, quoted, commented, and alarmed"
 else
   bad ctl-stop-owner-approved "output=$approved_stop systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/board.log")"
@@ -416,13 +446,39 @@ else
   bad feedback-env-cli-files "output=$feedback_env"
 fi
 
-feedback_retry="$(BOARD_LABEL_WARNING=yes AGENT_SLUG= run_template feedback \
-  --board-cli "$TMP/bin/board" --kind idea --what 'Clear retry result' \
-  --got 'labels unavailable' --expected 'show only the filed ticket' 2>&1)"
-if [ "$feedback_retry" = 'Feedback filed: idea: Clear retry result. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99' ]; then
-  ok feedback-label-retry-quiet "successful retry hides the internal label warning"
+rm -f "$TMP/idea-label"
+before_label_creates="$(grep -c '^labels create --project 5500 --name idea$' "$TMP/board.log" || true)"
+feedback_first_idea="$(AGENT_SLUG= run_template feedback \
+  --board-cli "$TMP/bin/board" --kind idea --what 'Create the idea label' \
+  --got 'the label is absent' --expected 'file the idea with its label' 2>&1)"
+feedback_second_idea="$(AGENT_SLUG= run_template feedback \
+  --board-cli "$TMP/bin/board" --kind idea --what 'Reuse the idea label' \
+  --got 'the label now exists' --expected 'file another labeled idea' 2>&1)"
+after_label_creates="$(grep -c '^labels create --project 5500 --name idea$' "$TMP/board.log" || true)"
+first_idea_tasks="$(grep -c '^task create .* --labels idea,adapter:hypertask --json$' "$TMP/board.log" || true)"
+mapped_idea_tasks="$(grep -c '^task create .* --labels Idea,adapter:hypertask --json$' "$TMP/board.log" || true)"
+if [ "$feedback_first_idea" = 'Feedback filed: idea: Create the idea label. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99' ] \
+   && [ "$feedback_second_idea" = 'Feedback filed: idea: Reuse the idea label. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99' ] \
+   && [ "$after_label_creates" -eq $((before_label_creates + 1)) ] \
+   && [ "$first_idea_tasks" -eq 1 ] \
+   && [ "$mapped_idea_tasks" -eq 1 ]; then
+  ok feedback-kind-label-idempotent "idea label is created once, then matched without case loss"
 else
-  bad feedback-label-retry-quiet "output=$feedback_retry"
+  bad feedback-kind-label-idempotent "first=$feedback_first_idea second=$feedback_second_idea creates=$after_label_creates lower=$first_idea_tasks mapped=$mapped_idea_tasks log=$(cat "$TMP/board.log")"
+fi
+
+set +e
+feedback_refused="$(BOARD_TASK_REFUSAL=yes AGENT_SLUG= run_template feedback \
+  --board-cli "$TMP/bin/board" --kind bug --what 'Refused feedback' \
+  --got 'the board rejects the task' --expected 'return an error without a paste payload' 2>&1)"
+feedback_refused_rc=$?
+set -e
+if [ "$feedback_refused_rc" -ne 0 ] \
+   && printf '%s' "$feedback_refused" | grep -qF 'ERROR: the board refused the feedback ticket: TaskCreateFailed' \
+   && ! printf '%s' "$feedback_refused" | grep -qi 'paste'; then
+  ok feedback-refusal-no-paste "authenticated refusal fails without hand-paste output"
+else
+  bad feedback-refusal-no-paste "rc=$feedback_refused_rc output=$feedback_refused"
 fi
 
 if grep -q $'who=regular\twhat=ctl stop worker' "$TMP/state/agent-board-poll/manager-actions.log" \
@@ -439,7 +495,9 @@ else
 fi
 
 if grep -qF 'if { [ "${MANAGER:-off}" = "on" ] || [ "$MAINTAINER" = "on" ]; }' "$ROOT/scripts/agent-board-poll" \
-   && grep -qF 'agent-template mode manual|auto [--board <id>|--runner <slug>]' "$ROOT/scripts/agent-board-poll" \
+   && grep -qF 'agent-template ctl stop <slug> --owner-request <ticket>' "$ROOT/scripts/agent-board-poll" \
+   && grep -qF 'only when that ticket has the board owner' "$ROOT/scripts/agent-board-poll" \
+   && grep -qF 'agent-template mode manual [--board <id>|--runner <slug>] --owner-request <ticket>' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template model <slug> <preset>' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'codex-sol' "$ROOT/scripts/agent-board-poll" \
    && grep -qF 'agent-template quiet on|off [<slug>|all]' "$ROOT/scripts/agent-board-poll" \

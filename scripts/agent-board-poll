@@ -257,7 +257,7 @@ An instruction to update or build on an allowlisted repository is yours to execu
 Use `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]` for every change to the agent toolkit, supervisor rules, analytics site, app, CLI, or Slack bot. Never run hax or codex directly.
 Write each build specification with four explicit parts: Ticket, What, Done when, and Guardrails.
 Use `agent-template build status [id]` and `agent-template build list` to inspect work. If asked what you did, answer from build list and its recorded output, not from memory.
-Never merge a pull request by hand. Auto-merge or the supervisor handles merges, and pull requests labelled `valentin-review` stay untouched.
+Never merge a pull request by hand. Auto-merge or the supervisor handles merges, and open pull requests labelled `valentin-review` stay untouched.
 Use `agent-template build` for a requested build. Use `agent-template update --keep-timers` for a requested toolkit update after its pull request merges.
 The repository allowlist is the complete boundary. Do not change a repo that is absent from it.'
 fi
@@ -1687,6 +1687,50 @@ watch_model_process() {
   return "$rc"
 }
 
+recover_held_closing_comment() {
+  local ref="$1" held_file="$2" pr_url="$3" linked_file final_file reasons
+  [ -s "$held_file" ] || return 0
+  linked_file="$held_file.linked"
+  final_file="$held_file.final"
+  if ! python3 "$TICKET_LINK_FORMATTER" --mode html --token-file "$TOKEN_FILE" \
+      < "$held_file" > "$linked_file" 2>>"$LOG"; then
+    log "closing comment for $ref remains held: ticket reference rewrite failed"
+    return 0
+  fi
+  if ! MERGED_PR_URL="$pr_url" python3 - "$linked_file" > "$final_file" <<'PYEOF'
+import html
+import re
+import os
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+url = os.environ["MERGED_PR_URL"]
+if url not in text:
+    number = url.rstrip("/").rsplit("/", 1)[-1]
+    anchor = '<a href="%s">%s</a>' % (html.escape(url, quote=True), html.escape(url))
+    rewritten, count = re.subn(r"\bPR\s*#?\s*" + re.escape(number) + r"\b", anchor, text, count=1, flags=re.I)
+    if not count:
+        block = "<p>%s</p>" % anchor
+        offset = text.rfind("<p")
+        rewritten = text[:offset] + block + text[offset:] if offset >= 0 else text + block
+    text = rewritten
+sys.stdout.write(text)
+PYEOF
+  then
+    log "closing comment for $ref remains held: pull request link rewrite failed"
+    return 0
+  fi
+  if ! reasons="$(python3 "$PLAIN_LANGUAGE_CHECK" < "$final_file" 2>&1)"; then
+    log "closing comment for $ref remains held after rewrite: $reasons"
+    return 0
+  fi
+  if post_ticket_comment "$ref" raw-file "$final_file"; then
+    log "rewrote and posted the held closing comment for $ref after $pr_url merged"
+  else
+    log "closing comment for $ref remains held: rewritten comment could not be posted"
+  fi
+}
+
 run_verdict_marker() {
   local ref="$1" task_id="$2" board="$3" ids comments
   ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
@@ -1846,9 +1890,9 @@ for line in sys.stdin:
 qa_protection_reason() {
   local row="$1" board="$2" owner
   owner="$(qa_config_field "$board" owner_id)"
-  ROW="$row" OWNER="$owner" python3 -c '
-import json, os
-row = json.loads(os.environ["ROW"])
+  printf '%s' "$row" | OWNER="$owner" python3 -c '
+import json, os, sys
+row = json.load(sys.stdin)
 labels = {str(value).strip().casefold() for value in row.get("labels") or []}
 if "manager-only" in labels:
     print("label manager-only")
@@ -1861,10 +1905,10 @@ elif os.environ["OWNER"] and os.environ["OWNER"] in {str(value) for value in row
 
 qa_is_stale_without_verdict() {
   local row="$1" comments="$2"
-  ROW="$row" COMMENTS="${comments:-[]}" AID="$AGENT_ID" NAME="$AGENT_NAME" \
+  printf '%s' "$row" | COMMENTS="${comments:-[]}" AID="$AGENT_ID" NAME="$AGENT_NAME" \
     HOURS="$QA_TURNAROUND_HOURS" NOW="$(date +%s)" python3 -c '
 import datetime, html, json, os, re, sys
-row = json.loads(os.environ["ROW"])
+row = json.load(sys.stdin)
 if str(row.get("section") or "").strip().casefold() != "qa":
     raise SystemExit(1)
 raw = str(row.get("section_entered_at") or row.get("updated_at") or "")
@@ -2483,12 +2527,12 @@ explain() {
 
 # row_field <row-json> <name>
 row_field() {
-  ROW="$1" F="$2" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get(os.environ["F"]) or "")'
+  printf '%s' "$1" | F="$2" python3 -c 'import json,os,sys;print(json.load(sys.stdin).get(os.environ["F"]) or "")'
 }
 
 # row_labels <row-json> : the ticket's labels, already lowercased, comma joined
 row_labels() {
-  ROW="$1" python3 -c 'import json,os;print(",".join(json.loads(os.environ["ROW"]).get("labels") or []))'
+  printf '%s' "$1" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("labels") or []))'
 }
 
 # rank_order : indices of the eligible tickets, best ownership rank first. The
@@ -2589,9 +2633,9 @@ if run_advisor_instruction; then
 fi
 check_maintainer_builds
 
-# ---------- owned pull-request binding (AGTE-130) ----------
-# An owned PR is the agent's only development work until the PR is merged and
-# QA has passed. This runs before both normal and exact-ticket event ranking.
+# ---------- owned pull-request binding (AGTE-130, AGTE-167) ----------
+# An owned PR can bind the agent only while GitHub reports it open. This runs
+# before both normal and exact-ticket event ranking.
 pr_fix_state() {
   local path="$1"
   python3 - "$path" <<'PYEOF'
@@ -2934,9 +2978,9 @@ elif re.fullmatch(r"restore .+, do not delete them", value, re.I):
     while IFS= read -r run_id; do
       [ -n "$run_id" ] || continue
       gh run rerun "$run_id" --repo "$PR_REPO" --failed >>"$LOG" 2>&1 || return 1
-    done < <(ROW="$gate" python3 -c '
-import json, os, re
-text = json.loads(os.environ["ROW"]).get("feedback") or ""
+    done < <(printf '%s' "$gate" | python3 -c '
+import json, re, sys
+text = json.load(sys.stdin).get("feedback") or ""
 for value in dict.fromkeys(re.findall(r"/actions/runs/([0-9]+)", text)):
     print(value)
 ')
@@ -2953,7 +2997,7 @@ release_owned_pr() {
   ref="$(row_field "$gate" ticket)"
   board="$(row_field "$gate" board)"; [ -n "$board" ] || board="${BOARD_ID%%,*}"
   destination="${PR_RELEASE_SECTIONS[$board]:-$OWNER_REVIEW_SECTION}"
-  checks="$(ROW="$gate" python3 -c 'import json,os; print(", ".join(json.loads(os.environ["ROW"]).get("failed_checks") or ["QA fail"]))')"
+  checks="$(printf '%s' "$gate" | python3 -c 'import json,sys; print(", ".join(json.load(sys.stdin).get("failed_checks") or ["QA fail"]))')"
   body="Closing after the structured repair rounds. Failing checks: $checks. Second-opinion diagnosis: $diagnosis"
   gh pr comment "$number" --repo "$PR_REPO" --body "$body" >>"$LOG" 2>&1 || return 1
   adapter_add_label "$BOARD_CLI" "$TOKEN_FILE" "$board" "$ref" needs-human >>"$LOG" 2>&1 || return 1
@@ -3027,15 +3071,15 @@ print(sum(json.loads(line).get("pickup_slot") is True for line in sys.stdin if l
   PR_GATE_SINCE="$(row_field "$PR_GATE" since)"
   PR_GATE_REASON="$(row_field "$PR_GATE" wait_reason)"
   PR_GATE_MERGED_AT="$(row_field "$PR_GATE" merged_at)"
-  if [ "$PR_GATE_COUNT" -ge 2 ] || ROW="$PR_GATE" python3 -c '
-import json, os, sys
-sys.exit(0 if json.loads(os.environ["ROW"]).get("blocks_pickup") is not False else 1)
+  if [ "$PR_GATE_COUNT" -ge 2 ] || printf '%s' "$PR_GATE" | python3 -c '
+import json, sys
+sys.exit(0 if json.load(sys.stdin).get("blocks_pickup") is not False else 1)
 '; then
     PR_PICKUP_BLOCKED="yes"
   fi
-  if ROW="$PR_GATE" python3 -c '
-import json, os, sys
-row = json.loads(os.environ["ROW"])
+  if printf '%s' "$PR_GATE" | python3 -c '
+import json, sys
+row = json.load(sys.stdin)
 names = {str(name).casefold() for name in row.get("failed_checks") or []}
 fail_fast = "revert-guard would fail" in str(row.get("first_error_line") or "").casefold()
 only_guard = names == {"revert-guard"} or (fail_fast and names <= {"revert-guard", "ci-tests"})
@@ -3059,9 +3103,9 @@ raise SystemExit(0 if only_guard else 1)
     PROGRESS_WAIT_STATE="awaiting-merge"
   else
   gate_board="$(row_field "$PR_GATE" board)"; [ -n "$gate_board" ] || gate_board="${BOARD_ID%%,*}"
-  gate_labels=",$(ROW="$PR_GATE" python3 -c 'import json,os; print(",".join(json.loads(os.environ["ROW"]).get("labels") or []))'),"
+  gate_labels=",$(row_labels "$PR_GATE"),"
   gate_section="$(row_field "$PR_GATE" ticket_section)"
-  gate_humans="$(ROW="$PR_GATE" python3 -c 'import json,os; print(",".join(json.loads(os.environ["ROW"]).get("human_assignee_ids") or []))')"
+  gate_humans="$(printf '%s' "$PR_GATE" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("human_assignee_ids") or []))')"
   gate_classification="$(owner_classification_state "$gate_board" "$PR_GATE_TICKET")"
   read -r _ gate_owner_state <<< "$gate_classification"
   gate_hold_reason=""
@@ -3078,9 +3122,9 @@ raise SystemExit(0 if only_guard else 1)
   fi
 
   mkdir -p "$(dirname "$BLOCKED")"
-  ROW="$PR_GATE" python3 - "$BLOCKED" <<'PYEOF'
+  printf '%s' "$PR_GATE" | python3 -c '
 import json, os, sys
-row = json.loads(os.environ["ROW"])
+row = json.load(sys.stdin)
 value = {"pr": row["number"], "state": row["state"], "since": row["since"],
          "ticket": row["ticket"], "prs": [{"pr": row["number"], "state": row["state"],
          "since": row["since"], "ticket": row["ticket"]}]}
@@ -3090,7 +3134,7 @@ with open(temporary, "w", encoding="utf-8") as handle:
     json.dump(value, handle)
     handle.write("\n")
 os.replace(temporary, path)
-PYEOF
+' "$BLOCKED"
 
   PROGRESS_WAIT_TICKET="$PR_GATE_TICKET"
   PROGRESS_WAIT_PR="$PR_GATE_NUMBER"
@@ -3167,7 +3211,7 @@ raise SystemExit(0 if (datetime.datetime.now(datetime.timezone.utc) - first).tot
   fi
 
   if [ -n "$PR_GATE" ]; then
-    failure_signature="$(ROW="$PR_GATE" python3 -c 'import json,os; row=json.loads(os.environ["ROW"]); print(", ".join(row.get("failed_checks") or ["review feedback"]) + " | " + str(row.get("first_error_line") or "no error line reported"))')"
+    failure_signature="$(printf '%s' "$PR_GATE" | python3 -c 'import json,sys; row=json.load(sys.stdin); print(", ".join(row.get("failed_checks") or ["review feedback"]) + " | " + str(row.get("first_error_line") or "no error line reported"))')"
     fix_round=$((PR_FIX_ROUNDS + 1))
   fi
   fi
@@ -3235,22 +3279,41 @@ fi
 # workdir and model launch. It is never a board claim or part of the failure
 # retry ladder, but it shares the per-ticket run cooldown.
 if [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$PR_GATE_ACTION" = "fix" ]; then
-  pr_row="$(GATE="$PR_GATE" AID="$AGENT_ID" BOARD="${BOARD_ID%%,*}" DIAGNOSIS="$PR_FIX_DIAGNOSIS" \
+  pr_row="$(printf '%s' "$PR_GATE" | AID="$AGENT_ID" BOARD="${BOARD_ID%%,*}" DIAGNOSIS="$PR_FIX_DIAGNOSIS" \
     ROUND="${fix_round:-}" SIGNATURE="${failure_signature:-}" QA_FAILURE_ID="${qa_failure_id:-}" \
     REVERT_GUARD_ONLY="$PR_REVERT_GUARD_ONLY" python3 -c '
-import json, os
-p = json.loads(os.environ["GATE"])
+import json, os, sys
+
+def cap_feedback(value, limit=16 * 1024):
+    data = str(value or "").encode("utf-8")
+    if len(data) <= limit:
+        return data.decode("utf-8")
+    keep = limit
+    while True:
+        prefix = data[:keep].decode("utf-8", errors="ignore")
+        kept = len(prefix.encode("utf-8"))
+        marker = "\n[truncated, %d more bytes]" % (len(data) - kept)
+        allowed = limit - len(marker.encode("utf-8"))
+        if kept <= allowed:
+            return prefix + marker
+        keep = allowed
+
+p = json.load(sys.stdin)
+feedback = cap_feedback(p.get("feedback"))
+title = " ".join(str(p.get("title") or "Pull request").split())
+checks = ", ".join(str(name) for name in p.get("failed_checks") or [])
+summary = title + (". Failed checks: %s." % checks if checks else ". Review feedback requires a fix.")
 print(json.dumps({"id":"pr-%s" % p["number"], "ref":p["ticket"], "section":"Pull request",
-                  "title":p["title"], "description":p.get("feedback") or "",
+                  "title":p["title"], "description":summary,
                   "agent_ids":[os.environ["AID"]], "assignee_count":1, "labels":[],
                   "comment_count":0, "board":p.get("board") or os.environ["BOARD"], "url":p["url"],
                   "trigger":"pr_fix", "pr_number":p["number"], "pr_branch":p["branch"],
-                  "pr_base":p.get("base") or "main", "pr_merged":bool(p.get("merged_at")),
+                  "pr_base":p.get("base") or "main",
                   "pr_fix_round":os.environ["ROUND"], "pr_diagnosis":os.environ["DIAGNOSIS"],
                   "pr_failure_signature":os.environ["SIGNATURE"],
                   "pr_qa_failure_id":os.environ["QA_FAILURE_ID"],
                   "pr_revert_guard_only":os.environ["REVERT_GUARD_ONLY"] == "yes",
-                  "pr_head":p.get("head") or "", "pr_feedback":p.get("feedback") or ""}))
+                  "pr_head":p.get("head") or "", "pr_feedback":feedback}))
 ')"
   CANDIDATES="$(printf '%s\n%s\n' "$CANDIDATES" "$pr_row")"
 fi
@@ -3281,21 +3344,21 @@ while IFS= read -r row; do
   fi
   [ -n "$row" ] || continue
 
-  task_id="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["id"])')"
+  task_id="$(row_field "$row" id)"
   row_board="$(row_field "$row" board)"; [ -n "$row_board" ] || row_board="${BOARD_ID%%,*}"
   if [ -z "$TARGET_TICKET" ] && declare -F adapter_mark_tick_candidate >/dev/null 2>&1; then
     adapter_mark_tick_candidate "$task_id" "$row_board"
   fi
-  ref="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["ref"])')"
+  ref="$(row_field "$row" ref)"
   if printf '%s\n' "$RECONCILED_REFS" | grep -qxF "$ref"; then
     explain "skip  $ref: its dead run was reconciled before this ranking pass"
     continue
   fi
-  title="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["title"])')"
-  url="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["url"])')"
-  section="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["section"])')"
-  description="$(ROW="$row" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["description"])')"
-  assigned="$(ROW="$row" AID="$AGENT_ID" python3 -c 'import json,os;print("yes" if os.environ["AID"] in json.loads(os.environ["ROW"])["agent_ids"] else "no")')"
+  title="$(row_field "$row" title)"
+  url="$(row_field "$row" url)"
+  section="$(row_field "$row" section)"
+  description="$(row_field "$row" description)"
+  assigned="$(printf '%s' "$row" | AID="$AGENT_ID" python3 -c 'import json,os,sys;print("yes" if os.environ["AID"] in json.load(sys.stdin)["agent_ids"] else "no")')"
   if [ "$assigned" = "yes" ] && [ "${section,,}" = "${IN_PROGRESS_SECTION,,}" ] \
      && [ "$(run_record_reconciliation_action "$ref")" = "alarm" ]; then
     explain "skip  $ref: two dead runs raised an alarm, so a third run needs intervention"
@@ -3309,16 +3372,16 @@ while IFS= read -r row; do
     explain "skip  $ref: two watchdog-capped runs requested a second opinion, so no third development run will start"
     continue
   fi
-  hit="$(ROW="$row" EXCL="$EXCLUDE_LABELS" python3 -c '
-import json, os
-row = json.loads(os.environ["ROW"])
+  hit="$(printf '%s' "$row" | EXCL="$EXCLUDE_LABELS" python3 -c '
+import json, os, sys
+row = json.load(sys.stdin)
 excluded = {s.strip().casefold() for s in os.environ["EXCL"].split(",") if s.strip()}
 print(",".join(sorted(set(row.get("labels") or []) & excluded)))')"
   # A ticket is free only if nobody at all is on it: a name on a ticket, human
   # or agent, means it already belongs to somebody.
-  unclaimed="$(ROW="$row" python3 -c '
-import json, os
-print("yes" if json.loads(os.environ["ROW"]).get("assignee_count", 1) == 0 else "no")')"
+  unclaimed="$(printf '%s' "$row" | python3 -c '
+import json, sys
+print("yes" if json.load(sys.stdin).get("assignee_count", 1) == 0 else "no")')"
 
   # An agent may watch several boards, so a ticket's own board decides where
   # the follow-up reads go, not the first entry in the conf.
@@ -3353,9 +3416,9 @@ print("yes" if json.loads(os.environ["ROW"]).get("assignee_count", 1) == 0 else 
         comments_json=""
       fi
     fi
-    comment_json="$(ROW="$row" python3 -c '
-import json, os
-value = json.loads(os.environ["ROW"]).get("trigger_comment")
+    comment_json="$(printf '%s' "$row" | python3 -c '
+import json, sys
+value = json.load(sys.stdin).get("trigger_comment")
 print(json.dumps(value) if value else "")')"
     if [ -z "$comment_json" ] && [ -n "$comments_json" ]; then
       comment_json="$(COMMENTS="$comments_json" python3 -c '
@@ -3527,16 +3590,16 @@ sys.exit(0 if os.environ["M"] in (json.loads(os.environ["CJ"]).get("html") or ""
   fi
 
   if [ "$is_reply_only" = "yes" ]; then
-    answerer="$(CJ="$comment_json" COMMENTS="${comments_json:-[]}" ROW="$row" \
+    answerer="$(printf '%s' "$row" | CJ="$comment_json" COMMENTS="${comments_json:-[]}" \
       AGENTS="$ANSWERER_AGENTS" BOARD="$board" FALLBACK="$ANSWERER_FALLBACK" python3 -c '
-import html, json, os, re
+import html, json, os, re, sys
 
 question = json.loads(os.environ["CJ"])
 try:
     comments = json.loads(os.environ["COMMENTS"] or "[]")
 except json.JSONDecodeError:
     comments = []
-row = json.loads(os.environ["ROW"])
+row = json.load(sys.stdin)
 agents = []
 seen = set()
 for line in os.environ.get("AGENTS", "").splitlines():
@@ -3824,13 +3887,11 @@ if [ -n "$first_eligible" ]; then
   PROGRESS_ELIGIBLE_URL="$(row_field "${E_ROW[$first_eligible]}" url)"
 fi
 
-# Pending checks and merged-but-not-deployed PRs deliberately consume the tick.
-# An emergency above is the one exception and remains eligible.
+# Pending checks on an open PR deliberately consume the tick. An emergency
+# above is the one exception and remains eligible.
 if [ -n "$PR_GATE" ] && [ "$PR_GATE_ACTION" = "wait" ] && [ "$picked" -eq 0 ]; then
   case "$PR_GATE_STATE" in
     checks-pending) log "waiting on PR #$PR_GATE_NUMBER: checks pending" ;;
-    merged-undeployed) log "waiting on PR #$PR_GATE_NUMBER: merged but not deployed" ;;
-    merged-base-missing) log "waiting on PR #$PR_GATE_NUMBER: merge commit is not contained in its base branch" ;;
     *) log "waiting on PR #$PR_GATE_NUMBER: $PR_GATE_STATE" ;;
   esac
   [ "$DRY_RUN" = "no" ] || echo "waiting on PR #$PR_GATE_NUMBER: $PR_GATE_STATE; nothing was claimed."
@@ -4016,12 +4077,7 @@ post the verdict but miss the move, the runner applies the move from the marker.
     pr_branch="$(row_field "$row" pr_branch)"
     pr_fix_round="$(row_field "$row" pr_fix_round)"
     pr_diagnosis="$(row_field "$row" pr_diagnosis)"
-    pr_merged="$(row_field "$row" pr_merged)"
-    if [ "$pr_merged" = "True" ]; then
-      pr_delivery="The original PR is already merged because QA found this failure. Commit and push the fix on $pr_branch, then open a follow-up PR for $ref from that branch."
-    else
-      pr_delivery="Commit and push the focused fix to this same PR branch."
-    fi
+    pr_delivery="Commit and push the focused fix to this same PR branch."
     PROMPT="Read $SKILLS_INDEX_SENTENCE first, in that order, then fix the existing pull request $url for $ref.
 
 This is fix round ${pr_fix_round:-unknown}. This is the only work you may do this tick. The runner checked out branch $pr_branch and rebased it on the PR base before this run. Resolve any rebase conflict. $pr_delivery Do not claim or start another ticket and do not hand this PR to a manager.
@@ -4035,7 +4091,7 @@ $pr_diagnosis
 
 }$AGENT_ADVISOR_GUIDANCE
 
-Keep ownership of this PR until it merges and QA passes."
+Keep ownership of this PR while it remains open."
   fi
 
   if [ "$is_reply_only" = "yes" ]; then
@@ -4140,9 +4196,10 @@ $PROMPT"
     PROMPT="$PROMPT
 
 MANAGER COMMANDS:
-- \`agent-template ctl start|stop|status <slug>\`. Example: "stop dev 1" runs \`agent-template ctl stop dev-1\`.
+- \`agent-template ctl start|status <slug>\`.
+- \`agent-template ctl stop <slug> --owner-request <ticket>\` only when that ticket has the board owner's request in a comment. Example: an owner comment on HTPR-6550 saying "stop dev 1" runs \`agent-template ctl stop dev-1 --owner-request HTPR-6550\`.
 - \`agent-template delegate <ticket> <slug> --why \"<one line reason>\"\`. Example: "give HTPR-6550 to dev 2" runs \`agent-template delegate HTPR-6550 dev-2 --why \"Take the implementation\"\`.
-- \`agent-template mode manual|auto [--board <id>|--runner <slug>]\`. Example: "switch the product board to manual" runs \`agent-template mode manual\`.
+- \`agent-template mode manual [--board <id>|--runner <slug>] --owner-request <ticket>\` requires the same owner-comment approval. \`agent-template mode auto [--board <id>|--runner <slug>]\` does not. Example: an owner request on HTPR-6550 to switch the product board to manual runs \`agent-template mode manual --owner-request HTPR-6550\`.
 - \`agent-template model <slug> <preset>\`. Presets are \`grok-fast\`, \`glm-flash\`, and \`codex-sol\`. Example: "put dev 2 on grok fast" runs \`agent-template model dev-2 grok-fast\`.
 - \`agent-template quiet on|off [<slug>|all]\`. Example: "quiet off for qa-1" runs \`agent-template quiet off qa-1\`.
 - \`agent-template feedback --as <slug> --kind bug|change|idea --what \"<summary>\" --got \"<current behavior or context>\" --expected \"<desired behavior>\"\`. Example: "file a toolkit ticket: add a setup report" runs \`agent-template feedback --as $SLUG --kind idea --what \"Add a setup report\" --got \"No setup report exists\" --expected \"Provide a setup report\"\`.
@@ -4158,7 +4215,7 @@ MAINTAINER COMMANDS:
 - \`agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]\`.
 - \`agent-template build status [id]\` and \`agent-template build list\`.
 - \`agent-template update --keep-timers\` after a toolkit build merges.
-Run the requested maintainer command now. Never answer with a plan, delegation, or developer handoff. Never merge a pull request by hand or touch one labelled \`valentin-review\`. A background build is not done when it starts; its completion checker posts the final result."
+Run the requested maintainer command now. Never answer with a plan, delegation, or developer handoff. Never merge a pull request by hand or touch an open one labelled \`valentin-review\`. A background build is not done when it starts; its completion checker posts the final result."
   fi
 
   if [ "$GRAFT" = "on" ] && [ "$is_reply_only" = "no" ]; then
@@ -4440,6 +4497,8 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
   started=$((started + 1))
   OPEN_PRS_BEFORE=""
   opened_this_run="no"
+  merged_pr_outcome="no"
+  merged_pr_url=""
   run_verdict=""
   if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
     OPEN_PRS_BEFORE="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
@@ -4643,6 +4702,8 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         export AGENT_QA_MOVE="$([ "$AGENT_KIND" = "qa" ] && printf yes || printf no)"
         export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
         export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
+        export AGENT_OPENED_PRS="$OPENED_PRS"
+        export AGENT_HELD_COMMENT_FILE="$MODEL_ACTIVITY_DIR/held-comment.html"
         export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
         export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
         export AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER"
@@ -4696,6 +4757,18 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "provider $route_provider quota exhausted"
       fi
     done < <(provider_routes "$RUN_MODEL_CLI")
+    if [ "$is_pr_fix" = "no" ] && [ "$worker_exited" = "yes" ] \
+       && declare -F adapter_ticket_merged_pr >/dev/null 2>&1; then
+      if merged_pr_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" \
+          "$PR_REPO" "$ref" yes 2>>"$LOG")" && [ -n "$merged_pr_url" ]; then
+        merged_pr_outcome="yes"
+        if [ "$rc" -ne 0 ]; then
+          log "model exited $rc after $merged_pr_url merged; using the merged pull request as the run outcome"
+        fi
+        rc=0
+        recover_held_closing_comment "$ref" "$MODEL_ACTIVITY_DIR/held-comment.html" "$merged_pr_url"
+      fi
+    fi
     if [ "$is_pr_fix" = "yes" ] && [ "$worker_exited" = "yes" ]; then
       pr_head_after="$(git -C "$RUN_DIR" rev-parse HEAD 2>/dev/null || true)"
       if [ "$rc" -ne 0 ]; then
@@ -4785,11 +4858,10 @@ if rows:
     while IFS= read -r opened_number; do
       [ -n "$opened_number" ] || continue
       if printf '%s\n' "$OPEN_PRS_BEFORE" | grep -qxF "$opened_number"; then continue; fi
-      if awk -F '\t' -v repo="$PR_REPO" -v number="$opened_number" \
+      if ! awk -F '\t' -v repo="$PR_REPO" -v number="$opened_number" \
           '$1 == repo && $2 == number { found=1 } END { exit !found }' "$OPENED_PRS"; then
-        continue
+        printf '%s\t%s\t%s\n' "$PR_REPO" "$opened_number" "$ref" >> "$OPENED_PRS"
       fi
-      printf '%s\t%s\t%s\n' "$PR_REPO" "$opened_number" "$ref" >> "$OPENED_PRS"
       opened_this_run="yes"
       opened_url="https://github.com/$PR_REPO/pull/$opened_number"
       progress_event --event pr-opened --pr "$opened_number" --pr-url "$opened_url" \
@@ -4818,6 +4890,12 @@ if rows:
       fi
       post_ticket_comment "$ref" text "$quota_wait_comment" || log "provider reset wait comment failed for $ref"
       move_ticket_or_report "$ref" "$origin_section" "$board" "provider reset wait" || true
+    elif [ "$merged_pr_outcome" = "yes" ]; then
+      run_record_status="done"
+      if ! move_ticket_or_report "$ref" "$DONE_SECTION" "$board" "merged PR outcome"; then
+        rc=74
+        run_record_status="move-failed"
+      fi
     elif [ "$rc" -ne 0 ]; then
       run_record_status="blocked"
       move_ticket_or_report "$ref" "$QA_BLOCKED_SECTION" "$board" "blocked run" || true

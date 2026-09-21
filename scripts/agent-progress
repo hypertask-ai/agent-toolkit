@@ -95,6 +95,7 @@ def fresh_progress(slug: str, at: str) -> dict[str, Any]:
         "eligible_work": {"count": 0, "since": None, "ticket": None, "ticket_url": None},
         "repeated_attempt": None,
         "units": [],
+        "monitored_prs": [],
         "stall": None,
         "stalls": [],
     }
@@ -268,6 +269,8 @@ def command_tick(args: argparse.Namespace) -> int:
                 "ticket": args.eligible_ticket or None,
                 "ticket_url": args.eligible_url or None,
             }
+        monitored = load_json(state_dir / f"{args.slug}.monitored-prs.json", [])
+        row["monitored_prs"] = monitored if isinstance(monitored, list) else []
         scanned = build_units(state_dir, args.slug, at) + instruction_units(state_dir, args.slug, at)
         row["units"] = merge_units(row.get("units") if isinstance(row.get("units"), list) else [], scanned)
         row["last_tick_at"] = at
@@ -398,6 +401,44 @@ def make_findings(row: dict[str, Any], current: dt.datetime) -> list[dict[str, A
             "failing_checks": failing_checks,
         })
 
+    existing_keys = {finding["key"] for finding in findings}
+    monitored = row.get("monitored_prs") if isinstance(row.get("monitored_prs"), list) else []
+    for pr in monitored:
+        if not isinstance(pr, dict):
+            continue
+        state = str(pr.get("state") or "")
+        since = parse_time(pr.get("since"))
+        number = pr.get("number")
+        key = f"wait:{slug}:pr:{number}"
+        if (state not in {"red", "pending", "awaiting-review"} or not since or not number
+                or key in existing_keys or (current - since).total_seconds() < WAIT_SECONDS):
+            continue
+        if state == "red":
+            checks = ", ".join(str(name) for name in pr.get("failed_checks") or [])
+            reason_detail = f"red: {checks}" if checks else "red"
+            pr_state = "red"
+        elif state == "pending":
+            checks = ""
+            reason_detail = "checks pending"
+            pr_state = "checks-pending"
+        else:
+            checks = ""
+            reason_detail = "unmerged"
+            pr_state = "unmerged"
+        reason = f"{slug}: PR {number} is {reason_detail} for {hours_text((current - since).total_seconds())}."
+        html_reason = (
+            f"{finding_link('PR ' + str(number), pr.get('url'))} has been {html.escape(reason_detail)} "
+            f"since {html.escape(str(pr.get('since')))}."
+        )
+        findings.append({
+            "key": key, "rule": "wait-over-two-hours", "runner": slug,
+            "since": iso(since), "ticket": pr.get("ticket"), "reason": reason,
+            "html_reason": html_reason, "pr_bug": True, "pr_number": number,
+            "pr_url": pr.get("url"), "pr_state": pr_state,
+            "failing_checks": checks,
+        })
+        existing_keys.add(key)
+
     eligible = row.get("eligible_work") if isinstance(row.get("eligible_work"), dict) else {}
     count = int(eligible.get("count") or 0)
     eligible_since = parse_time(eligible.get("since"))
@@ -509,10 +550,13 @@ def pr_bug_title(finding: dict[str, Any]) -> str:
     return f"Bug: PR #{finding.get('pr_number')} stayed {finding.get('pr_state') or 'unmerged'} for two hours"
 
 
-def file_alarm(board_cli: str, title: str, description: str) -> str | None:
+def file_alarm(board_cli: str, title: str, description: str,
+               label: str = "bug") -> str | None:
     base = [board_cli, "task", "create", "--project", "5500", "--section", "Review",
             "--priority", "high", "--title", title, "--description", description]
-    commands = [[*base, "--labels", "bug", "--json"], [*base, "--json"]]
+    commands = [[*base, "--labels", label, "--json"]]
+    if label != "manager-only":
+        commands.append([*base, "--json"])
     for index, command in enumerate(commands):
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
@@ -556,7 +600,7 @@ def file_pr_bug(board_cli: str, finding: dict[str, Any]) -> str | None:
         f"<p>First observed: {html.escape(str(finding['since']))}.</p>"
         f"{check_detail}"
     )
-    return file_alarm(board_cli, title, description)
+    return file_alarm(board_cli, title, description, "manager-only")
 
 
 def ticket_url(board: str, ref: str) -> str:

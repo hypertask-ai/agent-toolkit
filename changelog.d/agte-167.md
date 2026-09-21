@@ -1,0 +1,1 @@
+- AGTE-167 limits agent binding and pull request protection to open pull requests, so merged or closed pull requests cannot block new work regardless of their labels.

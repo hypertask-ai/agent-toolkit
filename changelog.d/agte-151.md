@@ -1,0 +1,1 @@
+- AGTE-151 releases already Done or human-moved tickets without another move, clears their agent bindings, and links ticket references in runner-written comments.
