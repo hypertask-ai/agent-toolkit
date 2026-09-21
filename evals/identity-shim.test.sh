@@ -44,7 +44,8 @@ EOF
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$GH_CAPTURE"
-if [ "${1:-} ${2:-}" = "pr view" ] && [[ " $* " = *' --json labels '* ]]; then
+if [ "${1:-} ${2:-}" = "pr view" ] && [[ " $* " = *' --json state,labels '* ]]; then
+  printf '%s\n' "${GH_PR_STATE:-OPEN}"
   [ -z "${GH_PR_LABEL:-}" ] || printf '%s\n' "$GH_PR_LABEL"
 elif [ "${1:-} ${2:-}" = "pr create" ]; then
   printf 'https://github.com/example/repo/pull/7\n'
@@ -92,6 +93,16 @@ if GH_PR_LABEL=valentin-review gh api /repos/example/repo/issues/7/comments -f b
 else
   printf '%s\n' "$?" > "$PROTECTED_API_RC"
 fi
+if GH_PR_STATE=MERGED GH_PR_LABEL=valentin-review gh pr comment 7 --body allowed-after-merge >/dev/null; then
+  printf '0\n' > "$MERGED_PR_RC"
+else
+  printf '%s\n' "$?" > "$MERGED_PR_RC"
+fi
+if GH_PR_STATE=CLOSED GH_PR_LABEL=valentin-review gh api /repos/example/repo/issues/7/comments -f body=allowed-after-close >/dev/null; then
+  printf '0\n' > "$CLOSED_PR_RC"
+else
+  printf '%s\n' "$?" > "$CLOSED_PR_RC"
+fi
 EOF
 chmod +x "$TMP/bin/"*
 
@@ -136,7 +147,8 @@ run_poll() {
     API_MERGE_ERROR="$TMP/api-merge.error" GRAPHQL_MERGE_RC="$TMP/graphql-merge.rc" \
     GRAPHQL_MERGE_ERROR="$TMP/graphql-merge.error" PROTECTED_PR_RC="$TMP/protected-pr.rc" \
     PROTECTED_PR_ERROR="$TMP/protected-pr.error" PROTECTED_API_RC="$TMP/protected-api.rc" \
-    PROTECTED_API_ERROR="$TMP/protected-api.error" \
+    PROTECTED_API_ERROR="$TMP/protected-api.error" MERGED_PR_RC="$TMP/merged-pr.rc" \
+    CLOSED_PR_RC="$TMP/closed-pr.rc" \
     PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test
 }
 
@@ -183,13 +195,22 @@ fi
 
 if [ "$(cat "$TMP/protected-pr.rc")" -ne 0 ] \
    && [ "$(cat "$TMP/protected-api.rc")" -ne 0 ] \
-   && grep -qF 'label valentin-review is manager-only' "$TMP/protected-pr.error" \
-   && grep -qF 'label valentin-review is manager-only' "$TMP/protected-api.error" \
+   && grep -qF 'open PR label valentin-review is manager-only' "$TMP/protected-pr.error" \
+   && grep -qF 'open PR label valentin-review is manager-only' "$TMP/protected-api.error" \
    && ! grep -qF 'pr comment 7 --body blocked' "$TMP/gh-calls" \
-   && ! grep -qF '/repos/example/repo/issues/7/comments' "$TMP/gh-calls"; then
-  ok identity-shim-protected-pr-blocked 'CLI and implicit-POST API changes to a valentin-review PR are refused'
+   && ! grep -qF 'body=blocked' "$TMP/gh-calls"; then
+  ok identity-shim-protected-pr-blocked 'CLI and implicit-POST API changes to an open valentin-review PR are refused'
 else
   bad identity-shim-protected-pr-blocked "rc=$(cat "$TMP/protected-pr.rc") calls=$(cat "$TMP/gh-calls")"
+fi
+
+if [ "$(cat "$TMP/merged-pr.rc")" -eq 0 ] \
+   && [ "$(cat "$TMP/closed-pr.rc")" -eq 0 ] \
+   && grep -qF 'pr comment 7 --body allowed-after-merge' "$TMP/gh-calls" \
+   && grep -qF 'body=allowed-after-close' "$TMP/gh-calls"; then
+  ok identity-shim-protection-open-only 'valentin-review protection ends when a PR merges or closes'
+else
+  bad identity-shim-protection-open-only "merged=$(cat "$TMP/merged-pr.rc") closed=$(cat "$TMP/closed-pr.rc") calls=$(cat "$TMP/gh-calls")"
 fi
 
 if cmp -s "$TMP/received-token" <(printf 'agent-token\n'); then

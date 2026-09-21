@@ -355,9 +355,9 @@ our own message rather than "command not found" three layers down.
 
 1. Read the agent's conf and load its adapter.
 2. Take a non-blocking lock; if a tick is already running, exit.
-3. List PRs owned through the agent's branch prefix, current ticket assignment,
-   or recorded run state. Stop normal pickup only when two open PRs occupy the
-   agent's pickup slots, or merged work is still waiting to deploy.
+3. List open PRs owned through the agent's branch prefix or recorded run state.
+   Stop normal pickup only when two open PRs occupy the agent's pickup slots.
+   Closed and merged PRs never bind an agent.
 4. List the board's tickets in the watched columns.
 5. Read each candidate's full ticket and comment thread. Classify the board
    owner's newest comment as `hold`, `go`, `question`, or `feedback`, then post
@@ -390,11 +390,13 @@ agents recognize only PRs in their own opened-PR ledger. Board assignment and
 shared GitHub authorship do not transfer ownership. PR discovery uses one locked,
 host-wide REST cache per repository. It refreshes no more than once a minute and
 stores every open PR plus merges from the last 48 hours without PR bodies. The
-cache also stores labels. A `valentin-review` label makes the PR manager-only, so
-the runner starts no fix and performs no PR mutation. Its command shim rejects
-manual merges and checks this label before any allowed PR mutation. When
-GitHub reports a rate limit, all runners pause repository calls until its reset
-time. PR ownership stays unknown during the pause, and ticks continue.
+binding gate filters this cache to open PRs before ownership or labels can bind
+an agent. A `valentin-review` label makes an open PR manager-only, so the runner
+starts no fix and performs no PR mutation. The runner confirms the PR is still
+open before applying this protection. Its command shim rejects manual merges and
+checks this label before any allowed PR mutation. When GitHub reports a rate
+limit, all runners pause repository calls until its reset time. PR ownership
+stays unknown during the pause, and ticks continue.
 
 Two open PRs fill the pickup slots and stop every new claim, including an
 `emergency`. The runner ranks that queue oldest first. A red or pending PR older
@@ -405,12 +407,10 @@ unassigned or assigned to no active agent blocks nobody unless branch or run
 state identifies an owner. The first tick each UTC day logs `orphaned PR #<n>
 (<branch>) has no owning agent` for supervisor follow-up.
 
-**LIVE has one exact definition:** the PR is merged, its merge commit is
-contained in its base branch, and the newest GitHub deployment for that base in
-the `Production` environment was created after the merge, has status `success`,
-and deploys a commit containing the merge. The answer is cached per PR for 60
-seconds. If the repository has no GitHub deployment records at all, LIVE falls
-back to merged plus base-contains-merge, and the runner logs that fallback.
+A merged or closed PR never binds an agent, regardless of its labels,
+deployment state, ticket section, or QA result. This filter runs before PR
+protection, so labels such as `valentin-review` cannot retain a binding after the
+PR leaves the open state.
 
 When two PRs fill the pickup slots, an open red PR gets another fix run with
 exact failed check names, failed-run logs, and verbatim `CONCERNS` or
@@ -420,9 +420,8 @@ deduplicated toolkit bug in Review at High priority, notifies the toolkit agent
 room and configured Telegram chat, appears on Board health, and releases its
 pickup slot. The alarm stays in the health JSON until the PR clears; then it gets
 one timestamped cleared comment and moves to Done. A red bug includes every
-failed check name. A green open PR uses one slot but
-never blocks pickup by itself. A merged but undeployed PR still consumes the
-tick.
+failed check name. A green open PR uses one slot but never blocks pickup by
+itself.
 
 PR fix runs never read the attempts file, apply a retry limit or cooldown, use
 the model escalation ladder, or hand work to a manager.

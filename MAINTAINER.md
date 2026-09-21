@@ -434,12 +434,14 @@ without auto-merge for 30 minutes.
 Before any normal or event-ticket ranking, the runner reads one host-wide PR
 cache for the repository. The first tick after 60 seconds refreshes it under a
 lock and paginates every open PR plus merges from the last 48 hours. Each row
-stores the PR number, title, branch, author, and labels, with no body. A pull
-request labelled `valentin-review` becomes a protected wait: the runner does not
-review, modify, close, or merge it. The runner command shim also refuses manual
-merges and checks this label before any pull request mutation. A GitHub rate-limit
-response records its reset time for the repository. Every runner skips GitHub
-calls until then, treats ownership as unknown, and continues its tick.
+stores the PR number, title, branch, author, and labels, with no body. The binding
+gate filters those rows to open PRs before ownership and labels are evaluated. A
+pull request labelled `valentin-review` becomes a protected wait only while it is
+open: the runner confirms its current state, then does not review, modify, close,
+or merge it. The runner command shim also refuses manual merges and checks this
+label before any pull request mutation. A GitHub rate-limit response records its
+reset time for the repository. Every runner skips GitHub calls until then, treats
+ownership as unknown, and continues its tick.
 
 Ownership is proved only by `<slug>/` (case-insensitive), `<slug>.opened-prs`, or
 an explicitly configured `GH_LOGIN` that differs from the host `gh` login.
@@ -449,13 +451,13 @@ Board assignment and shared GitHub authorship never transfer PR ownership.
 
 A red or pending PR stops pickup for its first two hours, then remains monitored
 while new work can start. One green PR awaiting review or merge is monitored
-without stopping pickup; two open PRs fill the pickup slots. A merged PR awaiting
-QA remains bound. A PR whose ticket is in the blocked section, has any human
-assignee, or is held by the owner remains bound but starts no fix round. The
-binding ends when QA moves the ticket to `DONE_SECTION` (default `Done`). An open
-PR with no active owner is ignored. Once per UTC day, a tick logs `orphaned PR
-#<n> (<branch>) has no owning agent` so the supervisor can decide who should take
-it.
+without stopping pickup; two open PRs fill the pickup slots. A merged or closed
+PR never binds an agent, regardless of labels, deployment state, ticket section,
+or QA result. A PR whose ticket is in the blocked section, has any human assignee,
+or is held by the owner remains bound but starts no fix round while the PR is
+open. An open PR with no active owner is ignored. Once per UTC day, a tick logs
+`orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can decide
+who should take it.
 
 A red PR resolves its current base and head with `gh pr view`, then fetches both
 from the `PR_REPO` GitHub URL instead of the checkout's `origin`. Fetch or
@@ -468,10 +470,8 @@ recorded only after that worker process exits. Its later `Fix round N:` ticket
 comment reports either the pushed commit or `no push: <reason>`. The prompt
 includes exact failed check names, reviewer concerns, and the last 80 failed-log
 lines for each failing check and run. PR fix runs bypass the attempts ladder and
-manager handoff, but retain the per-ticket cooldown. A QA agent's `Handoff:`
-after merge is another red round on the same counter; an already-counted QA
-comment cannot increment it twice. A QA repair opens a follow-up PR from the
-same branch.
+manager handoff, but retain the per-ticket cooldown. They stop as soon as the PR
+merges or closes.
 
 Before round three, or after three hours from the first red round, the runner
 asks `SECOND_OPINION_CLI` for one independent diagnosis. A lone `revert-guard`
@@ -495,10 +495,10 @@ the ticket assignment and PR binding so normal pickup can resume.
 The owner-facing binding state is one JSON line at
 `~/.local/state/agent-board-poll/<slug>.blocked`. Released PRs are recorded in
 `<slug>.released-prs`, so eventual GitHub list results and older merged repair
-PRs cannot bind the agent again. The runner removes the blocked file only after
-QA passes or the complete human-release sequence succeeds. Two-hour PR alarms
-and Board health reporting remain observational; they never release this
-binding.
+PRs cannot bind the agent again. The runner removes the blocked file when no
+open PR blocks pickup or the complete human-release sequence succeeds. Two-hour
+PR alarms and Board health reporting remain observational; they never release
+this binding.
 
 ## What wakes it
 
