@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 # Direct ticket URL resolution for the Hypertask runtime.
 
+# The runner historically treats 75 as an optional rate-limit skip. PR ownership
+# must fail closed whenever GitHub cannot provide a complete answer.
+_hypertask_base_pr_gate() (
+  # shellcheck disable=SC1091
+  . "$CORE_ROOT/adapters/hypertask/adapter.sh"
+  adapter_pr_gate "$@"
+)
+
+adapter_pr_gate() {
+  local rc
+  _hypertask_base_pr_gate "$@" && return 0
+  rc=$?
+  [ "$rc" -ne 75 ] || return 1
+  return "$rc"
+}
+
 _hypertask_cached_project_prefix() {
   local cache="$1" base="$2" project_id="$3"
   [ -r "$cache" ] || return 1
