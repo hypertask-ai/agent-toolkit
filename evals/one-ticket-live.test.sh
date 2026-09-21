@@ -169,6 +169,14 @@ JSON
 fi
 if [ "$1 $2" = "pr view" ]; then
   number="$3"
+  if printf ' %s ' "$*" | grep -q ' --json state,autoMergeRequest '; then
+    state=OPEN
+    [ "$scenario" != "closed-protected" ] || state=CLOSED
+    auto_merge=null
+    [ "${PR_AUTO_MERGE_ENABLED:-no}" != yes ] || auto_merge='{"enabledAt":"2026-09-18T21:00:00Z"}'
+    printf '{"state":"%s","autoMergeRequest":%s}\n' "$state" "$auto_merge"
+    exit 0
+  fi
   if printf ' %s ' "$*" | grep -q ' --json state --jq .state '; then
     if [ "$scenario" = "closed-protected" ]; then
       printf 'CLOSED\n'
@@ -216,6 +224,9 @@ if [ "$1 $2" = "pr view" ]; then
   printf '{"state":"OPEN","url":"https://github.test/pull/%s","title":"HTPR-%s fix","body":"","headRefName":"agent/dev-1-htpr-%s","headRefOid":"head%s","baseRefName":"production","createdAt":"2026-01-01T00:00:00Z","statusCheckRollup":%s,"reviews":%s,"comments":%s}\n' "$number" "$number" "$number" "$number" "$checks" "$reviews" "$comments"
   exit 0
 fi
+if [ "$1 $2" = "pr merge" ]; then
+  exit 0
+fi
 if [ "$1" = "api" ]; then
   endpoint="$2"
   if [[ "$endpoint" == repos/example/repo/pulls\?state=* ]]; then
@@ -234,6 +245,7 @@ import os
 scenario = os.environ["SCENARIO"]
 state = os.environ["REQUEST_STATE"]
 page = int(os.environ.get("REQUEST_PAGE") or "1")
+override_labels = [value for value in os.environ.get("PR_LABEL_OVERRIDE", "").split(",") if value]
 def row(number, ticket, branch, author="shared-bot", updated="2026-09-18T21:00:00Z", merged=None, labels=None):
     return {"number": number, "title": f"HTPR-{ticket} fix", "html_url": f"https://github.test/pull/{number}",
             "head": {"ref": branch}, "base": {"ref": "production"}, "user": {"login": author},
@@ -287,7 +299,8 @@ elif scenario not in merged_scenarios | {"merged-protected"}:
                     labels=["valentin-review"])]
     elif scenario != "record-open":
         updated = "2026-09-18T19:00:00Z" if scenario == "stale-red" else "2026-09-18T21:00:00Z"
-        rows = [row(1, 1, "dev-1/htpr-1", author="dev-one", updated=updated)]
+        rows = [row(1, 1, "dev-1/htpr-1", author="dev-one", updated=updated,
+                    labels=override_labels)]
 print(json.dumps(rows))
 PYEOF
     exit 0
@@ -472,12 +485,32 @@ pending="$(run_gate pending)"
 echo 'PASS pending PR remains bound without inventing work'
 
 : > "$TMP/gh-calls"
-protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate valentin-review)"
+protected="$(GH_CALL_LOG="$TMP/gh-calls" PR_AUTO_MERGE_ENABLED=yes run_gate valentin-review)"
 [[ "$protected" == *'"action": "wait"'* && "$protected" == *'"state": "protected"'* ]]
 [[ "$protected" == *'label valentin-review'* ]]
-grep -qF 'pr view 14 --repo example/repo --json state --jq .state' "$TMP/gh-calls"
+grep -qF 'pr view 14 --repo example/repo --json state,autoMergeRequest' "$TMP/gh-calls"
+grep -qF 'pr merge --repo example/repo --disable-auto 14' "$TMP/gh-calls"
 ! grep -qE '/comments|/compare|/deployments' "$TMP/gh-calls"
-echo 'PASS valentin-review protection applies while the PR is open'
+echo 'PASS valentin-review protection disables native auto-merge while the PR is open'
+
+for review_section in 'Valentin Review' 'HT Manager Review'; do
+  : > "$TMP/gh-calls"
+  section_hold="$(GH_CALL_LOG="$TMP/gh-calls" PR_AUTO_MERGE_ENABLED=yes \
+    API_TASK_SECTION="$review_section" run_gate "section-${review_section// /-}")"
+  [[ "$section_hold" == *'"state": "protected"'* && "$section_hold" == *"ticket is in $review_section"* ]]
+  grep -qF 'pr merge --repo example/repo --disable-auto 1' "$TMP/gh-calls"
+done
+echo 'PASS human-review ticket lanes disable native auto-merge without a PR label'
+
+: > "$TMP/gh-calls"
+GH_CALL_LOG="$TMP/gh-calls" PR_LABEL_OVERRIDE=valentin-review PR_AUTO_MERGE_ENABLED=yes \
+  run_gate label-release >/dev/null
+rm -f "$TMP/cache-label-release-dev-1/pr-cache/example__repo.json"
+released="$(GH_CALL_LOG="$TMP/gh-calls" run_gate label-release)"
+[[ "$released" == *'"state": "pending"'* ]]
+grep -qF 'pr merge --repo example/repo --disable-auto 1' "$TMP/gh-calls"
+grep -qF 'pr merge --repo example/repo --auto --squash 1' "$TMP/gh-calls"
+echo 'PASS removing valentin-review re-enables native auto-merge after the hold clears'
 
 : > "$TMP/gh-calls"
 merged_protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate merged-protected dev-2 'Dev Two')"
@@ -488,7 +521,7 @@ echo 'PASS merged PR 702 never binds dev-2 despite valentin-review protection'
 : > "$TMP/gh-calls"
 closed_protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate closed-protected)"
 [[ -z "$closed_protected" ]]
-grep -qF 'pr view 703 --repo example/repo --json state --jq .state' "$TMP/gh-calls"
+grep -qF 'pr view 703 --repo example/repo --json state,autoMergeRequest' "$TMP/gh-calls"
 ! grep -qE '/comments|/compare|/deployments' "$TMP/gh-calls"
 echo 'PASS a newly closed PR never binds despite valentin-review protection'
 

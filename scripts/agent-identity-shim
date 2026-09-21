@@ -144,7 +144,14 @@ PYEOF
 fi
 if [ "${1:-}" = "pr" ] && [ "${2:-}" = "merge" ]; then
   auto=no
-  for arg in "$@"; do [ "$arg" != "--auto" ] || auto=yes; done
+  disable_auto=no
+  for arg in "$@"; do
+    [ "$arg" != "--auto" ] || auto=yes
+    [ "$arg" != "--disable-auto" ] || disable_auto=yes
+  done
+  if [ "$disable_auto" = yes ]; then
+    exec "$REAL_GH" "$@"
+  fi
   if [ "$auto" != yes ]; then
     echo "merge refused: runners never merge pull requests by hand" >&2
     exit 2

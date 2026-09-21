@@ -2353,6 +2353,49 @@ print(",".join(ids))')" || {
 }
 
 # ---------- one ticket until live ----------
+_ht_reconcile_auto_merge_hold() {
+  local repo="$1" number="$2" hold_reason="$3" cache_dir="$4"
+  local marker_dir marker details state enabled rc
+  marker_dir="$cache_dir/auto-merge-holds"
+  marker="$marker_dir/${repo//\//__}-$number"
+
+  if [ -z "$hold_reason" ] && [ ! -f "$marker" ]; then
+    return 0
+  fi
+  if details="$(_ht_gh "$repo" pr view "$number" --repo "$repo" --json state,autoMergeRequest)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  state="$(printf '%s' "$details" | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("state") or "").upper())')"
+  [ "$state" = "OPEN" ] || { rm -f "$marker"; return 3; }
+  enabled="$(printf '%s' "$details" | python3 -c 'import json,sys; print("yes" if json.load(sys.stdin).get("autoMergeRequest") else "no")')"
+
+  if [ -n "$hold_reason" ]; then
+    if [ "$enabled" = "yes" ]; then
+      _ht_gh "$repo" pr merge --repo "$repo" --disable-auto "$number" >/dev/null || return $?
+    fi
+    mkdir -p "$marker_dir"
+    printf '%s\n' "$hold_reason" > "$marker"
+    return 0
+  fi
+
+  if [ "$enabled" = "yes" ]; then
+    rm -f "$marker"
+    return 0
+  fi
+  if _ht_gh "$repo" pr merge --repo "$repo" --auto --squash "$number" >/dev/null; then
+    rm -f "$marker"
+    return 0
+  else
+    rc=$?
+  fi
+  [ "$rc" -ne 75 ] || return 75
+  printf 'could not re-enable auto-merge for %s#%s after its human-review hold cleared\n' "$repo" "$number" >&2
+  return 0
+}
+
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
 # Prints one JSON object per open pull request still owned by this agent.
 # Ownership comes only from an agent slug at the branch start or after agent/
@@ -2365,8 +2408,8 @@ print(",".join(ids))')" || {
 adapter_pr_gate() (
   local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
   local config_dir="${7:-}" opened_prs="${8:-}" repo="${PR_REPO:-}"
-  local state_dir released_prs tmp pr number branch marker today owner_conf owner_slug one board_json pr_state
-  local offset path returned github_login host_login cache_rc agent_role rc
+  local state_dir released_prs tmp pr number branch marker today owner_conf owner_slug one board_json
+  local offset path returned github_login host_login cache_rc agent_role rc hold_reason
 
   [ -n "$repo" ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
@@ -2600,23 +2643,29 @@ PYEOF
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue
     number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
-    if ROW="$pr" python3 -c '
-import json, os, sys
+    hold_reason="$(ROW="$pr" python3 -c '
+import json, os
 row = json.loads(os.environ["ROW"])
-sys.exit(0 if "valentin-review" in row.get("prLabels", []) else 1)
-'; then
-      if pr_state="$(_ht_gh "$repo" pr view "$number" --repo "$repo" --json state --jq .state 2>/dev/null)"; then
-        rc=0
-      else
-        rc=$?
-      fi
-      [ "$rc" -eq 0 ] || { _ht_github_paused "$repo" && return 75; return 1; }
-      [ "$pr_state" = "OPEN" ] || continue
-      PR="$pr" python3 -c '
+section = str(row.get("ticket_section") or "").strip().casefold()
+if "valentin-review" in row.get("prLabels", []):
+    print("label valentin-review")
+elif section in {"valentin review", "ht manager review"}:
+    print("ticket is in %s" % row.get("ticket_section"))
+')"
+    if _ht_reconcile_auto_merge_hold "$repo" "$number" "$hold_reason" "$cache_dir"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    [ "$rc" -ne 3 ] || continue
+    [ "$rc" -eq 0 ] || { [ "$rc" -eq 75 ] && return 75; return 1; }
+    if [ -n "$hold_reason" ]; then
+      PR="$pr" HOLD_REASON="$hold_reason" python3 -c '
 import json, os
 pr = json.loads(os.environ["PR"])
-print(json.dumps({"action":"wait", "state":"protected", "wait_reason":"label valentin-review",
-                  "definition":"open pull request labelled valentin-review is manager-only",
+reason = os.environ["HOLD_REASON"]
+print(json.dumps({"action":"wait", "state":"protected", "wait_reason":reason,
+                  "definition":"human-held pull request has native auto-merge disabled",
                   "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
                   "title":pr["title"], "branch":pr["headRefName"], "since":pr["createdAt"],
                   "task_id":pr.get("task_id") or "", "board":pr.get("board") or "",

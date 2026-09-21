@@ -1,0 +1,1 @@
+- AGTE-163 disables GitHub native auto-merge while a pull request is held by the `valentin-review` label or a human-review ticket lane, then restores it after the hold clears.
