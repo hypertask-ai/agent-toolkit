@@ -394,10 +394,12 @@ GitHub authorship do not transfer ownership. PR discovery uses one locked,
 host-wide REST cache per repository. It refreshes no more than once a minute and
 stores every open PR plus merges from the last 48 hours without PR bodies. The
 binding gate filters this cache to open PRs before ownership or labels can bind
-an agent. A `valentin-review` label makes an open PR manager-only, so the runner
-starts no fix and performs no PR mutation. The runner confirms the PR is still
-open before applying this protection. Its command shim rejects manual merges and
-checks this label before any allowed PR mutation. When GitHub reports a rate
+an agent. A `valentin-review` label makes an open PR manager-only. The runner
+disables GitHub native auto-merge and starts no fix. Moving the linked ticket to
+`Valentin Review` or `HT Manager Review` also disables auto-merge. The runner
+restores auto-merge only after the label and review-lane hold are gone. Its
+command shim rejects manual merges and checks the label before any other allowed
+PR mutation. When GitHub reports a rate
 limit, all runners pause repository calls until its reset time. PR ownership
 stays unknown during the pause, and ticks continue.
 

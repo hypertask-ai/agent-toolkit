@@ -72,6 +72,7 @@ else
   printf '%s\n' "$?" > "$MANUAL_MERGE_RC"
 fi
 gh pr merge --repo example/repo --auto --squash 7 >/dev/null
+GH_PR_LABEL=valentin-review gh pr merge --repo example/repo --disable-auto 7 >/dev/null
 if gh api -X PUT repos/example/repo/pulls/7/merge > /dev/null 2> "$API_MERGE_ERROR"; then
   printf '0\n' > "$API_MERGE_RC"
 else
@@ -193,6 +194,7 @@ if [ "$(cat "$TMP/manual-merge.rc")" -ne 0 ] \
    && grep -qF 'runners never merge pull requests by hand' "$TMP/api-merge.error" \
    && grep -qF 'runners never merge pull requests by hand' "$TMP/graphql-merge.error" \
    && grep -qxF 'pr merge --repo example/repo --auto --squash 7' "$TMP/gh-calls" \
+   && grep -qxF 'pr merge --repo example/repo --disable-auto 7' "$TMP/gh-calls" \
    && ! grep -qxF 'pr merge 7' "$TMP/gh-calls" \
    && ! grep -qF 'api -X PUT repos/example/repo/pulls/7/merge' "$TMP/gh-calls" \
    && ! grep -qF 'mergePullRequest' "$TMP/gh-calls"; then
