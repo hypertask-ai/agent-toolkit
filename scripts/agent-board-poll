@@ -869,6 +869,29 @@ log() {
   if [ "$DRY_RUN" = "yes" ]; then printf '%s\n' "$*"; fi
 }
 
+declare -A PR_RELEASE_SECTIONS=()
+validate_pr_release_sections() {
+  local board resolved message
+  for board in ${BOARD_ID//,/ }; do
+    resolved="$OWNER_REVIEW_SECTION"
+    if declare -F adapter_resolve_release_section >/dev/null 2>&1; then
+      if ! resolved="$(adapter_resolve_release_section "$BOARD_CLI" "$board" \
+          "$OWNER_REVIEW_SECTION" 2>>"$LOG")"; then
+        message="ERROR: PR release destination \"$OWNER_REVIEW_SECTION\" does not exist on board $board. Do this next: set OWNER_REVIEW_SECTION to a live manager lane"
+        log "$message"
+        printf '%s\n' "$message" >&2
+        return 1
+      fi
+    fi
+    PR_RELEASE_SECTIONS["$board"]="$resolved"
+    if [ "${resolved,,}" != "${OWNER_REVIEW_SECTION,,}" ]; then
+      log "PR release destination \"$OWNER_REVIEW_SECTION\" does not exist on board $board; using \"$resolved\""
+    fi
+  done
+}
+
+validate_pr_release_sections || exit 1
+
 log_once_per_day() {
   local key="$1" message="$2" marker_dir="$STATE_DIR/daily-log"
   mkdir -p "$marker_dir"
@@ -2912,15 +2935,28 @@ for value in dict.fromkeys(re.findall(r"/actions/runs/([0-9]+)", text)):
 }
 
 release_owned_pr() {
-  local gate="$1" diagnosis="$2" number ref board checks body
+  local gate="$1" diagnosis="$2" number ref board checks body destination
   number="$(row_field "$gate" number)"
   ref="$(row_field "$gate" ticket)"
   board="$(row_field "$gate" board)"; [ -n "$board" ] || board="${BOARD_ID%%,*}"
+  destination="${PR_RELEASE_SECTIONS[$board]:-$OWNER_REVIEW_SECTION}"
   checks="$(ROW="$gate" python3 -c 'import json,os; print(", ".join(json.loads(os.environ["ROW"]).get("failed_checks") or ["QA fail"]))')"
   body="Closing after the structured repair rounds. Failing checks: $checks. Second-opinion diagnosis: $diagnosis"
   gh pr comment "$number" --repo "$PR_REPO" --body "$body" >>"$LOG" 2>&1 || return 1
   adapter_add_label "$BOARD_CLI" "$TOKEN_FILE" "$board" "$ref" needs-human >>"$LOG" 2>&1 || return 1
-  move_ticket_or_report "$ref" "$OWNER_REVIEW_SECTION" "$board" "PR release" || return 1
+  if ! move_ticket_or_report "$ref" "$destination" "$board" "PR release"; then
+    if ! adapter_unassign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
+      log "PR release could not move $ref to $destination, and agent unbind failed"
+      return 1
+    fi
+    if ! printf '%s\t%s\t%s\n' "$PR_REPO" "$number" "$ref" >> "$RELEASED_PRS"; then
+      log "PR release could not record the unbound PR #$number after the ticket move failed"
+      return 1
+    fi
+    rm -f "$BLOCKED"
+    log "PR release could not move $ref to $destination; agent unbound and verdict retained"
+    return 0
+  fi
   adapter_unassign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1 || return 1
   gh pr close "$number" --repo "$PR_REPO" >>"$LOG" 2>&1 || return 1
   printf '%s\t%s\t%s\n' "$PR_REPO" "$number" "$ref" >> "$RELEASED_PRS" || return 1

@@ -1,0 +1,1 @@
+- AGTE-148 validates PR release destinations at startup, falls back to an available manager lane, and clears agent bindings when a ticket move fails without losing the verdict.
