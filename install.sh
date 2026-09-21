@@ -48,10 +48,10 @@ INSTALL_STATE="${AGENT_TEMPLATE_INSTALL_STATE:-${XDG_STATE_HOME:-$HOME/.local/st
 fail() { printf 'ERROR: %s. Do this next: %s\n' "$1" "$2" >&2; exit 1; }
 
 generate_repos_allow() {
-  local destination="$1" temporary key repo_path origin github_slug base_branch upstream
+  local destination="$1" temporary key repo_path origin github_slug base_branch upstream labels
   temporary="$(mktemp)"
-  printf '# key,path,github slug,base branch\n' > "$temporary"
-  while IFS=, read -r key repo_path _; do
+  printf '# key,path,github slug,base branch,memory cap,pull request labels...\n' > "$temporary"
+  while IFS=, read -r key repo_path _ _ _ labels; do
     case "$key" in ''|'#'*) continue ;; esac
     if ! git -C "$repo_path" rev-parse --git-dir >/dev/null 2>&1; then
       echo "WARNING: repository allowlist skipped $repo_path because it is not a git checkout" >&2
@@ -83,9 +83,46 @@ generate_repos_allow() {
     fi
     [ -n "$base_branch" ] || fail "$repo_path origin has no discoverable default branch" \
       "set origin/HEAD, then run install.sh again"
-    printf '%s,%s,%s,%s\n' "$key" "$repo_path" "$github_slug" "$base_branch" >> "$temporary"
+    printf '%s,%s,%s,%s' "$key" "$repo_path" "$github_slug" "$base_branch" >> "$temporary"
+    if [ -n "$labels" ]; then
+      printf ',,%s' "$labels" >> "$temporary"
+    fi
+    printf '\n' >> "$temporary"
   done < "$SRC/repos.allow"
   mv "$temporary" "$destination"
+}
+
+merge_repo_label_defaults() {
+  SOURCE_REPOS_ALLOW="$SRC/repos.allow" INSTALLED_REPOS_ALLOW="$1" python3 - <<'PYEOF'
+import csv
+import os
+from pathlib import Path
+
+source = Path(os.environ["SOURCE_REPOS_ALLOW"])
+destination = Path(os.environ["INSTALLED_REPOS_ALLOW"])
+with source.open(encoding="utf-8", newline="") as handle:
+    defaults = {
+        row[0].strip(): [label.strip() for label in row[5:] if label.strip()]
+        for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#"))
+        if len(row) >= 6
+    }
+with destination.open(encoding="utf-8", newline="") as handle:
+    rows = list(csv.reader(handle))
+changed = False
+for row in rows:
+    if not row or row[0].lstrip().startswith("#") or any(label.strip() for label in row[5:]):
+        continue
+    labels = defaults.get(row[0].strip(), [])
+    if labels:
+        row.extend([""] * max(0, 5 - len(row)))
+        row.extend(labels)
+        changed = True
+if changed:
+    temporary = destination.with_name(f".{destination.name}.new")
+    with temporary.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle, lineterminator="\n").writerows(rows)
+    temporary.replace(destination)
+PYEOF
 }
 
 # ---------- the shared company skills pack ----------
@@ -280,11 +317,12 @@ cp -a "$SRC/CHANGELOG.md" "$DEST/CHANGELOG.md"
 if [ ! -f "$AGENT_CONF_DIR/repos.allow" ]; then
   mkdir -p "$AGENT_CONF_DIR"
   generate_repos_allow "$AGENT_CONF_DIR/repos.allow"
-  chmod 600 "$AGENT_CONF_DIR/repos.allow"
   echo "repository allowlist: $AGENT_CONF_DIR/repos.allow (generated from checkout origins)"
 else
   echo "repository allowlist: $AGENT_CONF_DIR/repos.allow (kept existing)"
 fi
+merge_repo_label_defaults "$AGENT_CONF_DIR/repos.allow"
+chmod 600 "$AGENT_CONF_DIR/repos.allow"
 cp -a "$AGENT_CONF_DIR/repos.allow" "$DEST/repos.allow"
 
 # A timer fires every 60s for several agents, any of which may have

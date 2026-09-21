@@ -66,9 +66,55 @@ exec {board_cli} "$@"
 
     gh = shutil.which("gh", path=original_path)
     if gh:
+        repo_config = Path(__file__).resolve().parent.parent / "repos.allow"
         gh_script = """#!/usr/bin/env bash
 set -euo pipefail
 REAL_GH=__GH__
+REPOS_ALLOW="${AGENT_REPOS_ALLOW:-__REPOS_ALLOW__}"
+configured_labels() {
+  REPO="$1" REPOS_ALLOW="$REPOS_ALLOW" python3 - <<'PYEOF'
+import csv
+import json
+import os
+from pathlib import Path
+
+labels = []
+path = Path(os.environ["REPOS_ALLOW"])
+if path.is_file():
+    with path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#")):
+            row = [value.strip() for value in row]
+            if len(row) >= 6 and row[2].casefold() == os.environ["REPO"].casefold():
+                labels = [label for label in row[5:] if label]
+                break
+print(json.dumps({"labels": labels}, separators=(",", ":")))
+PYEOF
+}
+if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then
+  output="$("$REAL_GH" "$@")"
+  created="$(OUTPUT="$output" python3 - <<'PYEOF'
+import os
+import re
+
+match = re.search(r"https://github\\.com/([^/]+/[^/]+)/pull/([0-9]+)", os.environ["OUTPUT"])
+if match:
+    print(f"{match.group(1)}\\t{match.group(2)}")
+PYEOF
+)"
+  if [ -n "$created" ]; then
+    IFS=$'\t' read -r repo number <<< "$created"
+    payload="$(configured_labels "$repo")"
+    if [ "$payload" != '{"labels":[]}' ]; then
+      if ! printf '%s\n' "$payload" \
+          | "$REAL_GH" api --method POST "repos/$repo/issues/$number/labels" --input - >/dev/null; then
+        printf 'pull request opened but configured labels could not be applied: %s\n' "$output" >&2
+        exit 2
+      fi
+    fi
+  fi
+  printf '%s\n' "$output"
+  exit 0
+fi
 if [ "${1:-}" = "pr" ] && [ "${2:-}" = "merge" ]; then
   auto=no
   for arg in "$@"; do [ "$arg" != "--auto" ] || auto=yes; done
@@ -141,7 +187,7 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 exec "$REAL_GH" "$@"
-""".replace("__GH__", shlex.quote(gh))
+""".replace("__GH__", shlex.quote(gh)).replace("__REPOS_ALLOW__", shlex.quote(str(repo_config)))
         target = shim_dir / "gh"
         temporary = shim_dir / ".gh.new"
         temporary.write_text(gh_script, encoding="utf-8")

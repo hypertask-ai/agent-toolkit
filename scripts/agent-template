@@ -381,8 +381,8 @@ wanted = os.environ["REPO_KEY"]
 with open(os.environ["ALLOW_FILE"], encoding="utf-8", newline="") as handle:
     for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#")):
         row = [value.strip() for value in row]
-        if len(row) in (4, 5) and row[0] == wanted:
-            print("\t".join(row + [""] * (5 - len(row))))
+        if len(row) >= 4 and row[0] == wanted:
+            print("\t".join((row + [""] * 5)[:5]))
             raise SystemExit(0)
 raise SystemExit(1)
 PYEOF
@@ -412,8 +412,8 @@ wanted = os.environ["REPO_SLUG"]
 with open(os.environ["ALLOW_FILE"], encoding="utf-8", newline="") as handle:
     for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#")):
         row = [value.strip() for value in row]
-        if len(row) in (4, 5) and row[2] == wanted:
-            print("\t".join(row + [""] * (5 - len(row))))
+        if len(row) >= 4 and row[2] == wanted:
+            print("\t".join((row + [""] * 5)[:5]))
             raise SystemExit(0)
 raise SystemExit(1)
 PYEOF

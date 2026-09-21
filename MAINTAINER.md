@@ -106,14 +106,15 @@ agent-template update --keep-timers
 agent-template instruct <slug> <text|-> [--ticket <url>]
 ```
 
-`repos.allow` beside the agent conf is CSV with `key,path,github slug,base
-branch,memory cap`; the last field is optional. It defaults to 12 GB when the
-host has more than 32 GB of RAM and half of RAM otherwise. On first install,
-the slug and branch are discovered from each checkout's `origin` and
-`origin/HEAD`; updates never overwrite host policy. Build refuses a checkout
-whose current origin differs from its allowlist row. The shipped file contains the six approved
-repositories and is installed only when the host has no allowlist, so host
-policy is never overwritten by an update. The reconciler fetches each listed
+`repos.allow` beside the agent conf is CSV. Each row starts with `key,path,
+github slug,base branch,memory cap`; the cap is optional and any remaining
+fields are pull request labels. The cap defaults to 12 GB when the host has more
+than 32 GB of RAM and half of RAM otherwise. On first install, the slug and
+branch are discovered from each checkout's `origin` and `origin/HEAD`. Updates
+preserve host policy and add shipped label defaults only to rows without labels.
+Build refuses a checkout whose current origin differs from its allowlist row.
+The runner applies configured labels through GitHub's REST labels endpoint before
+pull request creation returns. The reconciler fetches each listed
 base branch without changing the checkout and keeps a per-repository commit
 cursor under its state directory; its first pass reads the previous 48 hours.
 

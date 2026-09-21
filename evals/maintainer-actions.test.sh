@@ -70,7 +70,7 @@ MANAGER="off"
 MAINTAINER="off"
 EOF
 cat > "$CONF_DIR/repos.allow" <<EOF
-allowed,$REPO,example/allowed,main,7G
+allowed,$REPO,example/allowed,main,7G,full-ci
 EOF
 printf 'Ticket: https://app.hypertask.ai/detail/project-1/2\nWhat: change one file\nDone when: checks pass\nGuardrails: no board writes\n' > "$TMP/spec.md"
 
