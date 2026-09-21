@@ -2863,7 +2863,8 @@ print(json.dumps({"action":action, "state":state, "wait_reason":wait_reason,
                   "labels":pr.get("labels") or [], "human_assignee_ids":pr.get("human_assignee_ids") or [],
                   "feedback":"\n\n".join(parts), "pending":feedback["pending"],
                   "failed_checks":failed_names, "first_error_line":os.environ["FIRST_ERROR"],
-                  "pickup_slot":True, "unfixable":False}))
+                  "pickup_slot":True, "blocks_pickup":state != "awaiting-review",
+                  "unfixable":False}))
 '
 }
 

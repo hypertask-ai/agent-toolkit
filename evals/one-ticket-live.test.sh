@@ -460,9 +460,10 @@ GREEN="$green" python3 - <<'PYEOF'
 import json, os
 result = json.loads(os.environ["GREEN"])
 assert result["action"] == "wait" and result["state"] == "awaiting-review"
-assert result["pickup_slot"] is True and result["unfixable"] is False
+assert result["pickup_slot"] is True and result["blocks_pickup"] is False
+assert result["unfixable"] is False
 PYEOF
-echo 'PASS one open green PR remains bound while awaiting review or merge'
+echo 'PASS one open green PR remains monitored without blocking pickup'
 
 stale_red="$(run_gate stale-red)"
 STALE_RED="$stale_red" python3 - <<'PYEOF'
@@ -505,9 +506,14 @@ fallback_state="$(PR_TEST_SCENARIO=fallback _ht_pr_live_state example/repo 1 "$T
 echo 'PASS deployment fallback does not replace the QA verdict'
 
 qa_failed="$(run_gate qa-fail)"
-[[ "$qa_failed" == *'"state": "red"'* && "$qa_failed" == *'"qa_failure_id": "qa-77"'* ]]
-[[ "$qa_failed" == *'checkout fails after deploy'* ]]
-echo 'PASS QA Handoff after merge becomes a red round with a durable verdict id'
+QA_FAILED="$qa_failed" python3 - <<'PYEOF'
+import json, os
+result = json.loads(os.environ["QA_FAILED"])
+assert result["state"] == "red" and result["qa_failure_id"] == "qa-77"
+assert result["failed_checks"] == ["QA fail"]
+assert "checkout fails after deploy" in result["feedback"]
+PYEOF
+echo 'PASS QA Handoff after merge reports QA fail and keeps a durable verdict id'
 
 [[ -z "$(run_gate qa-passed)" ]]
 echo 'PASS Done ticket proves QA passed and releases the merged PR binding'
@@ -638,7 +644,8 @@ assert rows[1]["number"] == 10 and rows[1]["pickup_slot"] is True
 PYEOF
 echo 'PASS old red PR remains first in the owned PR queue'
 
-# Run the real pickup path in dry-run mode. Any one owned PR consumes the tick.
+# Run the real pickup path in dry-run mode. One green PR leaves a pickup slot,
+# while red, pending, QA, protected, or two open PRs keep their existing gates.
 cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<EOF
 AGENT_ID="agent-1"
 AGENT_NAME="Dev One"
@@ -704,7 +711,7 @@ rm -rf "$state/pr-live-cache"
 two_green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-two_green_run" PR_TEST_SCENARIO=two-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$two_green_run" == *'bound to PR #9 (awaiting-review); no new ticket was ranked.'* ]]
 [[ "$two_green_run" != *'would pick up'* ]]
-echo 'PASS even the first green PR consumes the tick'
+echo 'PASS two green PRs fill both pickup slots'
 
 rm -rf "$state/pr-live-cache"
 stale_red_green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-stale_red_green_run" PR_TEST_SCENARIO=stale-red-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
@@ -726,9 +733,10 @@ echo 'PASS exact-ticket event pickup obeys the same PR binding'
 
 rm -rf "$state/pr-live-cache"
 green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-green_run" PR_TEST_SCENARIO=green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$green_run" == *'bound to PR #1 (awaiting-review); no new ticket was ranked.'* ]]
-[[ "$green_run" != *'would pick up'* ]]
-echo 'PASS one green PR blocks normal pickup'
+[[ "$green_run" == *'skip  HTPR-1: its open PR is monitored without blocking new work'* ]]
+[[ "$green_run" == *'would pick up HTPR-2'* ]]
+[[ "$green_run" != *'no new ticket was ranked'* ]]
+echo 'PASS one green PR allows normal pickup while remaining monitored'
 
 rm -rf "$state/pr-live-cache"
 undeployed_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-undeployed_run" PR_TEST_SCENARIO=undeployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
