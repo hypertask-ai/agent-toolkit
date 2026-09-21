@@ -244,13 +244,15 @@ action. Dev and QA runners skip that label. The watch sends no toast, chat-room
 message, or Telegram message. When a rule recovers, its open alarm moves to `Done`.
 
 The seven rules cover: three hours without a merge while unassigned intake work
-waits during local daytime; an eligible agent with no completed run for one hour;
-three failed runner ticks in a row; duplicate agent bindings to one pull request;
-host disk use above 85 percent; exhausted GitHub REST capacity; and an agent left
-in manual claiming mode for two hours while unassigned intake work waits. The
-one-hour idle-agent rule queues an immediate poll for every affected agent. Its
-alarm, durable rule state, health snapshot, and summary log record each start
-and whether systemd accepted it.
+waits during local daytime; an eligible agent with no completed run for one hour
+and no run in flight; three failed runner ticks in a row; duplicate agent bindings
+to one pull request; host disk use above 85 percent; exhausted GitHub REST
+capacity; and an agent left in manual claiming mode for two hours while
+unassigned intake work waits. A running record counts as in flight while the
+watchdog has refreshed it within that agent's `RUN_STALL_SECONDS` limit. The
+one-hour idle-agent rule queues an immediate poll only when eligible work waits
+and no run is in flight. Its alarm, durable rule state, health snapshot, and
+summary log record each start and whether systemd accepted it.
 
 Every pass atomically writes
 `~/.local/state/agent-board-poll/fleet-health.json`. The Agents page can read its
