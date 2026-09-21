@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET="${AGENT_RUNNER_BOARD_CLI_TARGET:?AGENT_RUNNER_BOARD_CLI_TARGET is not set}"
+if [ "${1:-} ${2:-}" = "comment add" ]; then
+  exec python3 "$(dirname "$0")/hypertask-runner-comment.py" "$@"
+fi
+exec "$TARGET" "$@"
