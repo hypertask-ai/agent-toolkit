@@ -20,22 +20,24 @@ EOF
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-} ${2:-}" = "pr view" ]; then
-  printf '{"state":"%s","url":"https://github.com/example/repo/pull/%s"}\n' "${MOCK_PR_STATE:-OPEN}" "$3"
+  state="${MOCK_PR_STATE:-OPEN}"
+  [ ! -s "$MOCK_PR_MERGED" ] || state=MERGED
+  printf '{"state":"%s","url":"https://github.com/example/repo/pull/%s"}\n' "$state" "$3"
   exit 0
 fi
 if [ "${1:-}" = api ] && [[ "${2:-}" == repos/example/repo/pulls\?state=* ]]; then
   case "${2:-}" in
     *state=open*)
-      if [ -s "$MOCK_PR_OPEN" ]; then
-        printf '[{"number":9,"title":"TEST-1: change","html_url":"https://github.com/example/repo/pull/9","head":{"ref":"dev/TEST-1"},"base":{"ref":"main"},"user":{"login":"bot"},"draft":false,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","merged_at":null}]\n'
+      if [ -s "$MOCK_PR_OPEN" ] && [ ! -s "$MOCK_PR_MERGED" ]; then
+        printf '[{"number":9,"title":"%s","html_url":"https://github.com/example/repo/pull/9","head":{"ref":"dev/TEST-1"},"base":{"ref":"main"},"user":{"login":"bot"},"draft":false,"created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","merged_at":null}]\n' "${MOCK_PR_TITLE:-TEST-1: change}"
       else
         printf '[]\n'
       fi
       ;;
     *)
       now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      if [ "${MOCK_PR_STATE:-OPEN}" = MERGED ]; then
-        printf '[{"number":9,"title":"TEST-1: change","html_url":"https://github.com/example/repo/pull/9","head":{"ref":"human/change"},"base":{"ref":"main"},"user":{"login":"human"},"draft":false,"created_at":"%s","updated_at":"%s","merged_at":"%s"}]\n' "$now" "$now" "$now"
+      if [ "${MOCK_PR_STATE:-OPEN}" = MERGED ] || [ -s "$MOCK_PR_MERGED" ]; then
+        printf '[{"number":9,"title":"%s","html_url":"https://github.com/example/repo/pull/9","head":{"ref":"human/change"},"base":{"ref":"main"},"user":{"login":"human"},"draft":false,"created_at":"%s","updated_at":"%s","merged_at":"%s"}]\n' "${MOCK_PR_TITLE:-TEST-1: change}" "$now" "$now" "$now"
       elif [ -n "${MOCK_MERGED_PR_TITLE:-}" ]; then
         printf '[{"number":999,"title":"%s","html_url":"https://github.com/example/repo/pull/999","head":{"ref":"human/change"},"base":{"ref":"main"},"user":{"login":"human"},"draft":false,"created_at":"%s","updated_at":"%s","merged_at":"%s"}]\n' "$MOCK_MERGED_PR_TITLE" "$now" "$now" "$now"
       else
@@ -89,6 +91,11 @@ printf 'model\n' >> "$MOCK_BOARD_LOG"
 if [ "${MOCK_MODEL_MODE:-pr}" = sleep ]; then
   printf '%s\n' "$$" > "$MOCK_MODEL_PID"
   exec sleep 60
+fi
+if [ "${MOCK_MODEL_MODE:-pr}" = merged-comment-failure ]; then
+  printf 'yes\n' > "$MOCK_PR_MERGED"
+  "$AGENT_BOARD_CLI" comment add AGTE-168 --text '<p><strong>Done: AGTE-168 now keeps merged runs successful.</strong></p><p>PR #9 merged.</p><p>Next: No action is needed.</p>'
+  exit 74
 fi
 printf 'yes\n' > "$MOCK_PR_OPEN"
 mkdir -p "$XDG_STATE_HOME/agent-board-poll"
@@ -163,6 +170,17 @@ PYEOF
   *) printf '{}\n' ;;
 esac
 EOF
+cat > "$TMP/bin/ticket-links" <<'EOF'
+#!/usr/bin/env python3
+import os
+import sys
+
+if os.environ.get("MOCK_LINK_REWRITE_FAIL") == "yes":
+    raise SystemExit(1)
+text = sys.stdin.read()
+link = '<a href="https://app.hypertask.ai/detail/project-5500/168">AGTE-168 Keep merged PR runs successful when closing comments fail</a>'
+sys.stdout.write(text.replace("AGTE-168", link))
+EOF
 chmod +x "$TMP/bin/"*
 
 cat > "$TMP/config/dev.conf" <<EOF
@@ -187,13 +205,13 @@ printf 'app,%s,example/repo,master\n' "$TMP/repo" > "$TMP/config/repos.allow"
 
 reset_case() {
   rm -rf "$TMP/state"; mkdir -p "$TMP/state"
-  : > "$TMP/board.log"; : > "$TMP/pr-open"; : > "$TMP/git.log"
+  : > "$TMP/board.log"; : > "$TMP/pr-open"; : > "$TMP/pr-merged"; : > "$TMP/git.log"
   printf '{"comments":[]}\n' > "$TMP/comments.json"
   cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"Backlog","title":"Change it","description":"Open a PR","assignees":[],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
 EOF
 }
-run_env=(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" AGENT_PR_CACHE_DIR="$TMP/state/pr-cache" COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" MOCK_BOARD_LOG="$TMP/board.log" MOCK_PR_OPEN="$TMP/pr-open" MOCK_MODEL_PID="$TMP/model.pid" MOCK_GIT_LOG="$TMP/git.log")
+run_env=(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" AGENT_PR_CACHE_DIR="$TMP/state/pr-cache" COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" TICKET_LINK_FORMATTER="$TMP/bin/ticket-links" ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" MOCK_BOARD_LOG="$TMP/board.log" MOCK_PR_OPEN="$TMP/pr-open" MOCK_PR_MERGED="$TMP/pr-merged" MOCK_MODEL_PID="$TMP/model.pid" MOCK_GIT_LOG="$TMP/git.log")
 
 reset_case
 env "${run_env[@]}" MOCK_MODEL_MODE=sleep "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/run.out" 2>&1 &
@@ -231,6 +249,43 @@ if tail -n1 "$TMP/board.log" | grep -qxF 'move TEST-1 AI Review' \
   echo 'PASS pr-outcome-review                  a newly opened PR is linked on the ticket and moves it to AI Review'
 else
   echo "FAIL pr-outcome-review                  log=$(cat "$TMP/board.log") output=$(cat "$TMP/pr.out")"; exit 1
+fi
+
+reset_case
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-168","ticketNumber":"AGTE-168","projectId":15,"section":"Backlog","title":"Keep merged PR runs successful when closing comments fail","description":"Keep the merged run successful","assignees":[],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+env "${run_env[@]}" MOCK_MODEL_MODE=merged-comment-failure \
+  MOCK_PR_TITLE='AGTE-168: keep merged runs successful' \
+  "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/merged-comment.out" 2>&1
+merged_record="$TMP/state/agent-board-poll/run-records/dev-AGTE-168.json"
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+   && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$merged_record")" = done ] \
+   && grep -qF '<a href="https://app.hypertask.ai/detail/project-5500/168">AGTE-168 Keep merged PR runs successful when closing comments fail</a>' "$TMP/board.log" \
+   && grep -qF '<a href="https://github.com/example/repo/pull/9">https://github.com/example/repo/pull/9</a>' "$TMP/board.log" \
+   && grep -qF 'model exited 74 after https://github.com/example/repo/pull/9 merged; using the merged pull request as the run outcome' "$TMP/state/agent-board-poll/dev.log" \
+   && grep -qF 'run done AGTE-168 exit=0' "$TMP/state/agent-board-poll/dev.log"; then
+  echo 'PASS merged-pr-comment-rewrite          a refused closing comment is linked and the merged PR finishes the run'
+else
+  echo "FAIL merged-pr-comment-rewrite          task=$(cat "$TMP/tasks.json") record=$(cat "$merged_record" 2>/dev/null) board=$(cat "$TMP/board.log") output=$(cat "$TMP/merged-comment.out")"; exit 1
+fi
+
+reset_case
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-168","ticketNumber":"AGTE-168","projectId":15,"section":"Backlog","title":"Keep merged PR runs successful when closing comments fail","description":"Keep the merged run successful","assignees":[],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+env "${run_env[@]}" MOCK_MODEL_MODE=merged-comment-failure MOCK_LINK_REWRITE_FAIL=yes \
+  MOCK_PR_TITLE='AGTE-168: keep merged runs successful' \
+  "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/held-comment.out" 2>&1
+held_record="$TMP/state/agent-board-poll/run-records/dev-AGTE-168.json"
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+   && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$held_record")" = done ] \
+   && [ "$(grep -c '^comment AGTE-168 ' "$TMP/board.log")" -eq 1 ] \
+   && grep -qF 'closing comment for AGTE-168 remains held: ticket reference rewrite failed' "$TMP/state/agent-board-poll/dev.log" \
+   && grep -qF 'run done AGTE-168 exit=0' "$TMP/state/agent-board-poll/dev.log"; then
+  echo 'PASS merged-pr-comment-held             a failed rewrite is held without failing the merged run'
+else
+  echo "FAIL merged-pr-comment-held             task=$(cat "$TMP/tasks.json") record=$(cat "$held_record" 2>/dev/null) board=$(cat "$TMP/board.log") output=$(cat "$TMP/held-comment.out")"; exit 1
 fi
 
 reset_case

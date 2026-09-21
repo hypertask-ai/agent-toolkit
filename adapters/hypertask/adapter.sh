@@ -2035,13 +2035,13 @@ raise SystemExit(1)
 '
 }
 
-# adapter_ticket_merged_pr <token-file> <board-id> <task-id> <repo> <ref>
+# adapter_ticket_merged_pr <token-file> <board-id> <task-id> <repo> <ref> [refresh]
 adapter_ticket_merged_pr() {
-  local token_file="$1" board_id="$2" task_id="$3" repo="$4" ref="$5"
+  local token_file="$1" board_id="$2" task_id="$3" repo="$4" ref="$5" refresh="${6:-no}"
   local rows url comments comment_rc direct_failed="no" cache_rc
   [ -n "$repo" ] && [ -n "$ref" ] || return 2
   if command -v gh >/dev/null 2>&1; then
-    if rows="$(_ht_pr_cache_rows "$repo")"; then
+    if rows="$(_ht_pr_cache_rows "$repo" "$refresh")"; then
       cache_rc=0
     else
       cache_rc=$?
@@ -2079,7 +2079,7 @@ for pr in json.loads(os.environ["ROWS"] or "[]"):
 }
 
 _ht_pr_cache_rows() (
-  local repo="$1" cache_file cache_dir lock_file now modified age ttl tmp rc page returned stop
+  local repo="$1" refresh="${2:-no}" cache_file cache_dir lock_file now modified age ttl tmp rc page returned stop
   [ -n "$repo" ] && command -v gh >/dev/null 2>&1 || return 1
   cache_file="$(_ht_pr_cache_file "$repo")"
   cache_dir="$(dirname "$cache_file")"
@@ -2092,7 +2092,7 @@ _ht_pr_cache_rows() (
   [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=60
   [ "$ttl" -ge 60 ] || ttl=60
   _ht_github_paused "$repo" && return 75
-  if [ -s "$cache_file" ]; then
+  if [ "$refresh" != "yes" ] && [ -s "$cache_file" ]; then
     modified="$(stat -c %Y "$cache_file" 2>/dev/null || printf 0)"
     age=$((now - modified))
     if [ "$age" -ge 0 ] && [ "$age" -lt "$ttl" ] \
