@@ -1299,7 +1299,10 @@ else:
                 "last_qa_failure_id", "second_opinion", "second_opinion_at",
                 "second_opinion_round", "consecutive_infra_errors",
                 "last_infra_error", "last_infra_error_at", "revert_guard_head",
-                "revert_guard_verdict", "revert_guard_verdict_at", "death_count"):
+                "revert_guard_verdict", "revert_guard_verdict_at", "death_count",
+                "capped_runs", "last_capped_at", "wip_branch", "wip_preservation",
+                "capped_second_opinion", "capped_second_opinion_at",
+                "capped_second_opinion_status"):
         if key in prior:
             row[key] = prior[key]
 row.update({
@@ -1361,6 +1364,158 @@ with open(temporary, "w", encoding="utf-8") as handle:
     handle.write("\n")
 os.replace(temporary, path)
 PYEOF
+}
+
+capped_run_count() {
+  python3 - "$1" <<'PYEOF'
+import json, sys
+try:
+    row = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+print(int(row.get("capped_runs") or 0))
+PYEOF
+}
+
+record_watchdog_stop() {
+  local path="$1" branch="$2" preservation="$3" capped="$4"
+  RECORD_BRANCH="$branch" RECORD_PRESERVATION="$preservation" RECORD_CAPPED="$capped" \
+    RECORD_STOPPED_AT="$(date -Is)" python3 - "$path" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+try:
+    row = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+if os.environ["RECORD_CAPPED"] == "yes":
+    row["capped_runs"] = int(row.get("capped_runs") or 0) + 1
+    row["last_capped_at"] = os.environ["RECORD_STOPPED_AT"]
+row["wip_preservation"] = os.environ["RECORD_PRESERVATION"]
+if os.environ["RECORD_BRANCH"]:
+    row["wip_branch"] = os.environ["RECORD_BRANCH"]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+print(int(row.get("capped_runs") or 0))
+PYEOF
+}
+
+record_capped_second_opinion() {
+  local path="$1" status="$2" diagnosis="$3"
+  RECORD_OPINION_STATUS="$status" RECORD_OPINION="$diagnosis" RECORD_OPINION_AT="$(date -Is)" \
+    python3 - "$path" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+try:
+    row = json.load(open(path, encoding="utf-8"))
+except (OSError, ValueError):
+    row = {}
+row["capped_second_opinion_status"] = os.environ["RECORD_OPINION_STATUS"]
+row["capped_second_opinion_at"] = os.environ["RECORD_OPINION_AT"]
+if os.environ["RECORD_OPINION"]:
+    row["capped_second_opinion"] = os.environ["RECORD_OPINION"]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(row, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+PYEOF
+}
+
+capped_ticket_branch() {
+  printf '%s/%s' "$SLUG" "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+}
+
+preserve_watchdog_work() {
+  local ref="$1" record="$2" branch remote commit capped=no
+  WATCHDOG_WIP_BRANCH=""
+  WATCHDOG_PRESERVATION="no changes"
+  if [ -n "${RUN_DIR:-}" ] && git -C "$RUN_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+     && [ -n "$(git -C "$RUN_DIR" status --porcelain 2>/dev/null)" ]; then
+    branch="$(capped_ticket_branch "$ref")"
+    remote="${WORKDIR_REMOTE:-origin}"
+    WATCHDOG_WIP_BRANCH="$branch"
+    if ! git -C "$RUN_DIR" checkout -B "$branch" >>"$LOG" 2>&1; then
+      WATCHDOG_PRESERVATION="branch checkout failed"
+    elif ! git -C "$RUN_DIR" add -A >>"$LOG" 2>&1; then
+      WATCHDOG_PRESERVATION="staging failed"
+    elif ! git -C "$RUN_DIR" -c user.name="$AGENT_NAME" \
+        -c user.email="$SLUG@agents.local" commit -m "WIP: $ref capped run" >>"$LOG" 2>&1; then
+      WATCHDOG_PRESERVATION="commit failed"
+    elif ! git -C "$RUN_DIR" push -u "$remote" "HEAD:refs/heads/$branch" >>"$LOG" 2>&1; then
+      WATCHDOG_PRESERVATION="push failed"
+    else
+      commit="$(git -C "$RUN_DIR" rev-parse --short=12 HEAD 2>/dev/null || true)"
+      WATCHDOG_PRESERVATION="pushed"
+      log "watchdog preserved $ref on $branch at $commit"
+    fi
+  fi
+  [ "$WATCHDOG_REASON" != "watchdog: over max run time" ] || capped=yes
+  CAPPED_RUNS="$(record_watchdog_stop "$record" "$WATCHDOG_WIP_BRANCH" "$WATCHDOG_PRESERVATION" "$capped")"
+}
+
+request_capped_second_opinion() {
+  local ref="$1" record="$2" branch="$3" prior dev_family dev_families reviewer_family
+  local provider command base diff history prompt output diagnosis reviewer_argv=()
+  prior="$(python3 - "$record" <<'PYEOF'
+import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get("capped_second_opinion_at") or "")
+except (OSError, ValueError):
+    pass
+PYEOF
+)"
+  [ -z "$prior" ] || return 0
+  dev_families="$(command_family "$MODEL_CLI")"
+  while IFS= read -r provider; do
+    [ -n "$provider" ] || continue
+    command="$(provider_command "$provider")"
+    [ -n "$command" ] || continue
+    dev_family="$(command_family "$command")"
+    [ -z "$dev_family" ] || dev_families="${dev_families}${dev_families:+$'\n'}${dev_family}"
+  done < <(printf '%s\n' "$PROVIDER_ORDER" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+  reviewer_family="$(command_family "$SECOND_OPINION_CLI")"
+  if [ -n "$reviewer_family" ] && printf '%s\n' "$dev_families" | grep -qxF "$reviewer_family"; then
+    record_capped_second_opinion "$record" refused "reviewer family matches the development worker"
+    log "second opinion for $ref refused: reviewer family $reviewer_family matches a development worker"
+    return 1
+  fi
+  if ! core_command_available "$SECOND_OPINION_CLI"; then
+    record_capped_second_opinion "$record" unavailable "SECOND_OPINION_CLI is unavailable"
+    log "second opinion for $ref could not run: SECOND_OPINION_CLI is unavailable"
+    return 1
+  fi
+  base="${WORKDIR_REMOTE:-origin}/${WORKDIR_BASE_BRANCH:-main}"
+  diff="$(git -C "$RUN_DIR" diff --no-color "$base"...HEAD 2>>"$LOG" || true)"
+  history="$(git -C "$RUN_DIR" log --oneline "$base"..HEAD 2>>"$LOG" || true)"
+  prompt="Review $ref as an independent second opinion after two watchdog-capped development runs. The preserved work is on branch $branch.
+
+Return one line only. State the concrete next step needed to finish the ticket, or write exactly: not fixable here because <reason>.
+
+Ticket: $title
+$description
+
+Preserved commits:
+$history
+
+Preserved diff:
+$diff"
+  read -r -a reviewer_argv <<< "$SECOND_OPINION_CLI"
+  if ! output="$(cd "$RUN_DIR" && timeout 900 "${reviewer_argv[@]}" "$prompt" 2>>"$LOG")"; then
+    record_capped_second_opinion "$record" failed "reviewer command failed"
+    log "second opinion for $ref failed after two capped runs"
+    return 1
+  fi
+  diagnosis="$(OUTPUT="$output" python3 -c 'import os; print(" ".join(os.environ["OUTPUT"].split())[:1200])')"
+  if [ -z "$diagnosis" ]; then
+    record_capped_second_opinion "$record" failed "reviewer returned no diagnosis"
+    log "second opinion for $ref returned no diagnosis"
+    return 1
+  fi
+  record_capped_second_opinion "$record" completed "$diagnosis"
+  log "second opinion for $ref after two capped runs: $diagnosis"
 }
 
 run_waiting_state() {
@@ -1476,6 +1631,12 @@ watch_model_process() {
     fi
     if [ -n "$WATCHDOG_REASON" ]; then
       terminate_model_process "$wait_pid" "$process_group"
+      if [ "${is_pr_fix:-no}" = "no" ] && [ "${is_reply_only:-no}" = "no" ]; then
+        preserve_watchdog_work "$ref" "$record"
+        if [ "${CAPPED_RUNS:-0}" -ge 2 ]; then
+          request_capped_second_opinion "$ref" "$record" "$WATCHDOG_WIP_BRANCH" || true
+        fi
+      fi
       post_run_cleanup worktree
       break
     fi
@@ -3072,6 +3233,11 @@ while IFS= read -r row; do
   trigger="$(row_field "$row" trigger)"
   is_pr_fix="no"
   [ "$trigger" = "pr_fix" ] && is_pr_fix="yes"
+  if [ "$is_pr_fix" = "no" ] \
+     && [ "$(capped_run_count "$RUN_RECORD_DIR/$SLUG-$ref.json")" -ge 2 ]; then
+    explain "skip  $ref: two watchdog-capped runs requested a second opinion, so no third development run will start"
+    continue
+  fi
   hit="$(ROW="$row" EXCL="$EXCLUDE_LABELS" python3 -c '
 import json, os
 row = json.loads(os.environ["ROW"])

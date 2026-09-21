@@ -75,7 +75,20 @@ case "${MOCK_MODEL_MODE:-success}" in
     trap 'touch "$MOCK_MODEL_TERM"; exit 143' TERM
     while :; do sleep 10; done
     ;;
+  capped)
+    touch "$MOCK_MODEL_MARKER"
+    branch="$(git branch --show-current)"
+    printf '%s\n' "${branch:-DETACHED}" >> "$MOCK_BRANCH_LOG"
+    printf 'capped run\n' >> capped-work.txt
+    trap 'touch "$MOCK_MODEL_TERM"; exit 143' TERM
+    while :; do printf 'working\n'; sleep 0.2; done
+    ;;
 esac
+EOF
+cat > "$TMP/bin/reviewer" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$MOCK_REVIEWER_LOG"
+printf 'finish the preserved implementation with its focused tests\n'
 EOF
 cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
@@ -98,8 +111,32 @@ with open(path, "w", encoding="utf-8") as handle:
     json.dump(doc, handle)
 PYEOF
     ;;
-  *' task unassign '*) printf 'unassign\n' >> "$MOCK_BOARD_LOG" ;;
-  *' task move '*) printf 'move\n' >> "$MOCK_BOARD_LOG" ;;
+  *' task unassign '*)
+    printf 'unassign\n' >> "$MOCK_BOARD_LOG"
+    python3 - "$MOCK_TASKS" <<'PYEOF'
+import datetime, json, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+if doc["tasks"]:
+    doc["tasks"][0]["assignees"] = []
+    doc["tasks"][0]["updatedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+json.dump(doc, open(path, "w", encoding="utf-8"))
+PYEOF
+    ;;
+  *' task move '*)
+    printf 'move\n' >> "$MOCK_BOARD_LOG"
+    argv=("$@"); section=""
+    for ((i=0;i<${#argv[@]};i++)); do [ "${argv[$i]}" != --section ] || section="${argv[$((i+1))]}"; done
+    SECTION="$section" python3 - "$MOCK_TASKS" <<'PYEOF'
+import datetime, json, os, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+if doc["tasks"]:
+    doc["tasks"][0]["section"] = os.environ["SECTION"]
+    doc["tasks"][0]["updatedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+json.dump(doc, open(path, "w", encoding="utf-8"))
+PYEOF
+    ;;
   *' comment add '*) printf 'comment\n' >> "$MOCK_BOARD_LOG" ;;
   *' project show '*) printf '{"project":{"ownerId":6}}\n' ;;
   *) printf '{}\n' ;;
@@ -119,6 +156,7 @@ TOKEN_FILE="$TMP/token"
 BOARD_CLI="$TMP/board"
 WATCH_SECTIONS="Backlog"
 MODEL_CLI="$TMP/bin/model"
+SECOND_OPINION_CLI="$TMP/bin/reviewer"
 PR_REPO="example/repo"
 PR_BRANCH_PREFIX="agent/dev-"
 TRIAGE="no"
@@ -148,6 +186,8 @@ reset_runtime() {
   mkdir -p "$TMP/state" "$TMP/worktrees"
   : > "$TMP/board.log"
   : > "$TMP/docker.log"
+  : > "$TMP/branch.log"
+  : > "$TMP/reviewer.log"
   rm -f "$TMP/model-marker" "$TMP/model-term"
   set_task
 }
@@ -155,8 +195,9 @@ run_tick() {
   env HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_TASKS="$TMP/tasks.json" \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_MARKER="$TMP/model-marker" \
-    MOCK_MODEL_TERM="$TMP/model-term" MOCK_DOCKER_LOG="$TMP/docker.log" CLEANUP_DOCKER=no "$@" \
-    "$ROOT/scripts/agent-board-poll" --once dev
+    MOCK_MODEL_TERM="$TMP/model-term" MOCK_DOCKER_LOG="$TMP/docker.log" \
+    MOCK_BRANCH_LOG="$TMP/branch.log" MOCK_REVIEWER_LOG="$TMP/reviewer.log" \
+    CLEANUP_DOCKER=no "$@" "$ROOT/scripts/agent-board-poll" --once dev
 }
 
 pass() { printf 'PASS %-36s %s\n' "$1" "$2"; }
@@ -186,6 +227,31 @@ if [ -f "$TMP/model-term" ] && [ ! -e "$TMP/worktrees/dev-TEST-1" ]; then
 else
   fail cleanup-watchdog "watchdog did not clean its victim: $(cat "$TMP/watchdog.out")"
 fi
+
+reset_runtime
+sed -i 's/RUN_STALL_SECONDS="1"/RUN_STALL_SECONDS="10"/; s/RUN_MAX_SECONDS="30"/RUN_MAX_SECONDS="2"/' "$TMP/config/dev.conf"
+run_tick RUN_COOLDOWN_SECONDS=0 MOCK_MODEL_MODE=capped > "$TMP/capped-first.out" 2>&1
+rm -f "$TMP/model-marker" "$TMP/model-term"
+run_tick RUN_COOLDOWN_SECONDS=0 MOCK_MODEL_MODE=capped > "$TMP/capped-second.out" 2>&1
+rm -f "$TMP/model-marker" "$TMP/model-term"
+run_tick RUN_COOLDOWN_SECONDS=0 MOCK_MODEL_MODE=capped > "$TMP/capped-third.out" 2>&1
+record="$TMP/state/agent-board-poll/run-records/dev-TEST-1.json"
+if [ "$(git --git-dir="$TMP/remote.git" log --format=%s refs/heads/dev/test-1 | grep -c '^WIP: TEST-1 capped run$')" -eq 2 ] \
+   && [ "$(git --git-dir="$TMP/remote.git" show refs/heads/dev/test-1:capped-work.txt | grep -c '^capped run$')" -eq 2 ] \
+   && [ "$(sed -n '2p' "$TMP/branch.log")" = 'dev/test-1' ] \
+   && [ "$(grep -c '^Review TEST-1 as an independent second opinion after two watchdog-capped development runs' "$TMP/reviewer.log")" -eq 1 ] \
+   && [ "$(wc -l < "$TMP/branch.log")" -eq 2 ] \
+   && [ ! -e "$TMP/worktrees/dev-TEST-1" ] \
+   && grep -qF 'two watchdog-capped runs requested a second opinion, so no third development run will start' "$TMP/state/agent-board-poll/dev.log" \
+   && RECORD="$record" python3 -c 'import json,os; r=json.load(open(os.environ["RECORD"])); assert r["capped_runs"] == 2 and r["wip_branch"] == "dev/test-1" and r["wip_preservation"] == "pushed" and r["capped_second_opinion_status"] == "completed"'; then
+  pass capped-run-preservation 'capped work is committed, pushed, resumed on its ticket branch, and reviewed instead of run a third time'
+else
+  fail capped-run-preservation "first=$(cat "$TMP/capped-first.out") second=$(cat "$TMP/capped-second.out") third=$(cat "$TMP/capped-third.out") record=$(cat "$record" 2>/dev/null) branches=$(cat "$TMP/branch.log") reviewer=$(cat "$TMP/reviewer.log")"
+fi
+git --git-dir="$TMP/remote.git" update-ref -d refs/heads/dev/test-1
+git -C "$TMP/repo" branch -D dev/test-1 >/dev/null 2>&1 || true
+git -C "$TMP/repo" update-ref -d refs/remotes/origin/dev/test-1
+sed -i 's/RUN_STALL_SECONDS="10"/RUN_STALL_SECONDS="1"/; s/RUN_MAX_SECONDS="2"/RUN_MAX_SECONDS="30"/' "$TMP/config/dev.conf"
 
 reset_runtime
 sed -i 's/RUN_STALL_SECONDS="1"/RUN_STALL_SECONDS="30"/' "$TMP/config/dev.conf"

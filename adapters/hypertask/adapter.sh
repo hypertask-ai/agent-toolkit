@@ -3063,25 +3063,40 @@ adapter_workdir_checkout() {
   local remote="${WORKDIR_REMOTE:-origin}" branch="${WORKDIR_BASE_BRANCH:-main}"
   # The ref is a shape, PREFIX-NUMBER, not "whatever follows the last dash":
   # the workdir name starts with the agent slug, which has dashes of its own.
-  local ref open_branch
+  local ref slug open_branch ticket_branch resume_branch=no
   ref="$(printf '%s' "$name" | grep -oE '[A-Z][A-Z0-9]*-[0-9]+$' || true)"
+  slug="${name%-$ref}"
+  ticket_branch="$slug/$(printf '%s' "$ref" | tr '[:upper:]' '[:lower:]')"
   [ -d "$source/.git" ] || [ -f "$source/.git" ] || die \
     "$source is not a git checkout, so there is nothing to cut a worktree from" \
     "point AGENT_REPO at a git clone of the repo this agent changes"
   open_branch=""
   [ -n "$ref" ] && open_branch="$(_ht_open_branch_for "$ref")"
   if [ -n "$open_branch" ]; then
-    if git -C "$source" fetch --quiet "$remote" "$open_branch" 2>/dev/null; then
+    if git -C "$source" fetch --quiet "$remote" \
+        "+refs/heads/$open_branch:refs/remotes/$remote/$open_branch" 2>/dev/null; then
       branch="$open_branch"
+      resume_branch=yes
       printf 'resuming %s on its open pull request branch %s\n' "$ref" "$branch" >&2
     fi
+  elif [ -n "$ref" ] && git -C "$source" fetch --quiet "$remote" \
+      "+refs/heads/$ticket_branch:refs/remotes/$remote/$ticket_branch" 2>/dev/null; then
+    branch="$ticket_branch"
+    resume_branch=yes
+    printf 'resuming %s on its preserved ticket branch %s\n' "$ref" "$branch" >&2
   fi
   git -C "$source" fetch --quiet "$remote" "$branch" || die \
     "could not fetch $remote/$branch in $source" \
     "check the remote name in WORKDIR_REMOTE and that this machine can reach it"
-  git -C "$source" worktree add --detach "$dir" "$remote/$branch" >/dev/null || die \
-    "could not create a worktree for $name at $dir" \
-    "run git -C $source worktree prune, then try again"
+  if [ "$resume_branch" = "yes" ]; then
+    git -C "$source" worktree add -B "$branch" "$dir" "$remote/$branch" >/dev/null || die \
+      "could not resume $branch for $name at $dir" \
+      "check for another worktree using that branch, then try again"
+  else
+    git -C "$source" worktree add --detach "$dir" "$remote/$branch" >/dev/null || die \
+      "could not create a worktree for $name at $dir" \
+      "run git -C $source worktree prune, then try again"
+  fi
 }
 
 # Refuses, by returning non-zero, when the only copy of some work is in here:
