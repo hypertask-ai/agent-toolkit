@@ -2362,12 +2362,42 @@ if [ "$SECTION_MATCH" = fallback ]; then
 fi
 FEEDBACK_BOARD_SECTION="$RESOLVED_SECTION"
 
-# The real board CLI (`hypertask task create`, checked against its own
-# `capabilities --json` catalog) has no --description-file option, only
-# --description <text>. The call used to send --description-file anyway,
-# which this CLI rejects as an unknown flag: STATUS came back non-zero on
-# every single post, and every feedback call fell through to the
-# print-and-paste fallback and looked like "always refused", token and all.
+if ! PROJECT_LABELS="$("$BOARD_CLI" project labels "$FEEDBACK_BOARD_ID" 2>&1)"; then
+  die "could not read labels for feedback board $FEEDBACK_BOARD_ID" "check the bot wrapper can read project labels"
+fi
+KIND_LABEL="$(LABELS_JSON="$PROJECT_LABELS" WANTED_KIND="$KIND" python3 -c '
+import json, os
+want = os.environ["WANTED_KIND"].strip().casefold()
+doc = json.loads(os.environ["LABELS_JSON"])
+for label in doc.get("labels") or doc.get("project", {}).get("labels") or []:
+    name = str(label.get("name") or "").strip()
+    if name.casefold() == want:
+        print(name)
+        break')"
+if [ -z "$KIND_LABEL" ]; then
+  if "$BOARD_CLI" labels create --project "$FEEDBACK_BOARD_ID" --name "$KIND" >/dev/null 2>&1; then
+    KIND_LABEL="$KIND"
+  else
+    # Another filer may have created it between the read and create calls.
+    PROJECT_LABELS="$("$BOARD_CLI" project labels "$FEEDBACK_BOARD_ID" 2>/dev/null || true)"
+    KIND_LABEL="$(LABELS_JSON="$PROJECT_LABELS" WANTED_KIND="$KIND" python3 -c '
+import json, os
+want = os.environ["WANTED_KIND"].strip().casefold()
+try:
+    doc = json.loads(os.environ["LABELS_JSON"])
+except json.JSONDecodeError:
+    doc = {}
+for label in doc.get("labels") or doc.get("project", {}).get("labels") or []:
+    name = str(label.get("name") or "").strip()
+    if name.casefold() == want:
+        print(name)
+        break')"
+    [ -n "$KIND_LABEL" ] \
+      || die "could not create the '$KIND' feedback label" "check that the bot wrapper can manage labels on project $FEEDBACK_BOARD_ID"
+  fi
+fi
+LABELS="$KIND_LABEL${LABELS#"$KIND"}"
+
 BODY_TEXT="$(cat "$BODY_FILE")"
 if OUT="$("$BOARD_CLI" task create \
       --project "$FEEDBACK_BOARD_ID" \
@@ -2378,22 +2408,6 @@ if OUT="$("$BOARD_CLI" task create \
   STATUS=0
 else
   STATUS=$?
-fi
-# A label this board's project does not carry (board 2462 had none of
-# $LABELS) used to fail the whole post, which fell through to the
-# print-and-paste fallback and looked like "feedback never posts". The
-# ticket itself matters more than the label: retry once with no label instead
-# of losing the post over a non-actionable board configuration detail.
-if [ "$STATUS" -ne 0 ] && printf '%s' "$OUT" | grep -qi "LabelNotFound"; then
-  if OUT="$("$BOARD_CLI" task create \
-        --project "$FEEDBACK_BOARD_ID" \
-        --section "$FEEDBACK_BOARD_SECTION" \
-        --title "$TITLE" \
-        --description "$BODY_TEXT" --json 2>&1)"; then
-    STATUS=0
-  else
-    STATUS=$?
-  fi
 fi
 if [ "$STATUS" -eq 0 ]; then
   FILED_LINE="$(printf '%s\n' "$OUT" | python3 -c '
@@ -2427,10 +2441,8 @@ else:
   log_feedback "$FILED_REF" "$BOARD_CLI"
   append_proposed_case "${FILED_URL:-$FEEDBACK_BOARD_URL}"
 else
-  echo "the board refused the ticket, so here it is to paste by hand:" >&2
-  printf '%s\n' "$OUT" >&2
-  print_and_paste
+  printf 'ERROR: the board refused the feedback ticket: %s\n' "$OUT" >&2
   log_feedback
   append_proposed_case "$FEEDBACK_BOARD_URL (not filed: the board refused it)"
-  exit 0
+  exit "$STATUS"
 fi

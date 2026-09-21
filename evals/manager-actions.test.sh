@@ -116,9 +116,18 @@ case "$*" in
     printf '%s\n' '{"project":{"id":15,"ownerId":6}}' ;;
   '--json project show 5500')
     printf '%s\n' '{"project":{"id":5500,"sections":[{"section_title":"Backlog"},{"section_title":"In Progress"},{"section_title":"Review"},{"section_title":"Done"}]}}' ;;
+  'project labels 5500')
+    if [ -f "$IDEA_LABEL_STATE" ]; then
+      printf '%s\n' '{"labels":[{"name":"adapter:hypertask"},{"name":"bug"},{"name":"Idea"}]}'
+    else
+      printf '%s\n' '{"labels":[{"name":"adapter:hypertask"},{"name":"bug"}]}'
+    fi ;;
+  'labels create --project 5500 --name idea')
+    : > "$IDEA_LABEL_STATE"
+    printf '%s\n' '{"label":{"name":"idea"}}' ;;
   task\ create*)
-    if [ "${BOARD_LABEL_WARNING:-no}" = "yes" ] && [[ "$*" == *' --labels '* ]]; then
-      printf '%s\n' 'LabelNotFound: adapter:hypertask'
+    if [ "${BOARD_TASK_REFUSAL:-no}" = "yes" ]; then
+      printf '%s\n' 'TaskCreateFailed'
       exit 1
     fi
     printf '%s\n' '{"task":{"ticketNumber":"AGTE-99","projectId":5500,"uniqueIndex":99}}' ;;
@@ -130,7 +139,8 @@ chmod +x "$TMP/bin/systemctl" "$TMP/bin/board"
 
 run_template() {
   HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF_DIR" \
-    SYSTEMCTL_LOG="$TMP/systemctl.log" BOARD_LOG="$TMP/board.log" PATH="$TMP/bin:$PATH" \
+    SYSTEMCTL_LOG="$TMP/systemctl.log" BOARD_LOG="$TMP/board.log" \
+    IDEA_LABEL_STATE="$TMP/idea-label" PATH="$TMP/bin:$PATH" \
     "$ROOT/scripts/agent-template" "$@"
 }
 
@@ -362,13 +372,39 @@ else
   bad feedback-env-cli-files "output=$feedback_env"
 fi
 
-feedback_retry="$(BOARD_LABEL_WARNING=yes AGENT_SLUG= run_template feedback \
-  --board-cli "$TMP/bin/board" --kind idea --what 'Clear retry result' \
-  --got 'labels unavailable' --expected 'show only the filed ticket' 2>&1)"
-if [ "$feedback_retry" = 'Feedback filed: idea: Clear retry result. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99' ]; then
-  ok feedback-label-retry-quiet "successful retry hides the internal label warning"
+rm -f "$TMP/idea-label"
+before_label_creates="$(grep -c '^labels create --project 5500 --name idea$' "$TMP/board.log" || true)"
+feedback_first_idea="$(AGENT_SLUG= run_template feedback \
+  --board-cli "$TMP/bin/board" --kind idea --what 'Create the idea label' \
+  --got 'the label is absent' --expected 'file the idea with its label' 2>&1)"
+feedback_second_idea="$(AGENT_SLUG= run_template feedback \
+  --board-cli "$TMP/bin/board" --kind idea --what 'Reuse the idea label' \
+  --got 'the label now exists' --expected 'file another labeled idea' 2>&1)"
+after_label_creates="$(grep -c '^labels create --project 5500 --name idea$' "$TMP/board.log" || true)"
+first_idea_tasks="$(grep -c '^task create .* --labels idea,adapter:hypertask --json$' "$TMP/board.log" || true)"
+mapped_idea_tasks="$(grep -c '^task create .* --labels Idea,adapter:hypertask --json$' "$TMP/board.log" || true)"
+if [ "$feedback_first_idea" = 'Feedback filed: idea: Create the idea label. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99' ] \
+   && [ "$feedback_second_idea" = 'Feedback filed: idea: Reuse the idea label. Ticket: AGTE-99 https://app.hypertask.ai/detail/project-5500/99' ] \
+   && [ "$after_label_creates" -eq $((before_label_creates + 1)) ] \
+   && [ "$first_idea_tasks" -eq 1 ] \
+   && [ "$mapped_idea_tasks" -eq 1 ]; then
+  ok feedback-kind-label-idempotent "idea label is created once, then matched without case loss"
 else
-  bad feedback-label-retry-quiet "output=$feedback_retry"
+  bad feedback-kind-label-idempotent "first=$feedback_first_idea second=$feedback_second_idea creates=$after_label_creates lower=$first_idea_tasks mapped=$mapped_idea_tasks log=$(cat "$TMP/board.log")"
+fi
+
+set +e
+feedback_refused="$(BOARD_TASK_REFUSAL=yes AGENT_SLUG= run_template feedback \
+  --board-cli "$TMP/bin/board" --kind bug --what 'Refused feedback' \
+  --got 'the board rejects the task' --expected 'return an error without a paste payload' 2>&1)"
+feedback_refused_rc=$?
+set -e
+if [ "$feedback_refused_rc" -ne 0 ] \
+   && printf '%s' "$feedback_refused" | grep -qF 'ERROR: the board refused the feedback ticket: TaskCreateFailed' \
+   && ! printf '%s' "$feedback_refused" | grep -qi 'paste'; then
+  ok feedback-refusal-no-paste "authenticated refusal fails without hand-paste output"
+else
+  bad feedback-refusal-no-paste "rc=$feedback_refused_rc output=$feedback_refused"
 fi
 
 if grep -q $'who=regular\twhat=ctl stop worker' "$TMP/state/agent-board-poll/manager-actions.log" \

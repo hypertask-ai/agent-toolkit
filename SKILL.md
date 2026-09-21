@@ -518,8 +518,10 @@ to every ticket with accepted, need info plus one question, or declined.
 Accepted work gets one auto-merge fix pull request and moves to In Progress. When
 a merged release changelog names the AGTE ticket, the same bot replies
 `Shipped in <version>: <one line>` and moves it to Done. Daily updates on the
-filing host print `feedback waiting: AGTE-n` until that ticket closes.
-`--dry-run` renders a filing without sending it.
+filing host print `feedback waiting: AGTE-n` until that ticket closes. Filing reuses
+the board's matching kind label or creates a missing `bug`, `change`, or `idea`
+label once. An authenticated board refusal returns an error without a manual-paste
+payload. `--dry-run` renders a filing without sending it.
 
 ## Evals
 
