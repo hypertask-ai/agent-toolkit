@@ -1,0 +1,1 @@
+- AGTE-162 marks stayed-red pull request reports manager-only and reconciles them to Done after the related pull request merges.

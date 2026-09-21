@@ -359,7 +359,30 @@ print(row.get("section") or "")
         fi
         record="$STATE_DIR/run-records/$slug-$ref.json"
         if [ -f "$record" ] && { record_is_live "$record" || record_preserves_ticket "$record"; }; then continue; fi
-        if merged_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" "${PR_REPO:-}" "$ref" 2>>"$log")"; then
+        report_pr_url="$(ROW="$row" REPO="${PR_REPO:-}" python3 -c '
+import html, json, os, re
+row = json.loads(os.environ["ROW"])
+match = re.fullmatch(r"Bug: PR #([0-9]+) stayed (?:red|checks-pending|awaiting-merge) for two hours", str(row.get("title") or ""))
+if match and os.environ["REPO"]:
+    description = html.unescape(str(row.get("description") or ""))
+    pattern = re.compile(r"https://github[.]com/" + re.escape(os.environ["REPO"]) + r"/pull/" + match.group(1) + r"(?![0-9])", re.I)
+    linked = pattern.search(description)
+    if linked:
+        print(linked.group(0))
+')"
+        if [ -n "$report_pr_url" ]; then
+          if report_pr="$(gh pr view "$report_pr_url" --json state,url 2>>"$log")"; then
+            merged_url="$(PR="$report_pr" python3 -c '
+import json, os
+pull = json.loads(os.environ["PR"])
+if str(pull.get("state") or "").upper() == "MERGED":
+    print(pull.get("url") or "")
+')"
+            [ -n "$merged_url" ] && merged_rc=0 || merged_rc=1
+          else
+            merged_rc=2
+          fi
+        elif merged_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" "${PR_REPO:-}" "$ref" 2>>"$log")"; then
           merged_rc=0
         else
           merged_rc=$?

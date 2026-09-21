@@ -551,10 +551,13 @@ def pr_bug_title(finding: dict[str, Any]) -> str:
     return f"Bug: PR #{finding.get('pr_number')} stayed {finding.get('pr_state') or 'unmerged'} for two hours"
 
 
-def file_alarm(board_cli: str, title: str, description: str) -> str | None:
+def file_alarm(board_cli: str, title: str, description: str,
+               label: str = "bug") -> str | None:
     base = [board_cli, "task", "create", "--project", "5500", "--section", "Review",
             "--priority", "high", "--title", title, "--description", description]
-    commands = [[*base, "--labels", "bug", "--json"], [*base, "--json"]]
+    commands = [[*base, "--labels", label, "--json"]]
+    if label != "manager-only":
+        commands.append([*base, "--json"])
     for index, command in enumerate(commands):
         try:
             result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
@@ -598,7 +601,7 @@ def file_pr_bug(board_cli: str, finding: dict[str, Any]) -> str | None:
         f"<p>First observed: {html.escape(str(finding['since']))}.</p>"
         f"{check_detail}"
     )
-    return file_alarm(board_cli, title, description)
+    return file_alarm(board_cli, title, description, "manager-only")
 
 
 def ticket_url(board: str, ref: str) -> str:

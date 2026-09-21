@@ -169,6 +169,14 @@ JSON
 fi
 if [ "$1 $2" = "pr view" ]; then
   number="$3"
+  if printf ' %s ' "$*" | grep -q ' --json state --jq .state '; then
+    if [ "$scenario" = "closed-protected" ]; then
+      printf 'CLOSED\n'
+    else
+      printf 'OPEN\n'
+    fi
+    exit 0
+  fi
   if printf ' %s ' "$*" | grep -q ' baseRefName,headRefName '; then
     base=production
     [ "$scenario" != "prep-fail" ] || base=missing-production
@@ -238,10 +246,14 @@ if scenario == "paginated" and state == "open":
     stop = 101 if page == 1 else 102
     rows = [row(number, number, f"dev-1/htpr-{number}") for number in range(start, stop)]
 elif state == "closed":
-    if scenario in merged_scenarios:
+    if scenario == "merged-protected":
+        merged_at = "2026-09-18T20:00:00Z"
+        rows = [row(702, 702, "cursor-dev-2/htpr-702", updated=merged_at,
+                    merged=merged_at, labels=["valentin-review"])]
+    elif scenario in merged_scenarios:
         merged_at = "2026-09-18T21:00:00Z" if scenario == "qa-fail" else "2026-09-18T20:00:00Z"
         rows = [row(1, 1, "dev-1/htpr-1", updated=merged_at, merged=merged_at)]
-elif scenario not in merged_scenarios:
+elif scenario not in merged_scenarios | {"merged-protected"}:
     if scenario in {"oldest", "two-green"}:
         rows = [row(9, 9, "dev-1/htpr-9", updated="2026-09-18T21:00:00Z"),
                 row(10, 10, "dev-1/htpr-10", updated="2026-09-18T21:01:00Z")]
@@ -266,6 +278,9 @@ elif scenario not in merged_scenarios:
         rows = [row(12, 12, "DeV-1/htpr-12-fix", updated="2026-09-18T21:00:00Z")]
     elif scenario == "valentin-review":
         rows = [row(14, 14, "dev-1/htpr-14-fix", updated="2026-01-01T00:00:00Z",
+                    labels=["valentin-review"])]
+    elif scenario == "closed-protected":
+        rows = [row(703, 703, "dev-1/htpr-703", updated="2026-01-01T00:00:00Z",
                     labels=["valentin-review"])]
     elif scenario != "record-open":
         updated = "2026-09-18T19:00:00Z" if scenario == "stale-red" else "2026-09-18T21:00:00Z"
@@ -457,8 +472,22 @@ echo 'PASS pending PR remains bound without inventing work'
 protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate valentin-review)"
 [[ "$protected" == *'"action": "wait"'* && "$protected" == *'"state": "protected"'* ]]
 [[ "$protected" == *'label valentin-review'* ]]
+grep -qF 'pr view 14 --repo example/repo --json state --jq .state' "$TMP/gh-calls"
+! grep -qE '/comments|/compare|/deployments' "$TMP/gh-calls"
+echo 'PASS valentin-review protection applies while the PR is open'
+
+: > "$TMP/gh-calls"
+merged_protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate merged-protected dev-2 'Dev Two')"
+[[ -z "$merged_protected" ]]
 ! grep -qE '^pr view|/comments|/compare|/deployments' "$TMP/gh-calls"
-echo 'PASS valentin-review PR is held without review, fix, close, or merge activity'
+echo 'PASS merged PR 702 never binds dev-2 despite valentin-review protection'
+
+: > "$TMP/gh-calls"
+closed_protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate closed-protected)"
+[[ -z "$closed_protected" ]]
+grep -qF 'pr view 703 --repo example/repo --json state --jq .state' "$TMP/gh-calls"
+! grep -qE '/comments|/compare|/deployments' "$TMP/gh-calls"
+echo 'PASS a newly closed PR never binds despite valentin-review protection'
 
 green="$(run_gate green)"
 [[ -z "$green" ]]
@@ -484,13 +513,10 @@ assert result["pickup_slot"] is False and result["unfixable"] is True
 PYEOF
 echo 'PASS a red PR older than two hours stays reportable without blocking pickup'
 
-undeployed="$(run_gate undeployed)"
-[[ "$undeployed" == *'"state": "in-qa"'* ]]
-echo 'PASS merged PR remains bound while QA is incomplete'
-
-base_missing="$(run_gate base-missing)"
-[[ "$base_missing" == *'"state": "in-qa"'* ]]
-echo 'PASS rewritten deployment history does not bypass QA binding'
+for merged_scenario in undeployed deployed fallback qa-fail qa-passed base-missing; do
+  [[ -z "$(run_gate "$merged_scenario")" ]]
+done
+echo 'PASS merged PRs never bind regardless of deployment or QA state'
 
 base_missing_dir="$TMP/base-missing-direct"
 base_missing_state="$(PR_TEST_SCENARIO=base-missing _ht_pr_live_state example/repo 1 "$base_missing_dir")"
@@ -505,26 +531,9 @@ PR_TEST_SCENARIO=base-missing _ht_pr_live_state example/repo 1 "$base_missing_de
 [[ "$(grep -cF 'is not contained in base' "$base_missing_log")" = 1 ]]
 echo 'PASS a rewritten base is only logged once per day even as the 60s cache expires'
 
-[[ "$(run_gate deployed)" == *'"state": "in-qa"'* ]]
-echo 'PASS successful Production deployment still waits for QA'
-
-[[ "$(run_gate fallback)" == *'"state": "in-qa"'* ]]
 fallback_state="$(PR_TEST_SCENARIO=fallback _ht_pr_live_state example/repo 1 "$TMP/fallback-direct")"
 [[ "$fallback_state" == *'fallback: merged and base contains merge commit (no deployment records)'* ]]
-echo 'PASS deployment fallback does not replace the QA verdict'
-
-qa_failed="$(run_gate qa-fail)"
-QA_FAILED="$qa_failed" python3 - <<'PYEOF'
-import json, os
-result = json.loads(os.environ["QA_FAILED"])
-assert result["state"] == "red" and result["qa_failure_id"] == "qa-77"
-assert result["failed_checks"] == ["QA fail"]
-assert "checkout fails after deploy" in result["feedback"]
-PYEOF
-echo 'PASS QA Handoff after merge reports QA fail and keeps a durable verdict id'
-
-[[ -z "$(run_gate qa-passed)" ]]
-echo 'PASS Done ticket proves QA passed and releases the merged PR binding'
+echo 'PASS deployment fallback remains available outside PR binding'
 
 : > "$TMP/gh-calls"
 cache_dir="$TMP/cache-proof"
@@ -747,14 +756,9 @@ echo 'PASS one green PR does not block normal pickup'
 
 rm -rf "$state/pr-live-cache"
 undeployed_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-undeployed_run" PR_TEST_SCENARIO=undeployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$undeployed_run" == *'bound to PR #1 (in-qa); no new ticket was ranked.'* ]]
-[[ "$undeployed_run" != *'would pick up'* ]]
-echo 'PASS merged PR remains bound through QA'
-
-rm -rf "$state/pr-live-cache"
-qa_passed_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-qa_passed_run" PR_TEST_SCENARIO=qa-passed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$qa_passed_run" == *'would pick up HTPR-2'* ]]
-echo 'PASS QA pass releases the next ticket'
+[[ "$undeployed_run" == *'would pick up HTPR-2'* ]]
+[[ "$undeployed_run" != *'bound to PR'* ]]
+echo 'PASS a merged PR cannot block the next ticket'
 
 rm -rf "$state/pr-live-cache"
 red_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-red_run" PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
@@ -806,20 +810,6 @@ RECORD="$record" python3 -c 'import json,os; r=json.load(open(os.environ["RECORD
 [[ "$(grep -c 'explain: infra error preparing PR #1 for HTPR-1' "$state/dev-1.log")" -ge 3 ]]
 STATE="$state/host-alarms.json" python3 -c 'import json,os; s=json.load(open(os.environ["STATE"])); a=s["alarms"]["pr-fix-infra-example-repo-1"]; assert a["active"] is True and a["bug_ticket"] == "AGTE-999"'
 echo 'PASS three preparation failures count as infra errors, alarm once, and start no work'
-
-rm -rf "$state/run-records" "$state/pr-live-cache"
-rm -f "$state/dev-1.released-prs" "$state/dev-1.runs" "$TMP/board-comments" "$TMP/worker-prompts"
-run_actual qa-fail
-record="$state/run-records/dev-1-HTPR-1.json"
-RECORD="$record" python3 -c 'import json,os; r=json.load(open(os.environ["RECORD"])); assert r["fix_rounds"] == 1 and r["last_qa_failure_id"] == "qa-77"'
-grep -qF 'Fix round 1: no push: worker made no commit. Trigger: QA fail | Handoff: Dev One, checkout fails after deploy.' "$TMP/board-comments"
-grep -qF 'The original PR is already merged because QA found this failure.' "$TMP/worker-prompts"
-run_actual qa-fail
-RECORD="$record" python3 -c 'import json,os; assert json.load(open(os.environ["RECORD"]))["fix_rounds"] == 1'
-[[ "$(grep -c '^Fix round' "$TMP/board-comments")" = 1 ]]
-grep -qF 'pr view 1 --repo example/repo --json baseRefName,headRefName' "$TMP/gh-calls"
-[ -z "$(git ls-remote --heads "$TMP/wrong-origin.git" production)" ]
-echo 'PASS QA failure increments only after the worker exits and fetches GitHub refs instead of origin'
 
 rm -rf "$state/run-records" "$state/pr-live-cache"
 rm -f "$state/dev-1.released-prs" "$state/dev-1.runs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/reviewer-prompts" "$TMP/actions" "$TMP/unassigned"

@@ -257,7 +257,7 @@ An instruction to update or build on an allowlisted repository is yours to execu
 Use `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]` for every change to the agent toolkit, supervisor rules, analytics site, app, CLI, or Slack bot. Never run hax or codex directly.
 Write each build specification with four explicit parts: Ticket, What, Done when, and Guardrails.
 Use `agent-template build status [id]` and `agent-template build list` to inspect work. If asked what you did, answer from build list and its recorded output, not from memory.
-Never merge a pull request by hand. Auto-merge or the supervisor handles merges, and pull requests labelled `valentin-review` stay untouched.
+Never merge a pull request by hand. Auto-merge or the supervisor handles merges, and open pull requests labelled `valentin-review` stay untouched.
 Use `agent-template build` for a requested build. Use `agent-template update --keep-timers` for a requested toolkit update after its pull request merges.
 The repository allowlist is the complete boundary. Do not change a repo that is absent from it.'
 fi
@@ -1687,6 +1687,50 @@ watch_model_process() {
   return "$rc"
 }
 
+recover_held_closing_comment() {
+  local ref="$1" held_file="$2" pr_url="$3" linked_file final_file reasons
+  [ -s "$held_file" ] || return 0
+  linked_file="$held_file.linked"
+  final_file="$held_file.final"
+  if ! python3 "$TICKET_LINK_FORMATTER" --mode html --token-file "$TOKEN_FILE" \
+      < "$held_file" > "$linked_file" 2>>"$LOG"; then
+    log "closing comment for $ref remains held: ticket reference rewrite failed"
+    return 0
+  fi
+  if ! MERGED_PR_URL="$pr_url" python3 - "$linked_file" > "$final_file" <<'PYEOF'
+import html
+import re
+import os
+import sys
+
+text = open(sys.argv[1], encoding="utf-8").read()
+url = os.environ["MERGED_PR_URL"]
+if url not in text:
+    number = url.rstrip("/").rsplit("/", 1)[-1]
+    anchor = '<a href="%s">%s</a>' % (html.escape(url, quote=True), html.escape(url))
+    rewritten, count = re.subn(r"\bPR\s*#?\s*" + re.escape(number) + r"\b", anchor, text, count=1, flags=re.I)
+    if not count:
+        block = "<p>%s</p>" % anchor
+        offset = text.rfind("<p")
+        rewritten = text[:offset] + block + text[offset:] if offset >= 0 else text + block
+    text = rewritten
+sys.stdout.write(text)
+PYEOF
+  then
+    log "closing comment for $ref remains held: pull request link rewrite failed"
+    return 0
+  fi
+  if ! reasons="$(python3 "$PLAIN_LANGUAGE_CHECK" < "$final_file" 2>&1)"; then
+    log "closing comment for $ref remains held after rewrite: $reasons"
+    return 0
+  fi
+  if post_ticket_comment "$ref" raw-file "$final_file"; then
+    log "rewrote and posted the held closing comment for $ref after $pr_url merged"
+  else
+    log "closing comment for $ref remains held: rewritten comment could not be posted"
+  fi
+}
+
 run_verdict_marker() {
   local ref="$1" task_id="$2" board="$3" ids comments
   ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
@@ -2589,9 +2633,9 @@ if run_advisor_instruction; then
 fi
 check_maintainer_builds
 
-# ---------- owned pull-request binding (AGTE-130) ----------
-# An owned PR is the agent's only development work until the PR is merged and
-# QA has passed. This runs before both normal and exact-ticket event ranking.
+# ---------- owned pull-request binding (AGTE-130, AGTE-167) ----------
+# An owned PR can bind the agent only while GitHub reports it open. This runs
+# before both normal and exact-ticket event ranking.
 pr_fix_state() {
   local path="$1"
   python3 - "$path" <<'PYEOF'
@@ -3245,7 +3289,7 @@ print(json.dumps({"id":"pr-%s" % p["number"], "ref":p["ticket"], "section":"Pull
                   "agent_ids":[os.environ["AID"]], "assignee_count":1, "labels":[],
                   "comment_count":0, "board":p.get("board") or os.environ["BOARD"], "url":p["url"],
                   "trigger":"pr_fix", "pr_number":p["number"], "pr_branch":p["branch"],
-                  "pr_base":p.get("base") or "main", "pr_merged":bool(p.get("merged_at")),
+                  "pr_base":p.get("base") or "main",
                   "pr_fix_round":os.environ["ROUND"], "pr_diagnosis":os.environ["DIAGNOSIS"],
                   "pr_failure_signature":os.environ["SIGNATURE"],
                   "pr_qa_failure_id":os.environ["QA_FAILURE_ID"],
@@ -3824,13 +3868,11 @@ if [ -n "$first_eligible" ]; then
   PROGRESS_ELIGIBLE_URL="$(row_field "${E_ROW[$first_eligible]}" url)"
 fi
 
-# Pending checks and merged-but-not-deployed PRs deliberately consume the tick.
-# An emergency above is the one exception and remains eligible.
+# Pending checks on an open PR deliberately consume the tick. An emergency
+# above is the one exception and remains eligible.
 if [ -n "$PR_GATE" ] && [ "$PR_GATE_ACTION" = "wait" ] && [ "$picked" -eq 0 ]; then
   case "$PR_GATE_STATE" in
     checks-pending) log "waiting on PR #$PR_GATE_NUMBER: checks pending" ;;
-    merged-undeployed) log "waiting on PR #$PR_GATE_NUMBER: merged but not deployed" ;;
-    merged-base-missing) log "waiting on PR #$PR_GATE_NUMBER: merge commit is not contained in its base branch" ;;
     *) log "waiting on PR #$PR_GATE_NUMBER: $PR_GATE_STATE" ;;
   esac
   [ "$DRY_RUN" = "no" ] || echo "waiting on PR #$PR_GATE_NUMBER: $PR_GATE_STATE; nothing was claimed."
@@ -4016,12 +4058,7 @@ post the verdict but miss the move, the runner applies the move from the marker.
     pr_branch="$(row_field "$row" pr_branch)"
     pr_fix_round="$(row_field "$row" pr_fix_round)"
     pr_diagnosis="$(row_field "$row" pr_diagnosis)"
-    pr_merged="$(row_field "$row" pr_merged)"
-    if [ "$pr_merged" = "True" ]; then
-      pr_delivery="The original PR is already merged because QA found this failure. Commit and push the fix on $pr_branch, then open a follow-up PR for $ref from that branch."
-    else
-      pr_delivery="Commit and push the focused fix to this same PR branch."
-    fi
+    pr_delivery="Commit and push the focused fix to this same PR branch."
     PROMPT="Read $SKILLS_INDEX_SENTENCE first, in that order, then fix the existing pull request $url for $ref.
 
 This is fix round ${pr_fix_round:-unknown}. This is the only work you may do this tick. The runner checked out branch $pr_branch and rebased it on the PR base before this run. Resolve any rebase conflict. $pr_delivery Do not claim or start another ticket and do not hand this PR to a manager.
@@ -4035,7 +4072,7 @@ $pr_diagnosis
 
 }$AGENT_ADVISOR_GUIDANCE
 
-Keep ownership of this PR until it merges and QA passes."
+Keep ownership of this PR while it remains open."
   fi
 
   if [ "$is_reply_only" = "yes" ]; then
@@ -4158,7 +4195,7 @@ MAINTAINER COMMANDS:
 - \`agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]\`.
 - \`agent-template build status [id]\` and \`agent-template build list\`.
 - \`agent-template update --keep-timers\` after a toolkit build merges.
-Run the requested maintainer command now. Never answer with a plan, delegation, or developer handoff. Never merge a pull request by hand or touch one labelled \`valentin-review\`. A background build is not done when it starts; its completion checker posts the final result."
+Run the requested maintainer command now. Never answer with a plan, delegation, or developer handoff. Never merge a pull request by hand or touch an open one labelled \`valentin-review\`. A background build is not done when it starts; its completion checker posts the final result."
   fi
 
   if [ "$GRAFT" = "on" ] && [ "$is_reply_only" = "no" ]; then
@@ -4440,6 +4477,8 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
   started=$((started + 1))
   OPEN_PRS_BEFORE=""
   opened_this_run="no"
+  merged_pr_outcome="no"
+  merged_pr_url=""
   run_verdict=""
   if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
     OPEN_PRS_BEFORE="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
@@ -4643,6 +4682,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         export AGENT_QA_MOVE="$([ "$AGENT_KIND" = "qa" ] && printf yes || printf no)"
         export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
         export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
+        export AGENT_HELD_COMMENT_FILE="$MODEL_ACTIVITY_DIR/held-comment.html"
         export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
         export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
         export AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER"
@@ -4696,6 +4736,18 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "provider $route_provider quota exhausted"
       fi
     done < <(provider_routes "$RUN_MODEL_CLI")
+    if [ "$is_pr_fix" = "no" ] && [ "$worker_exited" = "yes" ] \
+       && declare -F adapter_ticket_merged_pr >/dev/null 2>&1; then
+      if merged_pr_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" \
+          "$PR_REPO" "$ref" yes 2>>"$LOG")" && [ -n "$merged_pr_url" ]; then
+        merged_pr_outcome="yes"
+        if [ "$rc" -ne 0 ]; then
+          log "model exited $rc after $merged_pr_url merged; using the merged pull request as the run outcome"
+        fi
+        rc=0
+        recover_held_closing_comment "$ref" "$MODEL_ACTIVITY_DIR/held-comment.html" "$merged_pr_url"
+      fi
+    fi
     if [ "$is_pr_fix" = "yes" ] && [ "$worker_exited" = "yes" ]; then
       pr_head_after="$(git -C "$RUN_DIR" rev-parse HEAD 2>/dev/null || true)"
       if [ "$rc" -ne 0 ]; then
@@ -4818,6 +4870,12 @@ if rows:
       fi
       post_ticket_comment "$ref" text "$quota_wait_comment" || log "provider reset wait comment failed for $ref"
       move_ticket_or_report "$ref" "$origin_section" "$board" "provider reset wait" || true
+    elif [ "$merged_pr_outcome" = "yes" ]; then
+      run_record_status="done"
+      if ! move_ticket_or_report "$ref" "$DONE_SECTION" "$board" "merged PR outcome"; then
+        rc=74
+        run_record_status="move-failed"
+      fi
     elif [ "$rc" -ne 0 ]; then
       run_record_status="blocked"
       move_ticket_or_report "$ref" "$QA_BLOCKED_SECTION" "$board" "blocked run" || true
