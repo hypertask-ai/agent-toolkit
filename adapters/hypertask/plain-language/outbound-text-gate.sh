@@ -12,9 +12,20 @@ _enforce_plain_comment() {
   local original="$1" kind="$2" reasons
   if reasons="$(printf '%s' "$original" | python3 "$PLAIN_LANGUAGE_CHECK" 2>&1)"; then
     TEXT="$original"
+    case "$kind" in
+      Done|Handoff) [ -z "${AGENT_HELD_COMMENT_FILE:-}" ] || rm -f "$AGENT_HELD_COMMENT_FILE" ;;
+    esac
     return 0
   fi
   mkdir -p "$(dirname "$RUN_LOG")" 2>/dev/null || true
+  case "$kind" in
+    Done|Handoff)
+      if [ -n "${AGENT_HELD_COMMENT_FILE:-}" ]; then
+        mkdir -p "$(dirname "$AGENT_HELD_COMMENT_FILE")" 2>/dev/null || true
+        printf '%s' "$original" > "$AGENT_HELD_COMMENT_FILE"
+      fi
+      ;;
+  esac
   {
     printf '%s plain-language-held: draft follows\n%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$original"
     printf 'plain-language-held: reasons follow\n%s\n' "$reasons"

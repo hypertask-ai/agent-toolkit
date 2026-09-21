@@ -343,7 +343,12 @@ code-shaped tokens, commit hashes, em dashes, linked ticket and PR references,
 and the last block. It tries one 60-second rewrite with `CHAT_CLI` or
 `RESEARCH_CLI`, then checks again. A second failure logs the draft and
 reasons, emits the `Question held: did not pass the plain-language check`
-activity, and sends no raw comment.
+activity, and sends no raw comment. When a closing `Done:` or `Handoff:` comment
+is held, the runner keeps its draft until the worker exits. If that run merged
+its pull request, the runner refreshes GitHub, links the draft's ticket and pull
+request references, checks it again, and posts it. A rewrite failure leaves the
+comment held. In either case, the merged pull request makes the run successful
+and moves the ticket to Done.
 
 Direct human questions use the fixed high-effort Codex Sol reply route instead
 of the conf provider. The five-minute process uses `hax --raw`, which provides

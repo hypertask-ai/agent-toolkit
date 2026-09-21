@@ -1,0 +1,1 @@
+- AGTE-168 keeps a run successful and moves its ticket to Done when its pull request merged, even if the closing comment was refused. The runner links and retries the held comment, or leaves it held when the rewrite fails.
