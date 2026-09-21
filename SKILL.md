@@ -399,8 +399,8 @@ time. PR ownership stays unknown during the pause, and ticks continue.
 Two open PRs fill the pickup slots and stop every new claim, including an
 `emergency`. The runner ranks that queue oldest first. A red or pending PR older
 than two hours no longer uses a slot because another run has not made it
-fixable; it remains monitored and is reported on Board health. One green, red,
-or pending open PR never stops a new pickup. An open PR whose ticket is
+fixable; it remains monitored and is reported on Board health. One green open
+PR never stops a new pickup. An open PR whose ticket is
 unassigned or assigned to no active agent blocks nobody unless branch or run
 state identifies an owner. The first tick each UTC day logs `orphaned PR #<n>
 (<branch>) has no owning agent` for supervisor follow-up.

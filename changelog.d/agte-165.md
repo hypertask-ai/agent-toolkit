@@ -1,1 +1,1 @@
-- AGTE-165 keeps one green pull request monitored without stopping the agent from starting another ticket, while preserving red, pending, QA, protected, and two-PR pickup gates.
+- AGTE-165 reports stale pull requests with their failing checks while releasing old red debt and one open green pull request from the pickup gate.

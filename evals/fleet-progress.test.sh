@@ -260,6 +260,52 @@ else
   bad red-pr-names-failing-check 'the filed red-PR bug omitted its failing check name'
 fi
 
+AGTE165_STATE="$TMP/agte-165-state"
+mkdir -p "$AGTE165_STATE"
+cat > "$AGTE165_STATE/dev-2.progress.json" <<'EOF'
+{
+  "schema_version": 1,
+  "runner": "dev-2",
+  "wait": {"state": null, "since": null, "ticket": null, "reason": null, "pr": null},
+  "monitored_prs": [{
+    "number": 706,
+    "url": "https://github.com/hypertask-ai/hypertask/pull/706",
+    "ticket": "HTPR-6572",
+    "state": "red",
+    "since": "2026-09-20T21:58:37.611177Z",
+    "failed_checks": ["QA fail"],
+    "pickup_slot": false,
+    "unfixable": true
+  }],
+  "eligible_work": {"count": 0, "since": null},
+  "units": []
+}
+EOF
+: > "$TMP/agte-165-board.log"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF" \
+  BOARD_LOG="$TMP/agte-165-board.log" BOARD_COUNTER="$TMP/agte-165-board-counter" \
+  CHAT_CURL_LOG="$TMP/chat-curl.log" ALARM_TELEGRAM_CURL_LOG="$TMP/alarm-telegram-curl.log" \
+  NOTIFIER_LOG="$TMP/notifier.log" FLEET_TELEGRAM_NOTIFIER="$TMP/bin/notifier" \
+  PATH="$TMP/bin:$PATH" "$PROGRESS" supervise --state-dir "$AGTE165_STATE" --board-cli "$TMP/bin/board" \
+    --token-file "$TMP/token" --manager-cli "$ROOT/scripts/agent-template" --manager-slug product-bot \
+    --toolkit-ticket AGTE-37 --now 2026-09-20T23:59:00Z >/dev/null
+if python3 - "$TMP/agte-165-board.log" <<'PYEOF'
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+create = next(row for row in rows if row[:2] == ["task", "create"])
+assert create[create.index("--title") + 1] == "Bug: PR #706 stayed red for two hours"
+description = create[create.index("--description") + 1]
+assert "Runner: dev-2." in description
+assert "Source ticket: HTPR-6572." in description
+assert "First observed: 2026-09-20T21:58:37.611177Z." in description
+assert "Failing checks: QA fail." in description
+PYEOF
+then
+  ok agte-165-monitored-red-pr 'AGTE-165 reports stale PR 706 with QA fail after releasing its pickup slot'
+else
+  bad agte-165-monitored-red-pr 'AGTE-165 alarm omitted the PR, source, timestamp, or failing check'
+fi
+
 python3 - "$RED_STATE/dev-red.progress.json" <<'PYEOF'
 import json, os, sys
 path = sys.argv[1]
