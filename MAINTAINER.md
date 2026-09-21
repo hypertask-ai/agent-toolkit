@@ -442,14 +442,15 @@ an explicitly configured `GH_LOGIN` that differs from the host `gh` login.
 branches. QA agents recognize only PRs recorded in their own opened-PR ledger.
 Board assignment and shared GitHub authorship never transfer PR ownership.
 
-One owned PR is a hard binding. Pending checks, a green PR awaiting review or
-merge, and a merged PR awaiting QA all consume the tick; neither a normal poll
-nor `--ticket` event starts unrelated work. A PR whose ticket is in the blocked
-section, has any human assignee, or is held by the owner remains bound but starts
-no fix round. The binding ends only when QA moves the ticket to `DONE_SECTION`
-(default `Done`). An open PR with no active owner is ignored. Once per UTC day,
-a tick logs `orphaned PR #<n> (<branch>) has no owning agent` so the supervisor
-can decide who should take it.
+A red or pending PR stops pickup for its first two hours, then remains monitored
+while new work can start. One green PR awaiting review or merge is monitored
+without stopping pickup; two open PRs fill the pickup slots. A merged PR awaiting
+QA remains bound. A PR whose ticket is in the blocked section, has any human
+assignee, or is held by the owner remains bound but starts no fix round. The
+binding ends when QA moves the ticket to `DONE_SECTION` (default `Done`). An open
+PR with no active owner is ignored. Once per UTC day, a tick logs `orphaned PR
+#<n> (<branch>) has no owning agent` so the supervisor can decide who should take
+it.
 
 A red PR resolves its current base and head with `gh pr view`, then fetches both
 from the `PR_REPO` GitHub URL instead of the checkout's `origin`. Fetch or

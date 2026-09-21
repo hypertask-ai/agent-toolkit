@@ -104,6 +104,74 @@ print(prefix.upper())
   printf '%s-%s' "$prefix" "$number"
 }
 
+# Keep the board adapter's full ownership lookup, then apply the pickup policy
+# here so runtime policy can evolve without coupling core to Hypertask.
+adapter_pr_gate() (
+  local slug="$5" opened_prs="${8:-}" state_dir rows rc monitor root
+  root="${CORE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
+  state_dir="$(dirname "${opened_prs:-${6%/*}/none}")"
+  monitor="$state_dir/$slug.monitored-prs.json"
+  # This wrapper runs in a subshell, so restoring the adapter implementation
+  # here cannot replace the wrapper for the next call.
+  . "$root/adapters/hypertask/adapter.sh"
+  if rows="$(adapter_pr_gate "$@")"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  mkdir -p "$state_dir"
+  ROWS="$rows" NOW="${PR_GATE_NOW:-}" MONITOR="$monitor" python3 - <<'PYEOF'
+import datetime
+import json
+import os
+
+rows = [json.loads(line) for line in os.environ["ROWS"].splitlines() if line.strip()]
+try:
+    now = datetime.datetime.fromisoformat(os.environ.get("NOW", "").replace("Z", "+00:00"))
+except ValueError:
+    now = datetime.datetime.now(datetime.timezone.utc)
+if now.tzinfo is None:
+    now = now.replace(tzinfo=datetime.timezone.utc)
+
+
+def age(row):
+    try:
+        value = datetime.datetime.fromisoformat(str(row.get("since") or "").replace("Z", "+00:00"))
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=datetime.timezone.utc)
+        return (now - value).total_seconds()
+    except ValueError:
+        return 0
+
+
+for row in rows:
+    stale = row.get("state") in {"red", "pending"} and age(row) >= 2 * 60 * 60
+    if stale:
+        row["action"] = "observe"
+        row["pickup_slot"] = False
+        row["unfixable"] = True
+
+open_slots = [row for row in rows
+              if row.get("pickup_slot") is True
+              and row.get("state") in {"red", "pending", "awaiting-review"}]
+gates = [row for row in rows if not row.get("unfixable")]
+if len(open_slots) < 2:
+    gates = [row for row in gates if row.get("state") != "awaiting-review"]
+
+# Prefer repairable failures when multiple open PRs fill the available slots.
+gates.sort(key=lambda row: (row.get("action") != "fix", str(row.get("since") or "")))
+path = os.environ["MONITOR"]
+temporary = path + ".new"
+with open(temporary, "w", encoding="utf-8") as handle:
+    json.dump(rows, handle, sort_keys=True)
+    handle.write("\n")
+os.replace(temporary, path)
+for row in gates:
+    print(json.dumps(row, sort_keys=True))
+PYEOF
+)
+
 # Print the live owner-review destination for one board. An unreadable section
 # list keeps the configured value so a temporary board outage does not stop all work.
 adapter_resolve_release_section() {

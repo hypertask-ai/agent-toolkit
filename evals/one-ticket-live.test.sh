@@ -236,7 +236,8 @@ if scenario == "paginated" and state == "open":
     rows = [row(number, number, f"dev-1/htpr-{number}") for number in range(start, stop)]
 elif state == "closed":
     if scenario in merged_scenarios:
-        rows = [row(1, 1, "dev-1/htpr-1", updated="2026-09-18T20:00:00Z", merged="2026-09-18T20:00:00Z")]
+        merged_at = "2026-09-18T21:00:00Z" if scenario == "qa-fail" else "2026-09-18T20:00:00Z"
+        rows = [row(1, 1, "dev-1/htpr-1", updated=merged_at, merged=merged_at)]
 elif scenario not in merged_scenarios:
     if scenario in {"oldest", "two-green"}:
         rows = [row(9, 9, "dev-1/htpr-9", updated="2026-09-18T21:00:00Z"),
@@ -249,17 +250,17 @@ elif scenario not in merged_scenarios:
     elif scenario == "orphan":
         rows = [row(4, 12, "retired-dev/htpr-4", author="retired-dev", updated="2026-01-01T00:00:00Z")]
     elif scenario == "author-owned":
-        rows = [row(5, 5, "contributor/fix-5", author="dev-one", updated="2026-01-01T00:00:00Z")]
+        rows = [row(5, 5, "contributor/fix-5", author="dev-one", updated="2026-09-18T21:00:00Z")]
     elif scenario == "custom-prefix":
-        rows = [row(6, 6, "cursor-dev-2/htpr-6", updated="2026-01-01T00:00:00Z")]
+        rows = [row(6, 6, "cursor-dev-2/htpr-6", updated="2026-09-18T21:00:00Z")]
     elif scenario == "state-owned":
-        rows = [row(7, 7, "legacy/fix-7", updated="2026-01-01T00:00:00Z")]
+        rows = [row(7, 7, "legacy/fix-7", updated="2026-09-18T21:00:00Z")]
     elif scenario == "shared-author":
         rows = [row(11, 11, "legacy/fix-11", updated="2026-01-01T00:00:00Z")]
     elif scenario == "foreign-prefix":
         rows = [row(13, 13, "dev-2/htpr-13", updated="2026-01-01T00:00:00Z")]
     elif scenario == "slug-prefix":
-        rows = [row(12, 12, "DeV-1/htpr-12-fix", updated="2026-01-01T00:00:00Z")]
+        rows = [row(12, 12, "DeV-1/htpr-12-fix", updated="2026-09-18T21:00:00Z")]
     elif scenario == "valentin-review":
         rows = [row(14, 14, "dev-1/htpr-14-fix", updated="2026-01-01T00:00:00Z",
                     labels=["valentin-review"])]
@@ -331,7 +332,7 @@ elif [[ "$url" == *'task_id=task-1'* ]] \
      && [ -e "${MODEL_OPEN_MARKER:-/no-marker}" ]; then
   printf '%s\n' '{"comments":[{"id":"opened-8","agent":{"id":"agent-1"},"createdAt":"2026-09-18T21:00:00Z","text":"<p><strong>Handoff: The pull request is ready for review.</strong></p><p><a href=\"https://github.com/example/repo/pull/8\">https://github.com/example/repo/pull/8</a></p><p>Next: Review the linked change.</p>"}]}'
 elif [[ "$url" == *'task_id=task-1'* ]] && [ "${PR_TEST_SCENARIO:-}" = "qa-fail" ]; then
-  printf '{"comments":[{"id":"qa-77","agent":{"id":"agent-qa"},"createdAt":"2026-09-18T21:00:00Z","text":"<p>Handoff: Dev One, checkout fails after deploy.</p>"}]}\n'
+  printf '{"comments":[{"id":"qa-77","agent":{"id":"agent-qa"},"createdAt":"2026-09-18T21:30:00Z","text":"<p>Handoff: Dev One, checkout fails after deploy.</p>"}]}\n'
 elif [[ "$url" == *'task_id=task-3'* ]]; then
   printf '{"comments":[{"agent":{"id":"agent-1","displayName":"Dev One"},"text":"<p>Claimed.</p>"}]}\n'
 else
@@ -372,6 +373,7 @@ PR_REPO="example/repo"
 export PR_GATE_NOW="2026-09-18T22:00:00Z"
 # shellcheck source=/dev/null
 . "$ROOT/adapters/hypertask/adapter.sh"
+. "$ROOT/scripts/lib/adapters/hypertask.sh"
 die() { printf 'die: %s %s\n' "$*" >&2; return 1; }
 
 cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<'EOF'
@@ -456,25 +458,28 @@ protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate valentin-review)"
 echo 'PASS valentin-review PR is held without review, fix, close, or merge activity'
 
 green="$(run_gate green)"
-GREEN="$green" python3 - <<'PYEOF'
-import json, os
-result = json.loads(os.environ["GREEN"])
-assert result["action"] == "wait" and result["state"] == "awaiting-review"
-assert result["pickup_slot"] is True and result["blocks_pickup"] is False
-assert result["unfixable"] is False
+[[ -z "$green" ]]
+python3 - "$TMP/home/.local/state/agent-board-poll/dev-1.monitored-prs.json" <<'PYEOF'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(rows) == 1 and rows[0]["state"] == "awaiting-review"
+assert rows[0]["pickup_slot"] is True and rows[0]["unfixable"] is False
 PYEOF
-echo 'PASS one open green PR remains monitored without blocking pickup'
+echo 'PASS one open green PR is monitored without blocking pickup'
 
 stale_red="$(run_gate stale-red)"
-STALE_RED="$stale_red" python3 - <<'PYEOF'
-import json, os
-result = json.loads(os.environ["STALE_RED"])
-assert result["action"] == "fix" and result["state"] == "red"
+[[ -z "$stale_red" ]]
+python3 - "$TMP/home/.local/state/agent-board-poll/dev-1.monitored-prs.json" <<'PYEOF'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(rows) == 1
+result = rows[0]
+assert result["action"] == "observe" and result["state"] == "red"
 assert result["failed_checks"] == ["ci-tests", "revert-guard", "pr-title"]
 assert result["wait_reason"] == "red: ci-tests, revert-guard, pr-title"
-assert result["pickup_slot"] is True and result["unfixable"] is False
+assert result["pickup_slot"] is False and result["unfixable"] is True
 PYEOF
-echo 'PASS a red PR never ages out of its binding'
+echo 'PASS a red PR older than two hours stays reportable without blocking pickup'
 
 undeployed="$(run_gate undeployed)"
 [[ "$undeployed" == *'"state": "in-qa"'* ]]
@@ -635,17 +640,17 @@ oldest="$(run_gate oldest)"
 echo 'PASS every owed PR is returned oldest first'
 
 mixed="$(run_gate stale-red-green)"
-MIXED="$mixed" python3 - <<'PYEOF'
-import json, os
-rows = [json.loads(line) for line in os.environ["MIXED"].splitlines()]
-assert rows[0]["number"] == 9 and rows[0]["action"] == "fix"
-assert rows[0]["pickup_slot"] is True and rows[0]["unfixable"] is False
+[[ -z "$mixed" ]]
+python3 - "$TMP/home/.local/state/agent-board-poll/dev-1.monitored-prs.json" <<'PYEOF'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+assert rows[0]["number"] == 9 and rows[0]["action"] == "observe"
+assert rows[0]["pickup_slot"] is False and rows[0]["unfixable"] is True
 assert rows[1]["number"] == 10 and rows[1]["pickup_slot"] is True
 PYEOF
-echo 'PASS old red PR remains first in the owned PR queue'
+echo 'PASS an old red PR and one green PR leave pickup unblocked'
 
-# Run the real pickup path in dry-run mode. One green PR leaves a pickup slot,
-# while red, pending, QA, protected, or two open PRs keep their existing gates.
+# Run the real pickup path in dry-run mode.
 cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<EOF
 AGENT_ID="agent-1"
 AGENT_NAME="Dev One"
@@ -715,9 +720,9 @@ echo 'PASS two green PRs fill both pickup slots'
 
 rm -rf "$state/pr-live-cache"
 stale_red_green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-stale_red_green_run" PR_TEST_SCENARIO=stale-red-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$stale_red_green_run" == *'would run a structured fix round for PR #9'* ]]
-[[ "$stale_red_green_run" != *'would pick up'* ]]
-echo 'PASS old red PR remains bound instead of aging out'
+[[ "$stale_red_green_run" == *'would pick up HTPR-2'* ]]
+[[ "$stale_red_green_run" != *'bound to PR'* ]]
+echo 'PASS old red and one green PR do not block the next pickup'
 
 rm -rf "$state/pr-live-cache"
 pending_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-pending_run" PR_TEST_SCENARIO=pending BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
@@ -733,10 +738,9 @@ echo 'PASS exact-ticket event pickup obeys the same PR binding'
 
 rm -rf "$state/pr-live-cache"
 green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-green_run" PR_TEST_SCENARIO=green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$green_run" == *'skip  HTPR-1: its open PR is monitored without blocking new work'* ]]
 [[ "$green_run" == *'would pick up HTPR-2'* ]]
-[[ "$green_run" != *'no new ticket was ranked'* ]]
-echo 'PASS one green PR allows normal pickup while remaining monitored'
+[[ "$green_run" != *'bound to PR'* ]]
+echo 'PASS one green PR does not block normal pickup'
 
 rm -rf "$state/pr-live-cache"
 undeployed_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-undeployed_run" PR_TEST_SCENARIO=undeployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
