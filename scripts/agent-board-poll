@@ -1613,10 +1613,17 @@ worktree_activity_marker() {
     | sort -nr | sed -n '1p'
 }
 
+tool_activity_marker() {
+  [ -d "$1" ] || return 0
+  find "$1" -type f -name 'heartbeat-*.json' -printf '%p:%T@:%s\n' 2>/dev/null \
+    | sort
+}
+
 watch_model_process() {
-  local wait_pid="$1" process_group="$2" record="$3" output_file="$4" error_file="$5" ref="$6"
+  local wait_pid="$1" process_group="$2" record="$3" output_file="$4" error_file="$5" ref="$6" activity_dir="$7"
   local poll_seconds now idle_seconds run_seconds wait_state process_state monitor_rc rc
-  local output_marker cpu_ticks worktree_marker last_output_marker last_cpu_ticks last_worktree_marker last_activity_epoch
+  local output_marker cpu_ticks worktree_marker tool_marker
+  local last_output_marker last_cpu_ticks last_worktree_marker last_tool_marker last_activity_epoch
   WATCHDOG_REASON=""
   poll_seconds="$RUN_STALL_SECONDS"
   [ "$RUN_MAX_SECONDS" -ge "$poll_seconds" ] || poll_seconds="$RUN_MAX_SECONDS"
@@ -1625,6 +1632,7 @@ watch_model_process() {
   last_output_marker="$(model_output_marker "$output_file" "$error_file")"
   last_cpu_ticks="$(model_cpu_ticks "$process_group")"
   last_worktree_marker="$(worktree_activity_marker)"
+  last_tool_marker="$(tool_activity_marker "$activity_dir")"
   while kill -0 "$wait_pid" 2>/dev/null; do
     process_state="$(ps -o stat= -p "$wait_pid" 2>/dev/null | tr -d ' ')"
     [[ "$process_state" != Z* ]] || break
@@ -1632,14 +1640,17 @@ watch_model_process() {
     output_marker="$(model_output_marker "$output_file" "$error_file")"
     cpu_ticks="$(model_cpu_ticks "$process_group")"
     worktree_marker="$(worktree_activity_marker)"
+    tool_marker="$(tool_activity_marker "$activity_dir")"
     if [ "$output_marker" != "$last_output_marker" ] \
         || [ "$cpu_ticks" != "$last_cpu_ticks" ] \
-        || [ "$worktree_marker" != "$last_worktree_marker" ]; then
+        || [ "$worktree_marker" != "$last_worktree_marker" ] \
+        || [ "$tool_marker" != "$last_tool_marker" ]; then
       last_activity_epoch="$now"
     fi
     last_output_marker="$output_marker"
     last_cpu_ticks="$cpu_ticks"
     last_worktree_marker="$worktree_marker"
+    last_tool_marker="$tool_marker"
     idle_seconds=$((now - last_activity_epoch))
     run_seconds=$((now - run_started_epoch))
     wait_state=""
@@ -4596,11 +4607,14 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         MODEL_ARGV=("${MODEL_ARGV[0]}" --mcp-config "$GRAFT_MCP_CONFIG" "${MODEL_ARGV[@]:1}")
       fi
       MODEL_PID_FILE="$RUN_OUTPUT_DIR/$SLUG-$ref-$route_count.pid"
+      MODEL_ACTIVITY_DIR="$(mktemp -d "$RUN_OUTPUT_DIR/$SLUG-$ref-$route_count.activity.XXXXXX")"
       register_run_temp "$MODEL_PID_FILE"
+      register_run_temp "$MODEL_ACTIVITY_DIR"
       rm -f "$MODEL_PID_FILE"
       (
         if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
         export PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}"
+        export TMPDIR="$MODEL_ACTIVITY_DIR"
         export AGENT_NAME AGENT_ID AGENT_BOARD_CLI="$BOARD_CLI"
         export AGENT_QA_MOVE="$([ "$AGENT_KIND" = "qa" ] && printf yes || printf no)"
         export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
@@ -4628,7 +4642,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       ACTIVE_MODEL_WAIT_PID="$model_wait_pid"
       ACTIVE_MODEL_PROCESS_GROUP="$model_process_group"
       if watch_model_process "$model_wait_pid" "$model_process_group" "$run_record" \
-        "$RUN_OUTPUT" "$provider_err" "$ref"; then
+        "$RUN_OUTPUT" "$provider_err" "$ref" "$MODEL_ACTIVITY_DIR"; then
         rc=0
       else
         rc=$?

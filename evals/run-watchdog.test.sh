@@ -52,6 +52,10 @@ case "${MOCK_MODEL_MODE:-stall}" in
     : > "$MOCK_MODEL_DONE"
     exec sleep 10
     ;;
+  tool-active)
+    sleep 4
+    touch "$MOCK_MODEL_DONE"
+    ;;
   done)
     touch "$MOCK_MODEL_DONE"
     ;;
@@ -143,6 +147,7 @@ PR_REPO="example/repo"
 PR_BRANCH_PREFIX="agent/dev-"
 TRIAGE="no"
 CLAIM_UNASSIGNED="yes"
+GRAFT="off"
 RUN_STALL_SECONDS="1"
 RUN_MAX_SECONDS="30"
 FLEET_PROGRESS_SUPERVISOR="off"
@@ -197,6 +202,32 @@ run_liveness_case() {
 run_liveness_case stderr stderr-progress-liveness 'stderr progress keeps a stdout-silent model alive'
 run_liveness_case cpu cpu-time-liveness 'process-group CPU time keeps a silent model alive'
 run_liveness_case worktree worktree-change-liveness 'worktree changes keep a silent model alive'
+
+reset_case
+(
+  activity_dir=""
+  for _ in $(seq 1 100); do
+    activity_dir="$(find "$TMP/state/agent-board-poll/run-output" -maxdepth 1 -type d -name '*.activity.*' -print -quit 2>/dev/null || true)"
+    [ -z "$activity_dir" ] || break
+    sleep 0.05
+  done
+  [ -n "$activity_dir" ] || exit 1
+  for _ in $(seq 1 20); do
+    printf '{"pid":%s}\n' "$$" > "$activity_dir/heartbeat-1.json" 2>/dev/null || break
+    sleep 0.2
+  done
+) &
+heartbeat_writer=$!
+run_tick MOCK_MODEL_MODE=tool-active >"$TMP/tool-active.out" 2>&1
+heartbeat_writer_rc=0
+wait "$heartbeat_writer" || heartbeat_writer_rc=$?
+if [ "$heartbeat_writer_rc" -eq 0 ] && [ -f "$TMP/model-done" ] && [ ! -f "$TMP/model-term" ] \
+   && ! grep -q 'watchdog: no activity' "$TMP/board.log" \
+   && ! find "$TMP/state/agent-board-poll/run-output" -maxdepth 1 -type d -name '*.activity.*' -print -quit | grep -q .; then
+  printf 'PASS %-36s %s\n' tool-heartbeat-liveness 'Hax heartbeats keep an otherwise idle model alive and temporary activity state is removed'
+else
+  echo "FAIL tool-heartbeat-liveness log=$(cat "$TMP/board.log") output=$(cat "$TMP/tool-active.out")"; exit 1
+fi
 
 sed -i 's/RUN_STALL_SECONDS="2"/RUN_STALL_SECONDS="10"/; s/RUN_MAX_SECONDS="30"/RUN_MAX_SECONDS="2"/' "$TMP/config/dev.conf"
 reset_case
