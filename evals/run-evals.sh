@@ -365,6 +365,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/board-state-lifecycle.test.sh" ]; then
   echo "-- board state lifecycle behavioural checks --"
   run_test "$HERE/board-state-lifecycle.test.sh" bash "$HERE/board-state-lifecycle.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/auto-merge-fallback.test.sh" ]; then
+  echo ""
+  echo "-- auto-merge fallback behavioural checks --"
+  run_test "$HERE/auto-merge-fallback.test.sh" bash "$HERE/auto-merge-fallback.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/run-watchdog.test.sh" ]; then
   echo ""
   echo "-- run watchdog and single-claim checks --"

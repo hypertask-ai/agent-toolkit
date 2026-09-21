@@ -344,8 +344,8 @@ fi
 # and enabling auto-merge is best-effort, because GitHub refuses
 # allow_auto_merge on a private repo under a plan that does not carry it
 # (true for the private repos this creates). That refusal must never fail
-# the run: the supervisor's pr-hygiene check merges a green PR by hand when
-# auto-merge could not be turned on.
+# the run: the five-minute reconciler merges a green, mergeable PR that
+# remains open without auto-merge.
 if [ -n "$PR_REPO" ]; then
   step 2b "this agent's own memory repo: $PR_REPO (its output, reports and scripts land here as PRs)"
   if [ "$DRY_RUN" != "yes" ]; then
@@ -401,7 +401,7 @@ PYEOF
     if [ "$(gh api "repos/$PR_REPO" --jq '.allow_auto_merge' 2>/dev/null)" = "true" ]; then
       echo "    auto-merge enabled on $PR_REPO"
     else
-      echo "    auto-merge unavailable on private repo, supervisor merges green PRs"
+      echo "    auto-merge unavailable on $PR_REPO; reconciler merges green, mergeable PRs"
     fi
   else
     echo "    + create $PR_REPO (private, from repo-skeleton/) if it does not already exist"

@@ -1,0 +1,1 @@
+- AGTE-139 lets the reconciler squash merge green, mergeable pull requests left open for 30 minutes when GitHub auto-merge is unavailable.

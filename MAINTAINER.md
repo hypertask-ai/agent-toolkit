@@ -418,9 +418,10 @@ template. `agent-board-poll` still rejects legacy configurations without
 
 Auto-merge does not turn on for these repos: GitHub refuses
 `allow_auto_merge` on a private repo whose plan does not carry it. Expected,
-not broken. `create-agent.sh` logs it and moves on; a run leaves its PR open
-and moves the ticket to the review lane anyway, and the supervisor's
-pr-hygiene check merges a green PR that could not get auto-merge.
+not broken. `create-agent.sh` reads the setting back and logs the refusal. A
+run leaves its pull request open after requesting auto-merge. The five-minute
+reconciler squash merges it only after it has remained green, mergeable, and
+without auto-merge for 30 minutes.
 
 ## One ticket until live
 
