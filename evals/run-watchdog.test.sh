@@ -39,7 +39,11 @@ esac
 EOF
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-printf '[]\n'
+if [ "${1:-} ${2:-}" = "pr create" ]; then
+  printf 'https://github.com/example/repo/pull/728\n'
+else
+  printf '[]\n'
+fi
 EOF
 cat > "$TMP/bin/model" <<'EOF'
 #!/usr/bin/env bash
@@ -61,6 +65,9 @@ case "${MOCK_MODEL_MODE:-stall}" in
     ;;
   max)
     trap 'touch "$MOCK_MODEL_TERM"; exit 143' TERM
+    command -v gh > "$MOCK_GH_RESOLVED"
+    gh pr create --repo example/repo --title 'TEST-1 capped run' --body test
+    cat "$AGENT_OPENED_PRS" > "$MOCK_PR_LEDGER_AFTER_CREATE"
     while :; do printf 'working\n'; sleep 0.2; done
     ;;
   stderr)
@@ -156,18 +163,20 @@ EOF
 reset_case() {
   rm -rf "$TMP/state" "$TMP/repo"; mkdir -p "$TMP/state" "$TMP/repo"
   : > "$TMP/board.log"
-  rm -f "$TMP/model-term" "$TMP/model-done"
+  rm -f "$TMP/model-term" "$TMP/model-done" "$TMP/gh-resolved" "$TMP/opened-after-create"
   cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"Backlog","title":"Change it","description":"Open a PR","assignees":[],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
 EOF
 }
 RUNNER="$ROOT/scripts/agent-board-poll"
 run_tick() {
-  env HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+  env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
+    HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_TASKS="$TMP/tasks.json" \
     ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_TERM="$TMP/model-term" \
     MOCK_MODEL_DONE="$TMP/model-done" MOCK_WORKTREE_FILE="$TMP/repo/progress" \
+    MOCK_GH_RESOLVED="$TMP/gh-resolved" MOCK_PR_LEDGER_AFTER_CREATE="$TMP/opened-after-create" \
     "$@" "$RUNNER" --once --explain dev
 }
 
@@ -229,18 +238,20 @@ else
   echo "FAIL tool-heartbeat-liveness log=$(cat "$TMP/board.log") output=$(cat "$TMP/tool-active.out")"; exit 1
 fi
 
-sed -i 's/RUN_STALL_SECONDS="2"/RUN_STALL_SECONDS="10"/; s/RUN_MAX_SECONDS="30"/RUN_MAX_SECONDS="2"/' "$TMP/config/dev.conf"
+sed -i 's/RUN_STALL_SECONDS="2"/RUN_STALL_SECONDS="10"/; s/RUN_MAX_SECONDS="30"/RUN_MAX_SECONDS="5"/' "$TMP/config/dev.conf"
 reset_case
 run_tick MOCK_MODEL_MODE=max >"$TMP/max.out" 2>&1
 record="$TMP/state/agent-board-poll/run-records/dev-TEST-1.json"
 if [ -f "$TMP/model-term" ] \
    && [ "$(grep -c '^comment .*watchdog: over max run time' "$TMP/board.log")" -eq 1 ] \
+   && grep -qxF $'example/repo\t728\tTEST-1' "$TMP/opened-after-create" \
+   && grep -qxF $'example/repo\t728\tTEST-1' "$TMP/state/agent-board-poll/dev.opened-prs" \
    && RECORD="$record" python3 -c 'import json,os,sys; r=json.load(open(os.environ["RECORD"])); sys.exit(0 if r["status"]=="FAILED" and r["reason"]=="watchdog: over max run time" else 1)'; then
-  printf 'PASS %-36s %s\n' maximum-run-watchdog 'output-producing model is terminated at the absolute run limit'
+  printf 'PASS %-36s %s\n' maximum-run-watchdog 'capped run is terminated after recording its pull request ownership'
 else
-  echo "FAIL maximum-run-watchdog log=$(cat "$TMP/board.log") record=$(cat "$record" 2>/dev/null) output=$(cat "$TMP/max.out")"; exit 1
+  echo "FAIL maximum-run-watchdog gh=$(cat "$TMP/gh-resolved" 2>/dev/null) immediate=$(cat "$TMP/opened-after-create" 2>/dev/null) log=$(cat "$TMP/board.log") opened=$(cat "$TMP/state/agent-board-poll/dev.opened-prs" 2>/dev/null) record=$(cat "$record" 2>/dev/null) output=$(cat "$TMP/max.out")"; exit 1
 fi
-sed -i 's/RUN_STALL_SECONDS="10"/RUN_STALL_SECONDS="2"/; s/RUN_MAX_SECONDS="2"/RUN_MAX_SECONDS="30"/' "$TMP/config/dev.conf"
+sed -i 's/RUN_STALL_SECONDS="10"/RUN_STALL_SECONDS="2"/; s/RUN_MAX_SECONDS="5"/RUN_MAX_SECONDS="30"/' "$TMP/config/dev.conf"
 
 reset_case
 mkdir -p "$TMP/state/agent-board-poll"

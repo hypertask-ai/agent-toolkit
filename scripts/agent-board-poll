@@ -4701,6 +4701,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         export AGENT_QA_MOVE="$([ "$AGENT_KIND" = "qa" ] && printf yes || printf no)"
         export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
         export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
+        export AGENT_OPENED_PRS="$OPENED_PRS"
         export AGENT_HELD_COMMENT_FILE="$MODEL_ACTIVITY_DIR/held-comment.html"
         export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
         export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
@@ -4856,11 +4857,10 @@ if rows:
     while IFS= read -r opened_number; do
       [ -n "$opened_number" ] || continue
       if printf '%s\n' "$OPEN_PRS_BEFORE" | grep -qxF "$opened_number"; then continue; fi
-      if awk -F '\t' -v repo="$PR_REPO" -v number="$opened_number" \
+      if ! awk -F '\t' -v repo="$PR_REPO" -v number="$opened_number" \
           '$1 == repo && $2 == number { found=1 } END { exit !found }' "$OPENED_PRS"; then
-        continue
+        printf '%s\t%s\t%s\n' "$PR_REPO" "$opened_number" "$ref" >> "$OPENED_PRS"
       fi
-      printf '%s\t%s\t%s\n' "$PR_REPO" "$opened_number" "$ref" >> "$OPENED_PRS"
       opened_this_run="yes"
       opened_url="https://github.com/$PR_REPO/pull/$opened_number"
       progress_event --event pr-opened --pr "$opened_number" --pr-url "$opened_url" \

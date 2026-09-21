@@ -2252,14 +2252,17 @@ adapter_agent_has_open_pr() {
   _ht_github_paused "$repo" && return 75
   ROWS="$rows" REF="$ref" SLUG="${AGENT_SLUG:-}" LOGIN="$login" \
     KIND="${AGENT_KIND:-${AGENT_ROLE:-${ROLE:-}}}" REPO="$repo" OPENED="$opened_prs" python3 -c '
-import json, os, sys
+import json, os, re, sys
 ref = os.environ["REF"].casefold()
 slug = os.environ["SLUG"].casefold()
 login = os.environ["LOGIN"].casefold()
 qa = os.environ["KIND"].casefold() == "qa"
-prefixes = [slug + "/"] if slug else []
-if slug == "dev-2":
-    prefixes.extend(("dev-cursor-2/", "cursor-dev-2/"))
+def agent_named_branch(branch, agent_slug):
+    names = [agent_slug] if agent_slug else []
+    if agent_slug == "dev-2":
+        names.extend(("dev-cursor-2", "cursor-dev-2"))
+    return any(re.match(r"^(?:agent/)?" + re.escape(name) + r"(?=$|[/_-])", branch)
+               for name in names)
 owned = set()
 try:
     with open(os.environ["OPENED"], encoding="utf-8") as handle:
@@ -2283,7 +2286,7 @@ for pr in json.loads(os.environ["ROWS"] or "[]"):
     branch = str(pr.get("headRefName") or "").casefold()
     author = pr.get("author") or {}
     author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
-    if any(branch.startswith(prefix) for prefix in prefixes) or (login and author_login == login):
+    if agent_named_branch(branch, slug) or (login and author_login == login):
         raise SystemExit(0)
 raise SystemExit(1)
 '
@@ -2352,10 +2355,10 @@ print(",".join(ids))')" || {
 # ---------- one ticket until live ----------
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
 # Prints one JSON object per open pull request still owned by this agent.
-# Ownership comes only from the <slug>/ branch prefix (plus dev-2's two
-# historical aliases), the opened-PR ledger, or an explicitly configured
-# GH_LOGIN that differs from the host gh identity. Merged and closed pull
-# requests never become binding candidates.
+# Ownership comes only from an agent slug at the branch start or after agent/
+# (plus dev-2's two historical aliases), the opened-PR ledger, or an explicitly
+# configured GH_LOGIN that differs from the host gh identity. Merged and closed
+# pull requests never become binding candidates.
 #
 # An open PR with no owner among the living conf files is ignored and logged
 # once per UTC day through stderr, which core appends to the tick log.
@@ -2501,11 +2504,12 @@ def display_ticket(pr):
         return ref
     match = ticket_pattern.search(str(pr.get("headRefName") or ""))
     return match.group(1).upper() if match else "PR-%s" % pr["number"]
-def owned_prefixes(owner_slug):
-    values = [owner_slug + "/"] if owner_slug else []
+def agent_named_branch(branch, owner_slug):
+    names = [owner_slug] if owner_slug else []
     if owner_slug == "dev-2":
-        values.extend(("dev-cursor-2/", "cursor-dev-2/"))
-    return tuple(values)
+        names.extend(("dev-cursor-2", "cursor-dev-2"))
+    return any(re.match(r"^(?:agent/)?" + re.escape(name) + r"(?=$|[/_-])", branch)
+               for name in names)
 with open(prs_path, encoding="utf-8") as handle:
     prs = json.load(handle)
 current = next((owner for owner in owners if owner[0] == slug and owner[4]),
@@ -2522,7 +2526,7 @@ for pr in sorted(prs, key=lambda row: row.get("createdAt") or ""):
     author = pr.get("author") or {}
     author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
     by_state = number in opened
-    by_prefix = current[4] != "qa" and any(branch.startswith(value) for value in owned_prefixes(current[0]))
+    by_prefix = current[4] != "qa" and agent_named_branch(branch, current[0])
     by_author = current[4] != "qa" and bool(current[3] and author_login == current[3])
     if not (by_state or by_prefix or by_author):
         continue
@@ -2545,7 +2549,7 @@ PYEOF
   # opened-PR state are checked across all active confs before a warning.
   today="$(date -u +%F)"
   REPO="$repo" python3 - "$tmp/open.json" "$tmp/owners.tsv" <<'PYEOF' > "$tmp/orphans.tsv"
-import json, os, sys
+import json, os, re, sys
 open_path, owners_path = sys.argv[1:]
 repo = os.environ["REPO"]
 owners = []
@@ -2565,18 +2569,19 @@ for _, path, _, _ in owners:
                     opened.add(fields[1])
     except OSError:
         pass
-def prefixes(slug):
-    values = [slug + "/"] if slug else []
+def agent_named_branch(branch, slug):
+    names = [slug] if slug else []
     if slug == "dev-2":
-        values.extend(("dev-cursor-2/", "cursor-dev-2/"))
-    return tuple(values)
+        names.extend(("dev-cursor-2", "cursor-dev-2"))
+    return any(re.match(r"^(?:agent/)?" + re.escape(name) + r"(?=$|[/_-])", branch)
+               for name in names)
 for pr in json.load(open(open_path)):
     branch = str(pr.get("headRefName") or "")
     folded = branch.casefold()
     number = str(pr.get("number"))
     author = pr.get("author") or {}
     author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
-    prefix_owner = any(role != "qa" and any(folded.startswith(value) for value in prefixes(slug))
+    prefix_owner = any(role != "qa" and agent_named_branch(folded, slug)
                        for slug, _, _, role in owners)
     author_owner = any(role != "qa" and login and author_login == login
                        for _, _, login, role in owners)

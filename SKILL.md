@@ -382,12 +382,15 @@ our own message rather than "command not found" three layers down.
 
 ## One ticket until live
 
-A PR is owned only when its branch starts with `<slug>/` (case-insensitive),
-when `<slug>.opened-prs` records that the runner saw it open during that agent's
-run, or when an explicit `GH_LOGIN` differs from the host `gh` login and matches
-the author. `dev-2` also recognizes `dev-cursor-2/` and `cursor-dev-2/`. QA
-agents recognize only PRs in their own opened-PR ledger. Board assignment and
-shared GitHub authorship do not transfer ownership. PR discovery uses one locked,
+A PR is owned only when its branch starts with the agent slug, directly or after
+`agent/` (case-insensitive), when `<slug>.opened-prs` records that the runner
+created it, or when an explicit `GH_LOGIN` differs from the host `gh` login and
+matches the author. Slash, hyphen, and underscore separators all count, but
+partial slug matches do not. `dev-2` also recognizes `dev-cursor-2` and
+`cursor-dev-2`. The runner writes a created PR to the ledger before `gh pr create`
+returns, including when the run later reaches its watchdog cap. QA agents
+recognize only PRs in their own opened-PR ledger. Board assignment and shared
+GitHub authorship do not transfer ownership. PR discovery uses one locked,
 host-wide REST cache per repository. It refreshes no more than once a minute and
 stores every open PR plus merges from the last 48 hours without PR bodies. The
 binding gate filters this cache to open PRs before ownership or labels can bind
@@ -625,7 +628,7 @@ See `CONF.md` for the complete schema.
 | `RETRY_WINDOW_SECONDS` | length of that pre-PR window, default 21600 (six hours); never used for an owed PR |
 | `PROMPT_FILE` | a prompt of this agent's own, with `{{REF}}`, `{{URL}}`, `{{TITLE}}`, `{{DESCRIPTION}}`, `{{COMMENT}}`, `{{AGENT_NAME}}`, `{{BOARD_CLI}}`, `{{SKILLS_INDEX}}`, `{{BOARD}}` |
 | `PR_REPO` | **required.** the repository whose pull requests say whether a ticket is finished; `agent-board-poll` refuses to tick without it. Set it with `create-agent.sh --resume --pr-repo <org/name>` |
-| `PR_BRANCH_PREFIX` | deprecated compatibility setting; ownership uses `<slug>/` and the opened-PR ledger |
+| `PR_BRANCH_PREFIX` | deprecated compatibility setting; ownership uses a delimiter-bounded agent slug at the branch start or after `agent/`, plus the opened-PR ledger |
 | `GH_LOGIN` | optional agent-specific PR author login, used only when it differs from the host `gh` login |
 | `TRIAGE` | `yes` to score a ticket before pickup; defaults to `yes` for `AGENT_KIND=dev` and `no` for everything else |
 | `TRIAGE_MODEL_CLI` | optional command that breaks a tie the rules could not; default `MODEL_CLI` |

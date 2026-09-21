@@ -154,7 +154,7 @@ JSON
 JSON
   elif [ "$scenario" = "slug-prefix" ]; then
     cat <<JSON
-[{"number":12,"state":"OPEN","url":"https://github.test/pull/12","title":"HTPR-12 fix","body":"","headRefName":"dev-1/htpr-12-fix","author":{"login":"shared-bot"},"createdAt":"2026-01-01T00:00:00Z"}]
+[{"number":12,"state":"OPEN","url":"https://github.test/pull/12","title":"HTPR-12 fix","body":"","headRefName":"dev-1/htpr-12-fix","author":{"login":"shared-bot"},"createdAt":"2026-01-01T00:00:00Z"},{"number":15,"state":"OPEN","url":"https://github.test/pull/15","title":"HTPR-15 fix","body":"","headRefName":"agent/dev-1-htpr-15-fix","author":{"login":"shared-bot"},"createdAt":"2026-01-01T00:00:00Z"},{"number":16,"state":"OPEN","url":"https://github.test/pull/16","title":"HTPR-16 fix","body":"","headRefName":"dev-1_htpr-16-fix","author":{"login":"shared-bot"},"createdAt":"2026-01-01T00:00:00Z"},{"number":17,"state":"OPEN","url":"https://github.test/pull/17","title":"HTPR-17 fix","body":"","headRefName":"agent/dev-10-htpr-17-fix","author":{"login":"shared-bot"},"createdAt":"2026-01-01T00:00:00Z"}]
 JSON
   elif [ "$scenario" = "record-open" ]; then
     printf '[]\n'
@@ -207,7 +207,7 @@ if [ "$1 $2" = "pr view" ]; then
   if [ "$scenario" = "green" ] || [ "$scenario" = "two-green" ] \
      || { [ "$scenario" = "stale-red-green" ] && [ "$number" = "10" ]; }; then
     checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.test/actions/runs/77/job/1"}]'
-  elif [ "$scenario" = "red" ] || [ "$scenario" = "stale-red" ] || [ "$scenario" = "stale-red-green" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "qa-claim" ] || [ "$scenario" = "orphan" ] || [ "$scenario" = "author-owned" ] || [ "$scenario" = "custom-prefix" ] || [ "$scenario" = "slug-prefix" ] || [ "$scenario" = "prep-fail" ]; then
+  elif [ "$scenario" = "red" ] || [ "$scenario" = "stale-red" ] || [ "$scenario" = "stale-red-green" ] || [ "$scenario" = "oldest" ] || [ "$scenario" = "qa-claim" ] || [ "$scenario" = "orphan" ] || [ "$scenario" = "author-owned" ] || [ "$scenario" = "custom-prefix" ] || [ "$scenario" = "state-owned" ] || [ "$scenario" = "slug-prefix" ] || [ "$scenario" = "prep-fail" ]; then
     checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/1"},{"name":"revert-guard","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/2"},{"name":"pr-title","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/3"}]'
     comments='[{"author":{"login":"claude-review"},"body":"CONCERNS: preserve the existing authorization check."}]'
   elif [ "$scenario" = "revert-only" ]; then
@@ -275,7 +275,10 @@ elif scenario not in merged_scenarios | {"merged-protected"}:
     elif scenario == "foreign-prefix":
         rows = [row(13, 13, "dev-2/htpr-13", updated="2026-01-01T00:00:00Z")]
     elif scenario == "slug-prefix":
-        rows = [row(12, 12, "DeV-1/htpr-12-fix", updated="2026-09-18T21:00:00Z")]
+        rows = [row(12, 12, "DeV-1/htpr-12-fix", updated="2026-09-18T21:00:00Z"),
+                row(15, 15, "agent/dev-1-htpr-15-fix", updated="2026-09-18T21:00:00Z"),
+                row(16, 16, "dev-1_htpr-16-fix", updated="2026-09-18T21:00:00Z"),
+                row(17, 17, "agent/dev-10-htpr-17-fix", updated="2026-09-18T21:00:00Z")]
     elif scenario == "valentin-review":
         rows = [row(14, 14, "dev-1/htpr-14-fix", updated="2026-01-01T00:00:00Z",
                     labels=["valentin-review"])]
@@ -557,8 +560,8 @@ echo 'PASS dev-2 historical branch aliases attribute only to dev-2'
 
 printf 'example/repo\t7\tHTPR-7\n' > "$TMP/home/.local/state/agent-board-poll/dev-1.opened-prs"
 state_owned="$(run_gate state-owned)"
-[[ "$state_owned" == *'"number": 7'* ]]
-echo 'PASS runner state attributes a legacy branch PR'
+[[ "$state_owned" == *'"number": 7'* && "$state_owned" == *'"action": "fix"'* ]]
+echo 'PASS runner state attributes a red legacy-branch PR to its fix path'
 
 shared_author="$(run_gate shared-author 2>/dev/null)"
 [[ -z "$shared_author" ]]
@@ -570,8 +573,11 @@ echo 'PASS shared-login PR with a foreign branch prefix does not bind'
 
 slug_prefix="$(run_gate slug-prefix)"
 [[ "$slug_prefix" == *'"number": 12'* ]]
+[[ "$slug_prefix" == *'"number": 15'* ]]
+[[ "$slug_prefix" == *'"number": 16'* ]]
+[[ "$slug_prefix" != *'"number": 17'* ]]
 [[ -z "$(run_gate slug-prefix dev-2 'Dev Two' 'cursor-dev-2/' 2>/dev/null)" ]]
-echo 'PASS slug branch prefix is case-insensitive and attributes only its matching agent'
+echo 'PASS agent-named branches are owned across prefix styles without partial slug matches'
 
 pr_cache_dir="$TMP/shared-pr-cache"
 pr_cache="$pr_cache_dir/example__repo.json"
