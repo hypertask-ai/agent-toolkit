@@ -20,9 +20,13 @@ EOF
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 if [ "${1:-} ${2:-}" = "pr view" ]; then
+  case "$3" in
+    https://*) url="$3" ;;
+    *) url="https://github.com/example/repo/pull/$3" ;;
+  esac
   state="${MOCK_PR_STATE:-OPEN}"
   [ ! -s "$MOCK_PR_MERGED" ] || state=MERGED
-  printf '{"state":"%s","url":"https://github.com/example/repo/pull/%s"}\n' "$state" "$3"
+  printf '{"state":"%s","url":"%s"}\n' "$state" "$url"
   exit 0
 fi
 if [ "${1:-}" = api ] && [[ "${2:-}" == repos/example/repo/pulls\?state=* ]]; then
@@ -301,6 +305,19 @@ if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]
   echo 'PASS merged-pr-reconciled               one pass moves a Review ticket with a linked merged PR to Done'
 else
   echo "FAIL merged-pr-reconciled               tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
+fi
+
+reset_case
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-158","ticketNumber":"AGTE-158","projectId":15,"section":"Review","title":"Bug: PR #713 stayed red for two hours","description":"<p><a href=\"https://github.com/example/repo/pull/713\">PR 713</a> has stayed red.</p>","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[{"name":"bug"}],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+env "${run_env[@]}" MOCK_PR_STATE=MERGED "$ROOT/scripts/agent-board-reconcile"
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+   && grep -qxF 'unassign AGTE-158 agent-dev' "$TMP/board.log" \
+   && grep -qxF 'comment AGTE-158 Shipped by merged pull request https://github.com/example/repo/pull/713, moved to Done.' "$TMP/board.log"; then
+  echo 'PASS merged-pr-report-reconciled        a stayed-red report closes when its described pull request merges'
+else
+  echo "FAIL merged-pr-report-reconciled        tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
 fi
 
 reset_case

@@ -140,6 +140,7 @@ create = next(row for row in board if row[:2] == ["task", "create"])
 assert create[create.index("--project") + 1] == "5500"
 assert create[create.index("--section") + 1] == "Review"
 assert create[create.index("--priority") + 1] == "high"
+assert create[create.index("--labels") + 1] == "manager-only"
 assert "PR #633" in create[create.index("--title") + 1]
 assert len([row for row in board if row[:2] == ["comment", "add"]]) == 4
 chat = [json.loads(line) for line in open(os.environ["CHAT_CURL_LOG"])]
@@ -252,6 +253,7 @@ import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
 create = next(row for row in rows if row[:2] == ["task", "create"])
 assert create[create.index("--title") + 1] == "Bug: PR #86 stayed red for two hours"
+assert create[create.index("--labels") + 1] == "manager-only"
 assert "Failing checks: ci-tests." in create[create.index("--description") + 1]
 PYEOF
 then
