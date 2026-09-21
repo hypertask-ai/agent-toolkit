@@ -673,10 +673,17 @@ anonymous Docker volumes and dangling images when Docker is available. The tick
 writes one `cleanup: freed N MB, kept K worktrees` line to the runner log.
 
 The same cleanup function runs after success, failure, an explicit early exit,
-an error trap, a signal, and a watchdog termination. A worktree with uncommitted
-or unpushed work remains in place and logs `kept worktree <path>: unpushed
-commits`; everything else is removed with `git worktree remove --force`.
-Per-run temporary files and temporary directories are removed at the same time.
+an error trap, a signal, and a watchdog termination. Before cleanup, a
+watchdog-capped development run commits dirty files as work in progress on the
+ticket branch and pushes it. The next run checks out that branch instead of
+starting again from the base branch. After two capped runs, the independent
+reviewer gets the preserved commits and diff, and the runner does not start a
+third development run.
+
+For other exits, a worktree with uncommitted or unpushed work remains in place
+and logs `kept worktree <path>: unpushed commits`; everything else is removed
+with `git worktree remove --force`. Per-run temporary files and temporary
+directories are removed at the same time.
 
 Disk use is checked after cleanup. Above 85 percent, the runner creates one
 high-priority toolkit alarm through the same Review, agent-room, Telegram, and

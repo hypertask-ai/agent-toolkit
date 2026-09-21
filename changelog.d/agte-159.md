@@ -1,0 +1,1 @@
+AGTE-159 preserves dirty watchdog-capped work in a pushed work-in-progress commit, resumes the ticket branch on the next run, and requests an independent second opinion instead of starting a third capped attempt.
