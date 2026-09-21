@@ -1,0 +1,1 @@
+- AGTE-166 applies each repository's configured pull request labels through GitHub's REST endpoint before PR creation returns, and configures app pull requests with `full-ci`.

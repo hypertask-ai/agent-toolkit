@@ -367,6 +367,8 @@ if [ "$GRAFT" = "on" ]; then
 fi
 export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
 if [ "$BOARD_ADAPTER" = "hypertask" ]; then
+  AGENT_REPOS_ALLOW="$(dirname "$CONF")/repos.allow"
+  export AGENT_REPOS_ALLOW
   core_enable_agent_identity "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" \
     2> >(tee -a "$LOG" >&2) || exit 1
 fi

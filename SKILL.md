@@ -690,11 +690,14 @@ agent-template update --keep-timers
 agent-template instruct <slug> <text|-> [--ticket <url>]
 ```
 
-`repos.allow` beside the conf supplies `key,path,github slug,base branch,memory
-cap` CSV rows, with the memory cap optional. Its default is 12 GB on hosts with
-more than 32 GB of RAM and half of RAM otherwise. A first install discovers the
-slug and default branch from each checkout's `origin`; a build outside the
-file or whose checkout origin differs is refused. An accepted build writes the
+`repos.allow` beside the conf supplies CSV rows starting with `key,path,github
+slug,base branch,memory cap`. The memory cap is optional, and any remaining
+fields are pull request labels. Its default is 12 GB on hosts with more than 32
+GB of RAM and half of RAM otherwise. A first install discovers the slug and
+default branch from each checkout's `origin`; an update adds shipped label
+defaults only to rows without labels. The runner applies configured labels
+through GitHub's REST labels endpoint before pull request creation returns. A
+build outside the file or whose checkout origin differs is refused. An accepted build writes the
 standard worktree, pull request, auto-merge, deployment, cleanup, and reporting
 guardrails into a prompt, starts the capped systemd user job, and
 records its paths and status in `<slug>-builds.json`. Status prints the exit

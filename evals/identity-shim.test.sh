@@ -46,6 +46,11 @@ cat > "$TMP/bin/gh" <<'EOF'
 printf '%s\n' "$*" >> "$GH_CAPTURE"
 if [ "${1:-} ${2:-}" = "pr view" ] && [[ " $* " = *' --json labels '* ]]; then
   [ -z "${GH_PR_LABEL:-}" ] || printf '%s\n' "$GH_PR_LABEL"
+elif [ "${1:-} ${2:-}" = "pr create" ]; then
+  printf 'https://github.com/example/repo/pull/7\n'
+elif [ "${1:-}" = "api" ] && [ "${4:-}" = "repos/example/repo/issues/7/labels" ]; then
+  cat > "$GH_LABEL_BODY"
+  printf '{}\n'
 else
   printf '[]\n'
 fi
@@ -57,6 +62,8 @@ command -v ht >> "$RESOLVED_CAPTURE"
 command -v htbot >> "$RESOLVED_CAPTURE"
 command -v gh >> "$RESOLVED_CAPTURE"
 hypertask --json status > "$TOKEN_CAPTURE"
+gh pr create --repo example/repo --title test --body test > "$PR_CREATE_OUTPUT"
+printf 'after-pr-create\n' >> "$GH_CAPTURE"
 if gh pr merge 7 > /dev/null 2> "$MANUAL_MERGE_ERROR"; then
   printf '0\n' > "$MANUAL_MERGE_RC"
 else
@@ -98,6 +105,8 @@ adapter_install_board_cli test "$TMP/token" "$TMP/board" "Test Agent"
 cat > "$TMP/board.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","section":"Bugs","title":"Identity test","description":"Verify the provider identity boundary","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
 EOF
+printf 'test,%s,example/repo,main,,full-ci,needs-checks\n' "$TMP/repo" \
+  > "$TMP/home/.config/agents/repos.allow"
 cat > "$TMP/home/.config/agents/test.conf" <<EOF
 AGENT_ID="agent-1"
 AGENT_NAME="Test Agent"
@@ -121,7 +130,8 @@ run_poll() {
     XDG_RUNTIME_DIR= XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
     BOARD_JSON="$TMP/board.json" BOARD_POSTED="$TMP/posted" \
     RESOLVED_CAPTURE="$TMP/resolved" TOKEN_CAPTURE="$TMP/received-token" \
-    GH_CAPTURE="$TMP/gh-calls" MANUAL_MERGE_RC="$TMP/manual-merge.rc" \
+    GH_CAPTURE="$TMP/gh-calls" GH_LABEL_BODY="$TMP/gh-label-body" \
+    PR_CREATE_OUTPUT="$TMP/pr-create-output" MANUAL_MERGE_RC="$TMP/manual-merge.rc" \
     MANUAL_MERGE_ERROR="$TMP/manual-merge.error" API_MERGE_RC="$TMP/api-merge.rc" \
     API_MERGE_ERROR="$TMP/api-merge.error" GRAPHQL_MERGE_RC="$TMP/graphql-merge.rc" \
     GRAPHQL_MERGE_ERROR="$TMP/graphql-merge.error" PROTECTED_PR_RC="$TMP/protected-pr.rc" \
@@ -138,6 +148,22 @@ if run_poll > "$TMP/run.out" 2> "$TMP/run.err" \
   ok identity-shim-first-on-path "board and GitHub commands resolve inside the agent shim"
 else
   bad identity-shim-first-on-path "resolved paths: $(paste -sd, "$TMP/resolved" 2>/dev/null || true)"
+fi
+
+if GH_CALLS="$TMP/gh-calls" python3 -c '
+import os
+from pathlib import Path
+lines = Path(os.environ["GH_CALLS"]).read_text().splitlines()
+create = lines.index("pr create --repo example/repo --title test --body test")
+labels = lines.index("api --method POST repos/example/repo/issues/7/labels --input -")
+returned = lines.index("after-pr-create")
+assert create < labels < returned
+' \
+   && [ "$(cat "$TMP/gh-label-body")" = '{"labels":["full-ci","needs-checks"]}' ] \
+   && [ "$(cat "$TMP/pr-create-output")" = 'https://github.com/example/repo/pull/7' ]; then
+  ok identity-shim-pr-labels 'configured labels use the REST endpoint before pull request creation returns'
+else
+  bad identity-shim-pr-labels "calls=$(cat "$TMP/gh-calls") body=$(cat "$TMP/gh-label-body" 2>/dev/null || true)"
 fi
 
 if [ "$(cat "$TMP/manual-merge.rc")" -ne 0 ] \

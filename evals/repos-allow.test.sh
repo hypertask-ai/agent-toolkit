@@ -21,7 +21,7 @@ mkdir -p "$CHECKOUT"
   git symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/production
   git switch -qc work
 )
-printf '# key,path (origin and branch are discovered)\napp,%s\n' "$CHECKOUT" > "$TEMPLATE/repos.allow"
+printf '# key,path,github slug,base branch,memory cap,pull request labels...\napp,%s,,,,full-ci\n' "$CHECKOUT" > "$TEMPLATE/repos.allow"
 
 HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF_DIR" \
   SKIP_TEMPLATE_EVALS=yes SKIP_COMPANY_SKILLS=yes \
@@ -29,7 +29,7 @@ HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF_DIR" \
   bash "$TEMPLATE/install.sh" --dest "$TMP/installed" --bin "$TMP/bin" --no-host-notes \
   > "$TMP/install.out" 2> "$TMP/install.err"
 
-expected="app,$CHECKOUT,example/generated-app,production"
+expected="app,$CHECKOUT,example/generated-app,production,,full-ci"
 if [ "$(sed -n '2p' "$CONF_DIR/repos.allow")" = "$expected" ] \
    && [ "$(sed -n '2p' "$TMP/installed/repos.allow")" = "$expected" ] \
    && ! grep -q 'example/generated-app\|production' "$TEMPLATE/repos.allow"; then
@@ -38,5 +38,23 @@ if [ "$(sed -n '2p' "$CONF_DIR/repos.allow")" = "$expected" ] \
 else
   printf 'FAIL %-36s expected=%s actual=%s stderr=%s\n' install-generates-repo-identity \
     "$expected" "$(cat "$CONF_DIR/repos.allow" 2>/dev/null || true)" "$(cat "$TMP/install.err")"
+  exit 1
+fi
+
+printf '# existing host policy\napp,%s,example/generated-app,production,3G\n' "$CHECKOUT" > "$CONF_DIR/repos.allow"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" AGENT_CONFIG_DIR="$CONF_DIR" \
+  SKIP_TEMPLATE_EVALS=yes SKIP_COMPANY_SKILLS=yes \
+  AGENT_TEMPLATE_INSTALL_STATE="$TMP/state/install-state" \
+  bash "$TEMPLATE/install.sh" --dest "$TMP/installed" --bin "$TMP/bin" --no-host-notes \
+  > "$TMP/update.out" 2> "$TMP/update.err"
+
+expected="app,$CHECKOUT,example/generated-app,production,3G,full-ci"
+if [ "$(sed -n '2p' "$CONF_DIR/repos.allow")" = "$expected" ] \
+   && [ "$(sed -n '2p' "$TMP/installed/repos.allow")" = "$expected" ]; then
+  printf 'PASS %-36s %s\n' install-adds-repo-label-defaults \
+    'an update adds configured labels without replacing host repository policy'
+else
+  printf 'FAIL %-36s expected=%s actual=%s stderr=%s\n' install-adds-repo-label-defaults \
+    "$expected" "$(cat "$CONF_DIR/repos.allow" 2>/dev/null || true)" "$(cat "$TMP/update.err")"
   exit 1
 fi

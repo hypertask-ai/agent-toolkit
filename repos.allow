@@ -1,7 +1,7 @@
-# key,path (install.sh discovers each checkout's origin and default branch)
+# key,path,github slug,base branch,memory cap,pull request labels... (install.sh discovers columns 3-4)
 agent-toolkit,/home/valentin/projects/agent-toolkit
 company-skills,/home/valentin/projects/company-skills
 analytics,/home/valentin/projects/hypertask-analytics
-hypertask,/home/valentin/projects/hypertasks
+hypertask,/home/valentin/projects/hypertasks,,,,full-ci
 hypertask-mcp,/home/valentin/projects/hypertask-mcp
 ht-slack,/home/valentin/projects/ht-slack
