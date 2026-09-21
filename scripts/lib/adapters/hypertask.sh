@@ -87,3 +87,64 @@ print(prefix.upper())
   _hypertask_cache_project_prefix "$cache" "$base" "$project_id" "$prefix"
   printf '%s-%s' "$prefix" "$number"
 }
+
+# Print the live owner-review destination for one board. An unreadable section
+# list keeps the configured value so a temporary board outage does not stop all work.
+adapter_resolve_release_section() {
+  local board_cli="$1" board="$2" configured="$3" raw resolved rc
+  if ! raw="$("$board_cli" --json section list --project "$board" 2>/dev/null)"; then
+    printf 'PR release destination validation unavailable for board %s; using configured destination "%s"\n' \
+      "$board" "$configured" >&2
+    printf '%s' "$configured"
+    return 0
+  fi
+  if resolved="$(RAW="$raw" WANTED="$configured" python3 -c '
+import json, os
+raw = os.environ["RAW"]
+try:
+    doc = json.loads(raw)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if isinstance(doc, list):
+    sections = doc
+elif isinstance(doc, dict):
+    container = doc.get("project") if isinstance(doc.get("project"), dict) else doc
+    if "sections" not in container:
+        raise SystemExit(2)
+    sections = container.get("sections") or []
+else:
+    raise SystemExit(2)
+names = []
+for item in sections:
+    if isinstance(item, dict):
+        name = item.get("name") or item.get("title") or item.get("section_title")
+    else:
+        name = item
+    if name:
+        names.append(str(name))
+wanted = os.environ["WANTED"]
+match = next((name for name in names if name.casefold() == wanted.casefold()), None)
+if match:
+    print(match)
+    raise SystemExit
+if wanted.casefold() == "review":
+    manager = next((name for name in names if name.casefold() == "ht manager review"), None)
+    if manager:
+        print(manager)
+        raise SystemExit
+raise SystemExit(1)
+' 2>/dev/null)"; then
+    printf '%s' "$resolved"
+    return 0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    2)
+      printf 'PR release destination validation unavailable for board %s; using configured destination "%s"\n' \
+        "$board" "$configured" >&2
+      printf '%s' "$configured"
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
