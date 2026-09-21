@@ -772,9 +772,13 @@ exists; with neither column configured it stays in QA.
 
 The runner enforces this contract after the model exits. It parses `Done:`,
 `Handoff:`, or `Question:` from the verdict comment and supplies a missing move.
-On every tick it also backfills QA tickets whose newest comment is that agent's
-verdict and is at least ten minutes old. A ticket labelled `valentin` or
-directly assigned to the board owner is skipped and never moved.
+The marker is mandatory. An unmarked QA response is sent back to the same model
+route once for a corrected verdict. If that retry is still unmarked, the run
+fails with exit 65 and the ticket returns to its original QA lane instead of a
+manager-review lane. On every tick the runner also backfills QA tickets whose
+newest comment is that agent's verdict and is at least ten minutes old. A ticket
+labelled `valentin` or directly assigned to the board owner is skipped and never
+moved.
 
 When `RESEARCH_CLI` exists, an agent stuck mid-run can use `agent-advisor
 "<one precise question>"`. It receives the ticket, last ten comments and current
