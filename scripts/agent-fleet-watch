@@ -25,6 +25,7 @@ ALARM_LABEL = "manager-only"
 COOLDOWN_SECONDS = 6 * 60 * 60
 RUN_WINDOW_SECONDS = 60 * 60
 MANUAL_SECONDS = 2 * 60 * 60
+FREEZE_SECONDS = 30 * 60
 MERGE_WINDOW_SECONDS = 3 * 60 * 60
 TICK_FAILURE = re.compile(r"run FAILED tick exit=([1-9][0-9]*)\b")
 STAMP = re.compile(r"^(\S+) ")
@@ -578,6 +579,33 @@ def main() -> int:
                                started, current)
             else:
                 manual_since.pop(slug, None)
+
+        fleet_agents = [agent for agent in agents
+                        if agent["kind"] in {"dev", "qa", "worker", "cli"}
+                        and any(board in readable_board_set for board in agent["boards"])]
+        frozen = bool(fleet_agents) and all(
+            agent["config"].get("CLAIM_UNASSIGNED", "no") == "no" for agent in fleet_agents)
+        intake_empty = (readable_board_set == set(boards)
+                        and not any(unassigned.get(board) for board in readable_boards))
+        if frozen and intake_empty:
+            changed_times = []
+            for agent in fleet_agents:
+                try:
+                    changed_times.append(dt.datetime.fromtimestamp(
+                        agent["path"].stat().st_mtime, dt.timezone.utc))
+                except OSError:
+                    changed_times.append(current)
+            observed_start = min(max(changed_times), current)
+            prior = parse_time(state.get("freeze_since"))
+            started = max(prior, observed_start) if prior else observed_start
+            state["freeze_since"] = iso(started)
+            if (current - started).total_seconds() > FREEZE_SECONDS:
+                slugs = ", ".join(sorted(agent["slug"] for agent in fleet_agents))
+                add_breach(breaches, "R8",
+                           f"The fleet has stayed frozen in manual mode for longer than 30 minutes "
+                           f"with empty intake. Frozen agents: {slugs}.", started, current)
+        else:
+            state.pop("freeze_since", None)
 
         active_rules = set(breaches)
         for rule, entry in list(rules_state.items()):

@@ -6,11 +6,13 @@
 #   agent-template events register <slug> --url <public-url>
 #   agent-template events status
 #
-#   agent-template ctl start|stop|status <slug>
+#   agent-template ctl start|status <slug>
+#   agent-template ctl stop <slug> --owner-request <ticket>
 #
 #   agent-template delegate <ticket> <slug> --why "<one line reason>"
 #
-#   agent-template mode manual|auto [--board <id>|--runner <slug>]
+#   agent-template mode manual [--board <id>|--runner <slug>] --owner-request <ticket>
+#   agent-template mode auto [--board <id>|--runner <slug>]
 #
 #   agent-template model <slug> <preset>
 #
@@ -224,7 +226,9 @@ manager_log_call() {
   local who="$1" what="$2"
   mkdir -p "$(dirname "$MANAGER_ACTIONS_LOG")"
   who="${who//$'\n'/ }"
+  who="${who//$'\t'/ }"
   what="${what//$'\n'/ }"
+  what="${what//$'\t'/ }"
   printf '%s\twho=%s\twhat=%s\n' "$(date -Is)" "${who:-unknown}" "$what" >> "$MANAGER_ACTIONS_LOG"
 }
 manager_refuse() {
@@ -353,6 +357,115 @@ manager_authorize() {
   MANAGER_BOARD_CLI="$(manager_conf_value "$conf" BOARD_CLI)"
 }
 
+manager_owner_request() {
+  local ticket="$1" temporary task_file project_file comments_file project_id
+  case "$ticket" in *-[0-9]*) ;; *) manager_refuse "$SUBCOMMAND refused: $ticket is not a ticket reference" ;; esac
+  [ -x "$MANAGER_BOARD_CLI" ] \
+    || manager_refuse "$SUBCOMMAND refused: manager $MANAGER_CALLER has no executable BOARD_CLI"
+  temporary="$(mktemp -d)"
+  task_file="$temporary/task.json"
+  project_file="$temporary/project.json"
+  comments_file="$temporary/comments.json"
+  "$MANAGER_BOARD_CLI" task get "$ticket" > "$task_file" 2>/dev/null \
+    || { rm -rf "$temporary"; manager_refuse "$SUBCOMMAND refused: could not read owner request ticket $ticket"; }
+  project_id="$(python3 - "$task_file" <<'PYEOF'
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+    print(task.get("projectId") or task.get("boardId") or "")
+except Exception:
+    pass
+PYEOF
+)"
+  [ -n "$project_id" ] \
+    || { rm -rf "$temporary"; manager_refuse "$SUBCOMMAND refused: owner request ticket $ticket did not identify its board"; }
+  "$MANAGER_BOARD_CLI" project show "$project_id" > "$project_file" 2>/dev/null \
+    || { rm -rf "$temporary"; manager_refuse "$SUBCOMMAND refused: could not read board owner for $ticket"; }
+  "$MANAGER_BOARD_CLI" --json comment list "$ticket" > "$comments_file" 2>/dev/null \
+    || { rm -rf "$temporary"; manager_refuse "$SUBCOMMAND refused: could not read comments on $ticket"; }
+  mapfile -t request_fields < <(python3 - "$project_file" "$comments_file" <<'PYEOF'
+import base64, html, json, sys
+from html.parser import HTMLParser
+
+class Text(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.parts = []
+    def handle_data(self, data):
+        self.parts.append(data)
+    def handle_starttag(self, tag, attrs):
+        if tag.casefold() in {"br", "p", "div", "li"}:
+            self.parts.append(" ")
+
+project_doc = json.load(open(sys.argv[1], encoding="utf-8"))
+comments_doc = json.load(open(sys.argv[2], encoding="utf-8"))
+project = project_doc.get("project") or project_doc
+owner = project.get("owner") if isinstance(project.get("owner"), dict) else {}
+owner_id = str(project.get("ownerId") or owner.get("id") or owner.get("userId") or "")
+if not owner_id:
+    raise SystemExit(1)
+rows = comments_doc.get("comments") if isinstance(comments_doc, dict) else comments_doc
+candidates = []
+for index, row in enumerate(rows or []):
+    if not isinstance(row, dict) or row.get("agent") or row.get("authorAgentId") or row.get("agentId"):
+        continue
+    creator = row.get("creator") or row.get("author") or row.get("user") or {}
+    if not isinstance(creator, dict) or creator.get("agent") or creator.get("agentId"):
+        continue
+    creator_id = str(creator.get("id") or creator.get("userId") or row.get("creatorId") or row.get("authorId") or "")
+    raw = str(row.get("text") or row.get("content") or row.get("body") or "")
+    if creator_id == owner_id and raw.strip():
+        candidates.append((str(row.get("createdAt") or row.get("updatedAt") or ""), index, raw))
+if not candidates:
+    raise SystemExit(1)
+raw = max(candidates)[2]
+parser = Text()
+parser.feed(raw)
+parser.close()
+quote = " ".join(html.unescape("".join(parser.parts)).split())
+if not quote:
+    raise SystemExit(1)
+owner_name = str(owner.get("displayName") or owner.get("name") or "board owner")
+encode = lambda value: base64.b64encode(value.encode()).decode()
+print(owner_id)
+print(encode(owner_name))
+print(encode(quote))
+PYEOF
+)
+  rm -rf "$temporary"
+  [ "${#request_fields[@]}" -eq 3 ] \
+    || manager_refuse "$SUBCOMMAND refused: $ticket has no owner-authored request comment"
+  OWNER_REQUEST_TICKET="$ticket"
+  OWNER_REQUEST_BOARD="$project_id"
+  OWNER_REQUEST_ID="${request_fields[0]}"
+  OWNER_REQUEST_NAME="$(printf '%s' "${request_fields[1]}" | base64 -d)"
+  OWNER_REQUEST_QUOTE="$(printf '%s' "${request_fields[2]}" | base64 -d)"
+}
+
+manager_request_matches_conf() {
+  manager_board_matches "$1" "$OWNER_REQUEST_BOARD" \
+    || manager_refuse "$SUBCOMMAND refused: owner request $OWNER_REQUEST_TICKET is for board $OWNER_REQUEST_BOARD, not the target runner"
+}
+
+manager_report_approved_change() {
+  local detail="$1" quoted body
+  quoted="$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1], ensure_ascii=False))' "$OWNER_REQUEST_QUOTE")"
+  manager_log_call "$MANAGER_CALLER" "approved_change=$detail owner_request=$quoted"
+  body="$(python3 - "$detail" "$OWNER_REQUEST_ID" "$OWNER_REQUEST_NAME" "$OWNER_REQUEST_QUOTE" <<'PYEOF'
+import html, sys
+change, owner_id, owner_name, request = sys.argv[1:]
+mention = (f'<span data-type="mention" class="mention" data-id="{html.escape(owner_name, quote=True)}" '
+           f'data-label="name-{html.escape(owner_id, quote=True)}">{html.escape(owner_name)}</span>')
+print(f'<p><strong>Decision: Agent mode change alarm.</strong> {mention}</p>'
+      f'<p>Change: {html.escape(change)}.</p>'
+      f'<p>Owner request: <q>{html.escape(request)}</q></p>')
+PYEOF
+)"
+  AGENT_COMMENT_VERBATIM=yes "$MANAGER_BOARD_CLI" comment add "$OWNER_REQUEST_TICKET" --text "$body" >/dev/null 2>&1 \
+    || manager_refuse "$SUBCOMMAND failed: change completed but the owner alarm comment failed on $OWNER_REQUEST_TICKET"
+}
+
 maintainer_authorize() {
   local conf
   MANAGER_CALLER="$(manager_caller_slug)"
@@ -436,12 +549,23 @@ fi
 
 if [ "${SUBCOMMAND:-feedback}" = "ctl" ]; then
   manager_authorize "$@"
-  [ "$#" -eq 2 ] || manager_refuse "ctl refused: use agent-template ctl start|stop|status <slug>"
+  [ "$#" -ge 2 ] || manager_refuse "ctl refused: use agent-template ctl start|status <slug>, or ctl stop <slug> --owner-request <ticket>"
   action="$1"
   target="$2"
   case "$action" in start|stop|status) ;; *) manager_refuse "ctl refused: action must be start, stop, or status" ;; esac
   target_conf="$(manager_current_conf "$target")" \
     || manager_refuse "ctl refused: $target is not a current agent slug"
+  if [ "$action" = "stop" ]; then
+    [ "$#" -eq 4 ] && [ "$3" = "--owner-request" ] \
+      || manager_refuse "ctl refused: stop requires --owner-request <ticket>"
+  else
+    [ "$#" -eq 2 ] \
+      || manager_refuse "ctl refused: use agent-template ctl start|status <slug>"
+  fi
+  if [ "$action" = "stop" ]; then
+    manager_owner_request "$4"
+    manager_request_matches_conf "$target_conf"
+  fi
   timer="agent-board-poll@$target.timer"
   service="agent-board-poll@$target.service"
   case "$action" in
@@ -453,6 +577,7 @@ if [ "${SUBCOMMAND:-feedback}" = "ctl" ]; then
     stop)
       systemctl --user stop "$timer" "$service" >/dev/null 2>&1 \
         || manager_refuse "ctl failed: could not stop $timer and $service"
+      manager_report_approved_change "stopped runner $target"
       echo "ctl stop $target: stopped $timer and $service"
       ;;
     status)
@@ -528,28 +653,66 @@ fi
 
 if [ "${SUBCOMMAND:-feedback}" = "mode" ]; then
   manager_authorize "$@"
-  [ "$#" -eq 1 ] || { [ "$#" -eq 3 ] && { [ "$2" = "--board" ] || [ "$2" = "--runner" ]; }; } \
-    || manager_refuse "mode refused: use agent-template mode manual|auto [--board <id>|--runner <slug>]"
+  [ "$#" -ge 1 ] \
+    || manager_refuse "mode refused: use agent-template mode manual [scope] --owner-request <ticket>, or mode auto [scope]"
   mode="$1"
+  shift
   case "$mode" in
     manual) claim="no" ;;
     auto) claim="yes" ;;
     *) manager_refuse "mode refused: mode must be manual or auto" ;;
   esac
+  scope=""
+  scope_value=""
+  request_ticket=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --board|--runner)
+        [ -z "$scope" ] && [ "$#" -ge 2 ] \
+          || manager_refuse "mode refused: provide only one board or runner scope"
+        scope="$1"
+        scope_value="$2"
+        shift 2
+        ;;
+      --owner-request)
+        [ -z "$request_ticket" ] && [ "$#" -ge 2 ] \
+          || manager_refuse "mode refused: provide one owner request ticket"
+        request_ticket="$2"
+        shift 2
+        ;;
+      *) manager_refuse "mode refused: unknown option $1" ;;
+    esac
+  done
+  if [ "$mode" = "manual" ]; then
+    [ -n "$request_ticket" ] \
+      || manager_refuse "mode refused: manual mode requires --owner-request <ticket>"
+    manager_owner_request "$request_ticket"
+  elif [ -n "$request_ticket" ]; then
+    manager_refuse "mode refused: --owner-request is only used for manual mode"
+  fi
   MANAGER_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%N)"
   changed=()
-  if [ "${2:-}" = "--runner" ]; then
-    target="$3"
+  if [ "$scope" = "--runner" ]; then
+    target="$scope_value"
     conf="$(manager_current_conf "$target")" \
       || manager_refuse "mode refused: $target is not a current agent slug in the conf dir"
+    [ "$mode" != "manual" ] || manager_request_matches_conf "$conf"
     if manager_set_conf_value "$conf" CLAIM_UNASSIGNED "$claim"; then
       changed+=("$(basename "$conf")")
+    fi
+    if [ "$mode" = "manual" ] && [ "${#changed[@]}" -gt 0 ]; then
+      manager_report_approved_change "set runner $target to manual mode"
     fi
     manager_changed_reply "mode $mode runner $target" "${changed[@]}"
     exit 0
   fi
-  board="${3:-$(manager_conf_value "$MANAGER_CONF" BOARD_ID)}"
+  [ -z "$scope" ] || [ "$scope" = "--board" ] \
+    || manager_refuse "mode refused: invalid scope"
+  board="${scope_value:-$(manager_conf_value "$MANAGER_CONF" BOARD_ID)}"
   case "$board" in ''|*[!0-9]*) manager_refuse "mode refused: board id must be one number" ;; esac
+  if [ "$mode" = "manual" ] && [ "$OWNER_REQUEST_BOARD" != "$board" ]; then
+    manager_refuse "mode refused: owner request $OWNER_REQUEST_TICKET is for board $OWNER_REQUEST_BOARD, not board $board"
+  fi
   config_dir="$(readlink -f "$MANAGER_CONFIG_DIR")"
   shopt -s nullglob
   for candidate in "$config_dir"/*.conf; do
@@ -563,6 +726,9 @@ if [ "${SUBCOMMAND:-feedback}" = "mode" ]; then
     fi
   done
   shopt -u nullglob
+  if [ "$mode" = "manual" ] && [ "${#changed[@]}" -gt 0 ]; then
+    manager_report_approved_change "set board $board to manual mode for $(printf '%s' "${changed[*]}")"
+  fi
   manager_changed_reply "mode $mode board $board" "${changed[@]}"
   exit 0
 fi

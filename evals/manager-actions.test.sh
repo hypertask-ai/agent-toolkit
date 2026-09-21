@@ -112,8 +112,14 @@ case "$*" in
     printf '%s\n' '{"tasks":[{"ticketNumber":"OWNER-1","projectId":15,"assignees":[{"id":6,"displayName":"Owner"}]}]}' ;;
   'task get OPEN-1')
     printf '%s\n' '{"tasks":[{"ticketNumber":"OPEN-1","projectId":15,"assignees":[]}]}' ;;
+  'task get REQUEST-1'|'task get REQUEST-2')
+    printf '%s\n' "{\"tasks\":[{\"ticketNumber\":\"${3}\",\"projectId\":15,\"assignees\":[]}] }" ;;
   'project show 15')
-    printf '%s\n' '{"project":{"id":15,"ownerId":6}}' ;;
+    printf '%s\n' '{"project":{"id":15,"ownerId":6,"owner":{"id":6,"displayName":"Owner"}}}' ;;
+  '--json comment list REQUEST-1')
+    printf '%s\n' '{"comments":[{"id":41,"createdAt":"2026-09-20T10:00:00Z","creator":{"id":7,"displayName":"Other"},"text":"Do not use this."},{"id":42,"createdAt":"2026-09-20T11:00:00Z","creator":{"id":6,"displayName":"Owner"},"text":"<p>Please freeze the worker fleet.</p>"}]}' ;;
+  '--json comment list REQUEST-2')
+    printf '%s\n' '{"comments":[{"id":43,"createdAt":"2026-09-20T11:30:00Z","creator":{"id":7,"displayName":"Other"},"text":"Please stop the worker."}]}' ;;
   '--json project show 5500')
     printf '%s\n' '{"project":{"id":5500,"sections":[{"section_title":"Backlog"},{"section_title":"In Progress"},{"section_title":"Review"},{"section_title":"Done"}]}}' ;;
   task\ create*)
@@ -172,11 +178,45 @@ else
 fi
 
 set +e
+unapproved_stop="$(AGENT_SLUG=manager run_template ctl stop worker 2>&1)"
+unapproved_stop_rc=$?
+set -e
+if [ "$unapproved_stop_rc" -ne 0 ] \
+   && [ "$unapproved_stop" = 'ctl refused: stop requires --owner-request <ticket>' ] \
+   && [ ! -s "$TMP/systemctl.log" ]; then
+  ok ctl-stop-requires-owner-request "an unapproved stop cannot reach systemctl"
+else
+  bad ctl-stop-requires-owner-request "rc=$unapproved_stop_rc output=$unapproved_stop systemctl=$(cat "$TMP/systemctl.log")"
+fi
+
+set +e
+nonowner_stop="$(AGENT_SLUG=manager run_template ctl stop worker --owner-request REQUEST-2 2>&1)"
+nonowner_stop_rc=$?
+set -e
+if [ "$nonowner_stop_rc" -ne 0 ] \
+   && [ "$nonowner_stop" = 'ctl refused: REQUEST-2 has no owner-authored request comment' ] \
+   && [ ! -s "$TMP/systemctl.log" ]; then
+  ok ctl-stop-rejects-nonowner-comment "another user's request cannot authorize a stop"
+else
+  bad ctl-stop-rejects-nonowner-comment "rc=$nonowner_stop_rc output=$nonowner_stop systemctl=$(cat "$TMP/systemctl.log")"
+fi
+
+approved_stop="$(AGENT_SLUG=manager run_template ctl stop worker --owner-request REQUEST-1)"
+if [ "$approved_stop" = 'ctl stop worker: stopped agent-board-poll@worker.timer and agent-board-poll@worker.service' ] \
+   && grep -q '^--user stop agent-board-poll@worker.timer agent-board-poll@worker.service$' "$TMP/systemctl.log" \
+   && grep -qF 'comment add REQUEST-1 --text <p><strong>Decision: Agent mode change alarm.</strong>' "$TMP/board.log" \
+   && grep -qF '<q>Please freeze the worker fleet.</q>' "$TMP/board.log"; then
+  ok ctl-stop-owner-approved "owner request is verified, quoted, commented, and alarmed"
+else
+  bad ctl-stop-owner-approved "output=$approved_stop systemctl=$(cat "$TMP/systemctl.log") board=$(cat "$TMP/board.log")"
+fi
+
+set +e
 owner="$(AGENT_SLUG=manager run_template delegate OWNER-1 worker --why 'Please take this' 2>&1)"
 owner_rc=$?
 set -e
 if [ "$owner_rc" -ne 0 ] && [ "$owner" = "delegate refused: OWNER-1 is held by the board owner" ] \
-   && ! grep -qE '^task assign|^comment add' "$TMP/board.log"; then
+   && ! grep -qE '^task assign OWNER-1|^comment add OWNER-1' "$TMP/board.log"; then
   ok delegate-refuses-owner-held "owner-held ticket receives no write"
 else
   bad delegate-refuses-owner-held "rc=$owner_rc output=$owner board=$(cat "$TMP/board.log")"
@@ -200,7 +240,21 @@ else
   bad manager-identity-from-path "output=$status"
 fi
 
-mode="$(AGENT_SLUG=manager run_template mode manual --board 15)"
+before_manual="$(sha256sum "$CONF_DIR"/*.conf "$CONF_DIR"/credentials/* | sha256sum)"
+set +e
+unapproved_manual="$(AGENT_SLUG=manager run_template mode manual --board 15 2>&1)"
+unapproved_manual_rc=$?
+set -e
+after_manual="$(sha256sum "$CONF_DIR"/*.conf "$CONF_DIR"/credentials/* | sha256sum)"
+if [ "$unapproved_manual_rc" -ne 0 ] \
+   && [ "$unapproved_manual" = 'mode refused: manual mode requires --owner-request <ticket>' ] \
+   && [ "$before_manual" = "$after_manual" ]; then
+  ok mode-manual-requires-owner-request "an unapproved freeze changes no conf"
+else
+  bad mode-manual-requires-owner-request "rc=$unapproved_manual_rc output=$unapproved_manual"
+fi
+
+mode="$(AGENT_SLUG=manager run_template mode manual --board 15 --owner-request REQUEST-1)"
 if printf '%s' "$mode" | grep -qF 'mode manual board 15: changed' \
    && printf '%s' "$mode" | grep -qF 'qa.conf' && printf '%s' "$mode" | grep -qF 'worker.conf' \
    && grep -q '^CLAIM_UNASSIGNED="no"$' "$CONF_DIR/worker.conf" \
@@ -222,7 +276,7 @@ else
   bad mode-defaults-manager-board "output=$mode_default"
 fi
 
-mode_runner="$(AGENT_SLUG=manager run_template mode manual --runner worker)"
+mode_runner="$(AGENT_SLUG=manager run_template mode manual --runner worker --owner-request REQUEST-1)"
 if [ "$mode_runner" = 'mode manual runner worker: changed worker.conf' ] \
    && grep -q '^CLAIM_UNASSIGNED="no"$' "$CONF_DIR/worker.conf" \
    && grep -q '^CLAIM_UNASSIGNED="yes"$' "$CONF_DIR/qa.conf"; then
@@ -372,6 +426,8 @@ else
 fi
 
 if grep -q $'who=regular\twhat=ctl stop worker' "$TMP/state/agent-board-poll/manager-actions.log" \
+   && grep -qF $'who=manager\twhat=approved_change=stopped runner worker owner_request="Please freeze the worker fleet."' "$TMP/state/agent-board-poll/manager-actions.log" \
+   && grep -qF $'who=manager\twhat=approved_change=set board 15 to manual mode for qa.conf worker.conf owner_request="Please freeze the worker fleet."' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=mode manual --board 15' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=model worker grok-fast' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=sections qa AI Review, QA' "$TMP/state/agent-board-poll/manager-actions.log" \

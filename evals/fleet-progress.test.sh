@@ -126,8 +126,9 @@ assert {row["rule"] for row in entries.values()} == {
     "wait-over-two-hours", "eligible-without-completion", "repeated-failure", "unit-without-result"
 }
 wait = next(row for row in entries.values() if row["rule"] == "wait-over-two-hours")
-assert wait["runner"] == "dev-1" and wait["manual_at"] == "2026-09-18T12:00:00Z"
-assert wait["owner_notified_at"] == "2026-09-18T12:00:00Z"
+assert wait["runner"] == "dev-1"
+assert "manual_at" not in wait and "owner_notified_at" not in wait
+assert "manual_runners" not in state
 assert wait["bug_ticket"] == "AGTE-99" and wait["bug_filed_at"] == "2026-09-18T12:00:00Z"
 assert wait["alarm_open_since"] == "2026-09-18T12:00:00Z"
 assert wait["alarm_chat_notified_at"] == "2026-09-18T12:00:00Z"
@@ -158,11 +159,11 @@ assert health["alarms"] == [{
 }]
 assert not [row for row in board if row[:2] == ["comment", "update"]]
 notifications = Path(os.environ["NOTIFIER_LOG"]).read_text().splitlines()
-assert len(notifications) == 4
-assert sum(line.startswith("[fleet manual]") for line in notifications) == 1
+assert len(notifications) == 3
+assert not any(line.startswith("[fleet manual]") for line in notifications)
 assert all("\n" not in line for line in notifications)
-assert 'CLAIM_UNASSIGNED="no"' in (Path(os.environ["CONF"]) / "dev-1.conf").read_text()
-assert list(Path(os.environ["CONF"]).glob("dev-1.conf.bak-*"))
+assert 'CLAIM_UNASSIGNED="yes"' in (Path(os.environ["CONF"]) / "dev-1.conf").read_text()
+assert not list(Path(os.environ["CONF"]).glob("dev-1.conf.bak-*"))
 for path in Path(os.environ["STATE"]).glob("*.progress.json"):
     progress = json.load(open(path))
     assert progress["stall"]["stalled_since"]
@@ -198,8 +199,8 @@ supervise >/dev/null
 after_board="$(wc -l < "$TMP/board.log")"
 after_notify="$(wc -l < "$TMP/notifier.log")"
 if [ "$before_board" -eq "$after_board" ] && [ "$before_notify" -eq "$after_notify" ] \
-   && [ "$(grep -c 'mode manual --runner dev-1' "$TMP/state/agent-board-poll/manager-actions.log")" -eq 1 ]; then
-  ok dedupe-and-owner-once 'unchanged stalls add no comment, Telegram line, or manual escalation'
+   && [ ! -e "$TMP/state/agent-board-poll/manager-actions.log" ]; then
+  ok dedupe-and-owner-once 'unchanged stalls add no comment, Telegram line, or mode change'
 else
   bad dedupe-and-owner-once "board=$before_board/$after_board notify=$before_notify/$after_notify"
 fi
@@ -216,7 +217,7 @@ PYEOF
 supervise >/dev/null
 adds="$(python3 -c 'import json,sys; print(sum(json.loads(line)[:2] == ["comment","add"] for line in open(sys.argv[1])))' "$TMP/board.log")"
 updates="$(python3 -c 'import json,sys; print(sum(json.loads(line)[:2] == ["comment","update"] for line in open(sys.argv[1])))' "$TMP/board.log")"
-if [ "$adds" -eq 4 ] && [ "$updates" -eq 1 ] && [ "$(wc -l < "$TMP/notifier.log")" -eq 4 ]; then
+if [ "$adds" -eq 4 ] && [ "$updates" -eq 1 ] && [ "$(wc -l < "$TMP/notifier.log")" -eq 3 ]; then
   ok edit-in-place 'a changed reason updates its stored comment without another notification'
 else
   bad edit-in-place "adds=$adds updates=$updates notifications=$(wc -l < "$TMP/notifier.log")"

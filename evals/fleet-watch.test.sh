@@ -272,6 +272,53 @@ else
   bad fleet-watch-healthy 'the healthy snapshot or one-line log contract was wrong'
 fi
 
+sed -i 's/^CLAIM_UNASSIGNED="yes"$/CLAIM_UNASSIGNED="no"/' "$CONF/dev-1.conf" "$CONF/dev-2.conf"
+touch -d '2026-09-20T11:00:00Z' "$CONF/dev-1.conf" "$CONF/dev-2.conf" "$CONF/dev-3.conf"
+STATE="$STATE" python3 - <<'PYEOF'
+import json, os
+path = os.path.join(os.environ["STATE"], "fleet-watch-state.json")
+state = json.load(open(path))
+state["freeze_since"] = "2026-09-20T11:29:00Z"
+json.dump(state, open(path, "w"))
+PYEOF
+freeze_board_before="$(wc -l < "$TMP/board.log")"
+watch "$TMP/empty-tasks.jsonl" recent 20 >/dev/null
+if STATE="$STATE" BOARD="$TMP/board.log" BEFORE="$freeze_board_before" python3 - <<'PYEOF'
+import json, os
+health = json.load(open(os.path.join(os.environ["STATE"], "fleet-health.json")))
+assert [row["rule"] for row in health["breaches"]] == ["R8"]
+row = health["breaches"][0]
+assert row["since"] == "2026-09-20T11:29:00Z"
+assert "longer than 30 minutes" in row["detail"] and "empty intake" in row["detail"]
+state = json.load(open(os.path.join(os.environ["STATE"], "fleet-watch-state.json")))
+assert state["rules"]["R8"]["ticket"].startswith("AGTE-")
+board = [json.loads(line) for line in open(os.environ["BOARD"])]
+new = board[int(os.environ["BEFORE"]):]
+creates = [call for call in new if call[:2] == ["task", "create"]]
+comments = [call for call in new if call[:2] == ["comment", "add"]]
+assert len(creates) == len(comments) == 1
+assert creates[0][creates[0].index("--title") + 1] == "R8: Fleet watch alarm"
+PYEOF
+then
+  ok fleet-watch-empty-intake-freeze 'a fleet-wide 31-minute manual freeze raises R8 with no intake waiting'
+else
+  bad fleet-watch-empty-intake-freeze 'the empty-intake fleet freeze did not raise exactly one alarm'
+fi
+
+sed -i 's/^CLAIM_UNASSIGNED="no"$/CLAIM_UNASSIGNED="yes"/' "$CONF/dev-1.conf"
+watch "$TMP/empty-tasks.jsonl" recent 20 >/dev/null
+if STATE="$STATE" python3 - <<'PYEOF'
+import json, os
+state = json.load(open(os.path.join(os.environ["STATE"], "fleet-watch-state.json")))
+assert "freeze_since" not in state
+assert state["rules"]["R8"]["active"] is False
+PYEOF
+then
+  ok fleet-watch-freeze-clears 'leaving fleet-wide manual mode clears R8 and its timer'
+else
+  bad fleet-watch-freeze-clears 'R8 stayed active after one runner returned to auto mode'
+fi
+
 SKIP_CONF="$TMP/skip-conf"
 SKIP_STATE="$TMP/skip-state"
 mkdir -p "$SKIP_CONF" "$SKIP_STATE/run-records"
