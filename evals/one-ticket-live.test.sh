@@ -661,7 +661,7 @@ invalid_release_output="$(SECTION_SCENARIO=invalid AGENT_PR_CACHE_DIR="$TMP/inva
 invalid_release_rc=$?
 set -e
 [[ "$invalid_release_rc" -ne 0 ]]
-[[ "$invalid_release_output" == *'cannot determine whether dev-1 owns a pull request'* ]]
+[[ "$invalid_release_output" == *'ERROR: PR release destination "Review" does not exist on board 15'* ]]
 grep -qF 'ERROR: PR release destination "Review" does not exist on board 15' "$state/dev-1.log"
 echo 'PASS invalid PR release destination fails loudly at startup'
 
@@ -824,8 +824,8 @@ grep -qF 'gh pr comment 1' "$TMP/actions"
 grep -qF 'board task unassign HTPR-1 --assignee agent-1' "$TMP/actions"
 [[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "1" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.released-prs")" = yes ]]
 grep -qF 'PR release could not move HTPR-1 to HT Manager Review; agent unbound and verdict retained' "$state/dev-1.log"
-grep -qF 'release of PR #1 stopped after the ticket move failed; agent unbound' "$state/dev-1.log"
 ! grep -qF 'release of PR #1 failed; binding remains' "$state/dev-1.log"
+! grep -qF 'gh pr close 1' "$TMP/actions"
 [ ! -e "$state/dev-1.blocked" ]
 echo 'PASS failed PR release move retains the verdict and clears both agent bindings'
 
