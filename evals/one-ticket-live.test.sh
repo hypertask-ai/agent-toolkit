@@ -794,6 +794,67 @@ seed_unfixable_release() {
     > "$state/run-records/dev-1-HTPR-1.json"
 }
 
+large_root="$TMP/large-feedback-core"
+mkdir -p "$large_root"
+cp -a "$ROOT/scripts" "$ROOT/adapters" "$large_root/"
+python3 - "$large_root/scripts/lib/adapters/hypertask.sh" <<'PYEOF'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+start = text.index("adapter_pr_gate() (")
+end = text.index("\n# Print the live owner-review destination", start)
+replacement = '''adapter_pr_gate() (
+  python3 - <<'PYGATE'
+import json
+
+feedback = "failed check output " * (300 * 1024 // len("failed check output ") + 1)
+feedback = feedback[:300 * 1024]
+print(json.dumps({
+    "action": "fix", "state": "red", "wait_reason": "red: check-01",
+    "definition": "test", "number": 1, "url": "https://github.test/pull/1",
+    "ticket": "HTPR-1", "title": "HTPR-1 fix a large red pull request",
+    "branch": "agent/dev-1-htpr-1", "base": "production", "head": "head1",
+    "since": "2026-01-01T00:00:00Z", "task_id": "task-1", "board": "15",
+    "ticket_section": "Bugs", "labels": [], "human_assignee_ids": [],
+    "feedback": feedback, "pending": [],
+    "failed_checks": ["check-%02d" % number for number in range(1, 14)],
+    "first_error_line": "failed check output", "pickup_slot": True,
+    "blocks_pickup": True, "unfixable": False,
+}))
+PYGATE
+)
+'''
+path.write_text(text[:start] + replacement + text[end:], encoding="utf-8")
+PYEOF
+rm -rf "$TMP/large-state" "$TMP/large-worker-prompts"
+set +e
+large_output="$(XDG_STATE_HOME="$TMP/large-state" PR_TEST_SCENARIO=red \
+  BOARD_TEST_SCENARIO=no-emergency RUN_COOLDOWN_SECONDS=0 HOME="$TMP/home" \
+  PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" WORKER_LOG="$TMP/large-worker-prompts" \
+  BOARD_CALL_LOG="$TMP/board-calls" BOARD_COMMENT_LOG="$TMP/board-comments" \
+  GH_CALL_LOG="$TMP/gh-calls" ACTION_LOG="$TMP/actions" \
+  "$large_root/scripts/agent-board-poll" --once dev-1 2>&1)"
+large_rc=$?
+set -e
+if [ "$large_rc" -ne 0 ]; then
+  printf 'large feedback runner output:\n%s\n' "$large_output" >&2
+  exit 1
+fi
+LARGE_PROMPT="$TMP/large-worker-prompts" python3 <<'PYEOF'
+import os
+import re
+
+prompt = open(os.environ["LARGE_PROMPT"], encoding="utf-8").read()
+header = "Current failing feedback follows. Check names are exact. Each failing job includes only its last 80 failed-log lines.\n\n"
+feedback = prompt.split(header, 1)[1].split("\n\nKeep ownership of this PR", 1)[0].rstrip("\n")
+assert len(feedback.encode("utf-8")) <= 16 * 1024
+assert re.search(r"\n\[truncated, [0-9]+ more bytes\]$", feedback)
+PYEOF
+[[ "$large_output" != *'Argument list too long'* ]]
+echo 'PASS 300 KB PR feedback is capped with a marker, ranked, and starts a repair run'
+
 for hold_case in blocked human owner-hold; do
   rm -rf "$state/pr-live-cache"
   rm -f "$TMP/worker-prompts"
@@ -955,4 +1016,4 @@ orphan_tick_log="$(tail -n "+$((orphan_log_before + 1))" "$state/dev-1.log")"
 [[ -s "$TMP/worker-prompts" ]]
 echo 'PASS dev tick logs an orphan once, ignores it, and claims work'
 
-echo '57 one-ticket-until-live checks passed'
+echo '58 one-ticket-until-live checks passed'

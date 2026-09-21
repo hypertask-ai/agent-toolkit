@@ -1,0 +1,1 @@
+- AGTE-174 caps pull-request repair feedback at 16 KB and passes candidate JSON to Python over stdin, so large red-check reports can still be ranked and started.
