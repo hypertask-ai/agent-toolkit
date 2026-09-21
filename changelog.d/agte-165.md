@@ -1,0 +1,1 @@
+- AGTE-165 keeps one green pull request monitored without stopping the agent from starting another ticket, while preserving red, pending, QA, protected, and two-PR pickup gates.

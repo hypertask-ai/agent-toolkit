@@ -3008,10 +3008,17 @@ if declare -F adapter_pr_gate >/dev/null 2>&1; then
   fi
 fi
 if [ -n "$PR_GATES" ]; then
-  PR_GATE="$(printf '%s\n' "$PR_GATES" | sed -n '1p')"
-  PR_REPORT_GATE="$PR_GATE"
-  PR_GATE_COUNT=1
-  PR_PICKUP_BLOCKED="yes"
+  PR_GATE="$(printf '%s\n' "$PR_GATES" | python3 -c '
+import json, sys
+rows = [json.loads(line) for line in sys.stdin if line.strip()]
+blocking = [row for row in rows if row.get("blocks_pickup") is not False]
+print(json.dumps((blocking or rows)[0]))
+')"
+  PR_REPORT_GATE="$(printf '%s\n' "$PR_GATES" | sed -n '1p')"
+  PR_GATE_COUNT="$(printf '%s\n' "$PR_GATES" | python3 -c '
+import json, sys
+print(sum(json.loads(line).get("pickup_slot") is True for line in sys.stdin if line.strip()))
+')"
   PR_GATE_ACTION="$(row_field "$PR_GATE" action)"
   PR_GATE_NUMBER="$(row_field "$PR_GATE" number)"
   PR_GATE_STATE="$(row_field "$PR_GATE" state)"
@@ -3020,6 +3027,12 @@ if [ -n "$PR_GATES" ]; then
   PR_GATE_SINCE="$(row_field "$PR_GATE" since)"
   PR_GATE_REASON="$(row_field "$PR_GATE" wait_reason)"
   PR_GATE_MERGED_AT="$(row_field "$PR_GATE" merged_at)"
+  if [ "$PR_GATE_COUNT" -ge 2 ] || ROW="$PR_GATE" python3 -c '
+import json, os, sys
+sys.exit(0 if json.loads(os.environ["ROW"]).get("blocks_pickup") is not False else 1)
+'; then
+    PR_PICKUP_BLOCKED="yes"
+  fi
   if ROW="$PR_GATE" python3 -c '
 import json, os, sys
 row = json.loads(os.environ["ROW"])
@@ -3037,6 +3050,14 @@ raise SystemExit(0 if only_guard else 1)
   PR_OPEN_TICKETS="$(printf '%s\n' "$PR_GATES" | python3 -c 'import json,sys; [print(json.loads(line).get("ticket") or "") for line in sys.stdin if line.strip()]')"
   explain "bound to PR #$PR_GATE_NUMBER for $PR_GATE_TICKET: $PR_GATE_STATE"
 
+  if [ "$PR_PICKUP_BLOCKED" = "no" ]; then
+    rm -f "$BLOCKED"
+    PROGRESS_WAIT_TICKET="$PR_GATE_TICKET"
+    PROGRESS_WAIT_PR="$PR_GATE_NUMBER"
+    PROGRESS_WAIT_PR_URL="$PR_GATE_URL"
+    PROGRESS_WAIT_SINCE="$PR_GATE_SINCE"
+    PROGRESS_WAIT_STATE="awaiting-merge"
+  else
   gate_board="$(row_field "$PR_GATE" board)"; [ -n "$gate_board" ] || gate_board="${BOARD_ID%%,*}"
   gate_labels=",$(ROW="$PR_GATE" python3 -c 'import json,os; print(",".join(json.loads(os.environ["ROW"]).get("labels") or []))'),"
   gate_section="$(row_field "$PR_GATE" ticket_section)"
@@ -3148,6 +3169,7 @@ raise SystemExit(0 if (datetime.datetime.now(datetime.timezone.utc) - first).tot
   if [ -n "$PR_GATE" ]; then
     failure_signature="$(ROW="$PR_GATE" python3 -c 'import json,os; row=json.loads(os.environ["ROW"]); print(", ".join(row.get("failed_checks") or ["review feedback"]) + " | " + str(row.get("first_error_line") or "no error line reported"))')"
     fix_round=$((PR_FIX_ROUNDS + 1))
+  fi
   fi
 else
   rm -f "$BLOCKED"
