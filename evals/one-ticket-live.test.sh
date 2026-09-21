@@ -307,6 +307,10 @@ url="${*: -1}"
 if [[ "$url" == *'/mcp/projects/'*'/labels'* ]]; then
   printf '{"labels":[{"id":"label-needs-human","name":"needs-human"}]}\n'
 elif [[ "$url" == *'/mcp/tasks?'* ]]; then
+  if [ "${BOARD_TEST_SCENARIO:-}" = "unreadable" ]; then
+    printf '{}\n503'
+    exit 0
+  fi
   emergency_labels='[{"name":"emergency"}]'
   [ "${BOARD_TEST_SCENARIO:-}" != "no-emergency" ] || emergency_labels='[]'
   ticket_section='Bugs'
@@ -667,12 +671,27 @@ echo 'PASS invalid PR release destination fails loudly at startup'
 
 rate_log_before="$([ ! -f "$state/dev-1.log" ] || wc -l < "$state/dev-1.log")"
 rate_log_before="${rate_log_before:-0}"
+set +e
 rate_run="$(AGENT_PR_CACHE_DIR="$TMP/tick-rate-cache" PR_TEST_SCENARIO=rate-limit \
   BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
-  COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$rate_run" != *'bound to PR'* && "$rate_run" == *'would pick up HTPR-2'* ]]
+  COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1 2>&1)"
+rate_rc=$?
+set -e
+[[ "$rate_rc" -ne 0 && "$rate_run" == *'cannot determine whether dev-1 owns a pull request'* ]]
+[[ "$rate_run" != *'would pick up HTPR-2'* ]]
 [[ "$(tail -n "+$((rate_log_before + 1))" "$state/dev-1.log" | grep -c '^github rate limited until ' || true)" = 1 ]]
-echo 'PASS GitHub rate limit logs once, binds no PR, and does not fail the tick'
+echo 'PASS unreadable GitHub data fails the PR ownership check closed'
+
+rm -rf "$state/pr-live-cache"
+set +e
+board_unreadable="$(AGENT_PR_CACHE_DIR="$TMP/tick-board-unreadable-cache" PR_TEST_SCENARIO=orphan \
+  BOARD_TEST_SCENARIO=unreadable HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+  COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1 2>&1)"
+board_unreadable_rc=$?
+set -e
+[[ "$board_unreadable_rc" -ne 0 && "$board_unreadable" == *'cannot determine whether dev-1 owns a pull request'* ]]
+[[ "$board_unreadable" != *'would pick up HTPR-2'* ]]
+echo 'PASS unreadable board data fails the PR ownership check closed'
 
 multi_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-multi_run" PR_TEST_SCENARIO=oldest HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
 [[ "$multi_run" == *'bound to PR #9 for HTPR-9: red'* ]]
@@ -876,4 +895,19 @@ AGENT_PR_CACHE_DIR="$TMP/record-open-pr-cache" PR_TEST_SCENARIO=record-open \
 [[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "8" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.opened-prs")" = yes ]]
 echo 'PASS runner persists a PR first seen after its ticket run'
 
-echo '53 one-ticket-until-live checks passed'
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$state/dev-1.released-prs" "$TMP/worker-prompts"
+orphan_log_before="$(wc -l < "$state/dev-1.log")"
+set +e
+run_actual orphan
+set -e
+AGENT_PR_CACHE_DIR="$TMP/actual-pr-cache-orphan" PR_TEST_SCENARIO=orphan \
+  BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+  COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1 >/dev/null
+orphan_tick_log="$(tail -n "+$((orphan_log_before + 1))" "$state/dev-1.log")"
+[[ "$(printf '%s\n' "$orphan_tick_log" | grep -cF 'orphaned PR #4 (retired-dev/htpr-4) has no owning agent')" = 1 ]]
+[[ "$(printf '%s\n' "$orphan_tick_log" | grep -cE 'claim HTPR-[0-9]+: held')" = 1 ]]
+[[ -s "$TMP/worker-prompts" ]]
+echo 'PASS dev tick logs an orphan once, ignores it, and claims work'
+
+echo '55 one-ticket-until-live checks passed'
