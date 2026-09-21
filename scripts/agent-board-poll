@@ -3023,6 +3023,7 @@ release_owned_pr() {
 PR_GATES=""
 PR_GATE=""
 PR_REPORT_GATE=""
+GITHUB_PAUSED="no"
 PR_GATE_COUNT=0
 PR_DEPLOY_GATE_COUNT=0
 PR_PICKUP_BLOCKED="no"
@@ -3046,6 +3047,7 @@ if declare -F adapter_pr_gate >/dev/null 2>&1; then
   fi
   if [ "$pr_gate_rc" -eq 75 ]; then
     PR_GATES=""
+    GITHUB_PAUSED="yes"
   elif [ "$pr_gate_rc" -ne 0 ]; then
     die "cannot determine whether $SLUG owns a pull request" \
       "read $LOG and restore GitHub or board access; no ticket was claimed"
@@ -3693,6 +3695,11 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     fi
   fi
 
+  if [ "$GITHUB_PAUSED" = "yes" ] && [ "$is_reply_only" = "no" ]; then
+    explain "skip  $ref: GitHub is paused, so only board-only work can run"
+    continue
+  fi
+
   # Reserved owner tickets never enter agent work, on any lane. The same guard
   # also runs in the board wrapper so a model cannot bypass it with a move.
   qa_protection="$(qa_protection_reason "$row" "$board")"
@@ -3942,6 +3949,7 @@ if [ "$DRY_RUN" = "yes" ]; then
   done
   echo "$picked ticket(s) would be picked up; nothing was started."
   post_run_cleanup
+  [ "$GITHUB_PAUSED" = "no" ] || exit 75
   exit 0
 fi
 
@@ -5027,3 +5035,4 @@ if rows:
 done
 
 log "tick finished: $picked eligible, $started started"
+[ "$GITHUB_PAUSED" = "no" ] || exit 75

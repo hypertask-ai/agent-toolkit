@@ -1,0 +1,1 @@
+- AGTE-178 pauses GitHub work until the failing response's reset time while board reconciliation and comment replies keep running.

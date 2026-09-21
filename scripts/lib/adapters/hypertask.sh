@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Direct ticket URL resolution for the Hypertask runtime.
 
-# The runner historically treats 75 as an optional rate-limit skip. PR ownership
-# must fail closed whenever GitHub cannot provide a complete answer.
+# Exit 75 tells the runner to skip GitHub work while board-only work continues.
 _hypertask_base_pr_gate() (
   # shellcheck disable=SC1091
   . "$CORE_ROOT/adapters/hypertask/adapter.sh"
@@ -10,11 +9,7 @@ _hypertask_base_pr_gate() (
 )
 
 _hypertask_checked_pr_gate() {
-  local rc
-  _hypertask_base_pr_gate "$@" && return 0
-  rc=$?
-  [ "$rc" -ne 75 ] || return 1
-  return "$rc"
+  _hypertask_base_pr_gate "$@"
 }
 
 _hypertask_base_install_board_cli() (

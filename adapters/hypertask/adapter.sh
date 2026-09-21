@@ -1939,6 +1939,8 @@ _ht_github_paused() {
   fi
   now="$(date +%s)"
   if [ "$now" -lt "$reset" ]; then
+    printf 'GitHub paused until %s\n' \
+      "$(date -d "@$reset" +%H:%M 2>/dev/null || printf '%s' "$reset")" >&2
     return 0
   fi
   rm -f "$pause_file"
@@ -1946,25 +1948,24 @@ _ht_github_paused() {
 }
 
 _ht_pause_github() {
-  local repo="$1" error_file="$2" cache_file pause_file reset now tmp
+  local repo="$1" error_file="$2" response_file="$3" cache_file pause_file reset now tmp
   cache_file="$(_ht_pr_cache_file "$repo")"
   pause_file="$cache_file.rate-limit"
   now="$(date +%s)"
-  reset="$(python3 - "$error_file" <<'PYEOF'
+  reset="$(python3 - "$error_file" "$response_file" <<'PYEOF'
 import re
 import sys
 
-try:
-    text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
-except OSError:
-    text = ""
-match = re.search(r"(?:x-ratelimit-reset|reset(?:_at|At|_epoch)?)['\" :=]+([0-9]{10})", text, re.I)
+text = ""
+for path in sys.argv[1:]:
+    try:
+        text += open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        pass
+match = re.search(r"(?:x-ratelimit-reset|reset(?:_at|At|_epoch)?)[\'\" :=]+([0-9]{10})", text, re.I)
 print(match.group(1) if match else "")
 PYEOF
 )"
-  if ! [[ "$reset" =~ ^[0-9]+$ ]] || [ "$reset" -le "$now" ]; then
-    reset="$(command gh api rate_limit --jq '.rate.reset' 2>/dev/null || true)"
-  fi
   if ! [[ "$reset" =~ ^[0-9]+$ ]] || [ "$reset" -le "$now" ]; then
     reset=$((now + 60))
   fi
@@ -1973,28 +1974,55 @@ PYEOF
   printf '%s\n' "$reset" > "$tmp"
   chmod 600 "$tmp"
   mv "$tmp" "$pause_file"
-  printf 'github rate limited until %s\n' \
-    "$(date -u -d "@$reset" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf '%s' "$reset")" >&2
+  printf 'GitHub paused until %s\n' \
+    "$(date -d "@$reset" +%H:%M 2>/dev/null || printf '%s' "$reset")" >&2
 }
 
 _ht_gh() {
-  local repo="$1" error_file rc
+  local repo="$1" error_file response_file rc include_headers="no"
   shift
   _ht_github_paused "$repo" && return 75
   error_file="$(mktemp)"
-  if command gh "$@" 2>"$error_file"; then
+  response_file="$(mktemp)"
+  if [ "${1:-}" = "api" ]; then
+    include_headers="yes"
+    if command gh "$@" --include >"$response_file" 2>"$error_file"; then
+      rc=0
+    else
+      rc=$?
+    fi
+  elif command gh "$@" >"$response_file" 2>"$error_file"; then
     rc=0
   else
     rc=$?
   fi
-  if [ "$rc" -ne 0 ] && grep -Eqi 'rate.?limit|HTTP 429|abuse detection' "$error_file"; then
-    _ht_pause_github "$repo" "$error_file"
+  if [ "$rc" -ne 0 ] \
+     && grep -Eqi 'rate.?limit|HTTP 429|abuse detection' "$error_file" "$response_file"; then
+    _ht_pause_github "$repo" "$error_file" "$response_file"
     cat "$error_file" >&2
-    rm -f "$error_file"
+    rm -f "$error_file" "$response_file"
     return 75
   fi
+  if [ "$include_headers" = "yes" ]; then
+    python3 - "$response_file" <<'PYEOF'
+import sys
+
+text = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+while text.startswith("HTTP/"):
+    windows = text.find("\r\n\r\n")
+    unix = text.find("\n\n")
+    boundaries = [(index, width) for index, width in ((windows, 4), (unix, 2)) if index >= 0]
+    if not boundaries:
+        break
+    index, width = min(boundaries)
+    text = text[index + width:]
+sys.stdout.write(text)
+PYEOF
+  else
+    cat "$response_file"
+  fi
   cat "$error_file" >&2
-  rm -f "$error_file"
+  rm -f "$error_file" "$response_file"
   return "$rc"
 }
 
@@ -2884,6 +2912,13 @@ adapter_pick_rank() {
   local comments pr_json="" repo="${PR_REPO:-}" pr_known="no" linked_merged_pr="" linked_rc
 
   comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")"
+  case "+$reason+" in
+    *+reply_only+*)
+      printf '%s %s has a human direct mention or question, so it is a reply-only candidate in %s\n' \
+        -3 "$ref" "${section,,}"
+      return 0
+      ;;
+  esac
   if linked_merged_pr="$(printf '%s' "$comments" | adapter_merged_pr_from_comments "$repo")"; then
     :
   else
