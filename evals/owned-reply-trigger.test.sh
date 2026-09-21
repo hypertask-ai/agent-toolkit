@@ -46,7 +46,12 @@ EOF
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 [ -z "${GH_CAPTURE:-}" ] || printf '%s\n' "$*" >> "$GH_CAPTURE"
-if [ "${GH_PR_FIXTURE:-}" = "merged-812" ] && [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+if [ "${GITHUB_RATE_LIMIT:-no}" = yes ] && [ "${1:-}" = api ]; then
+  printf 'HTTP/2 403\nX-RateLimit-Reset: %s\n\n{"message":"API rate limit exceeded"}\n' \
+    "${RATE_LIMIT_RESET:-1790000000}"
+  printf 'API rate limit exceeded (HTTP 403)\n' >&2
+  exit 1
+elif [ "${GH_PR_FIXTURE:-}" = "merged-812" ] && [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
   printf '{"state":"MERGED","mergedAt":"2026-09-16T14:00:00Z","url":"https://github.com/example/repo/pull/812"}\n'
 else
   printf '[]\n'
@@ -223,6 +228,30 @@ if [ "$(cat "$TMP/timeout")" = 300 ] \
   ok reply-only-sandbox-contract 'a repo-less agent runs Codex Sol high without tools in an empty read-only directory'
 else
   bad reply-only-sandbox-contract "timeout=$(cat "$TMP/timeout" 2>/dev/null) mode=$(cat "$TMP/reply-mode" 2>/dev/null) cwd=$(cat "$TMP/reply-cwd" 2>/dev/null) args=$(tr '\n' ' ' < "$TMP/hax" 2>/dev/null)"
+fi
+
+rate_reset=1790000123
+set +e
+PROMPT_CAPTURE="$TMP/rate-prompt" TIMEOUT_CAPTURE="$TMP/rate-timeout" HAX_CAPTURE="$TMP/rate-hax" \
+  REPLY_CWD_CAPTURE="$TMP/rate-reply-cwd" REPLY_MODE_CAPTURE="$TMP/rate-reply-mode" \
+  REPLY_CONTENT_CAPTURE="$TMP/rate-reply-content" BOARD_POST_CAPTURE="$TMP/rate-answer.post" \
+  REPLY_POST_CAPTURE="$TMP/rate-answer-request.json" REPLY_HAX_BIN="$TMP/bin/hax-stub" \
+  REPLY_TIMEOUT_BIN="$TMP/bin/timeout-stub" REPLY_CODEX_AUTH="$TMP/home/.codex/auth.json" \
+  GITHUB_RATE_LIMIT=yes RATE_LIMIT_RESET="$rate_reset" HOME="$TMP/home" \
+  AGENT_CONFIG_DIR="$TMP/home/.config/agents" XDG_STATE_HOME="$TMP/rate-state" \
+  COMPANY_SKILLS_DIR="$TMP/company" TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
+  PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once test >/dev/null 2>&1
+rate_rc=$?
+set -e
+rate_marker="$TMP/rate-state/agent-board-poll/pr-cache/example__repo.json.rate-limit"
+if [ "$rate_rc" -eq 75 ] \
+   && [ "$(cat "$rate_marker" 2>/dev/null)" = "$rate_reset" ] \
+   && grep -qF '<strong>Answer:' "$TMP/rate-answer.post" \
+   && grep -qF "GitHub paused until $(date -d "@$rate_reset" +%H:%M)" \
+      "$TMP/rate-state/agent-board-poll/test.log"; then
+  ok paused-github-reply 'a paused tick posts its board-only reply before exiting 75'
+else
+  bad paused-github-reply "rc=$rate_rc post=$(cat "$TMP/rate-answer.post" 2>/dev/null) log=$(cat "$TMP/rate-state/agent-board-poll/test.log" 2>/dev/null)"
 fi
 
 if printf '%s\n' '<p><strong>Answer: Both options are available.</strong></p><p>Decision needed: Which option should ship?</p>' \

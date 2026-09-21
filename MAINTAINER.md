@@ -449,8 +449,9 @@ close, or merge it. Moving its ticket to `Valentin Review` or `HT Manager Review
 disables auto-merge too. The runner restores auto-merge only after the label and
 review-lane hold are gone. The runner command shim refuses manual merges and
 checks the label before any other pull request mutation. A GitHub rate-limit
-response records its reset time for the repository. Every runner skips GitHub
-calls until then, treats ownership as unknown, and continues its tick.
+response records its `X-RateLimit-Reset` time for the repository. Until then,
+each tick logs `GitHub paused until HH:MM`, runs board reconciliation and comment
+replies, skips code and pull request work, and exits 75.
 
 Ownership is proved only when a branch starts with the agent slug, directly or
 after `agent/` (case-insensitive), by `<slug>.opened-prs`, or by an explicitly

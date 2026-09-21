@@ -399,9 +399,10 @@ disables GitHub native auto-merge and starts no fix. Moving the linked ticket to
 `Valentin Review` or `HT Manager Review` also disables auto-merge. The runner
 restores auto-merge only after the label and review-lane hold are gone. Its
 command shim rejects manual merges and checks the label before any other allowed
-PR mutation. When GitHub reports a rate
-limit, all runners pause repository calls until its reset time. PR ownership
-stays unknown during the pause, and ticks continue.
+PR mutation. When GitHub reports a rate limit, all runners use its
+`X-RateLimit-Reset` header to pause repository calls. A paused tick logs `GitHub
+paused until HH:MM`, completes board reconciliation and comment replies, skips
+code and pull request work, and exits 75.
 
 Two open PRs fill the pickup slots and stop every new claim, including an
 `emergency`. The runner ranks that queue oldest first. A red or pending PR older

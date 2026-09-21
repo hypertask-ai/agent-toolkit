@@ -231,6 +231,8 @@ if [ "$1" = "api" ]; then
   endpoint="$2"
   if [[ "$endpoint" == repos/example/repo/pulls\?state=* ]]; then
     if [ "$scenario" = "rate-limit" ]; then
+      printf 'HTTP/2 403\nX-RateLimit-Reset: %s\n\n{"message":"API rate limit exceeded"}\n' \
+        "${RATE_LIMIT_RESET:-1790000000}"
       printf 'API rate limit exceeded (HTTP 403)\n' >&2
       exit 1
     fi
@@ -665,9 +667,11 @@ PYEOF
 echo 'PASS cache keeps recent merges with the required identity fields'
 
 rate_cache="$TMP/rate-pr-cache"
+rate_reset=1790000123
+rate_clock="$(date -d "@$rate_reset" +%H:%M)"
 : > "$TMP/rate-gh-calls"
 set +e
-AGENT_PR_CACHE_DIR="$rate_cache" GH_CALL_LOG="$TMP/rate-gh-calls" \
+AGENT_PR_CACHE_DIR="$rate_cache" GH_CALL_LOG="$TMP/rate-gh-calls" RATE_LIMIT_RESET="$rate_reset" \
   PR_TEST_SCENARIO=rate-limit _ht_pr_cache_rows example/repo >/dev/null 2>"$TMP/rate-first.err"
 first_rate_rc=$?
 AGENT_PR_CACHE_DIR="$rate_cache" GH_CALL_LOG="$TMP/rate-gh-calls" \
@@ -675,9 +679,11 @@ AGENT_PR_CACHE_DIR="$rate_cache" GH_CALL_LOG="$TMP/rate-gh-calls" \
 second_rate_rc=$?
 set -e
 [[ "$first_rate_rc" = 75 && "$second_rate_rc" = 75 ]]
-[[ "$(wc -l < "$TMP/rate-gh-calls")" = 2 ]]
-[[ -s "$rate_cache/example__repo.json.rate-limit" ]]
-echo 'PASS rate-limit reset is shared and blocks later GitHub calls until reset'
+[[ "$(wc -l < "$TMP/rate-gh-calls")" = 1 ]]
+[[ "$(cat "$rate_cache/example__repo.json.rate-limit")" = "$rate_reset" ]]
+grep -qxF "GitHub paused until $rate_clock" "$TMP/rate-first.err"
+grep -qxF "GitHub paused until $rate_clock" "$TMP/rate-second.err"
+echo 'PASS failing response reset header is shared and blocks later GitHub calls until reset'
 
 orphan_log="$TMP/orphan.log"
 run_gate orphan >/dev/null 2>"$orphan_log"
@@ -736,14 +742,15 @@ rate_log_before="$([ ! -f "$state/dev-1.log" ] || wc -l < "$state/dev-1.log")"
 rate_log_before="${rate_log_before:-0}"
 set +e
 rate_run="$(AGENT_PR_CACHE_DIR="$TMP/tick-rate-cache" PR_TEST_SCENARIO=rate-limit \
-  BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
-  COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1 2>&1)"
+  RATE_LIMIT_RESET="$rate_reset" BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" \
+  PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" \
+  "$ROOT/scripts/agent-board-poll" --dry-run dev-1 2>&1)"
 rate_rc=$?
 set -e
-[[ "$rate_rc" -ne 0 && "$rate_run" == *'cannot determine whether dev-1 owns a pull request'* ]]
+[[ "$rate_rc" = 75 && "$rate_run" != *'cannot determine whether dev-1 owns a pull request'* ]]
 [[ "$rate_run" != *'would pick up HTPR-2'* ]]
-[[ "$(tail -n "+$((rate_log_before + 1))" "$state/dev-1.log" | grep -c '^github rate limited until ' || true)" = 1 ]]
-echo 'PASS unreadable GitHub data fails the PR ownership check closed'
+[[ "$(tail -n "+$((rate_log_before + 1))" "$state/dev-1.log" | grep -cF "GitHub paused until $rate_clock" || true)" = 1 ]]
+echo 'PASS a GitHub pause skips code work and exits 75 without failing the tick'
 
 rm -rf "$state/pr-live-cache"
 set +e
