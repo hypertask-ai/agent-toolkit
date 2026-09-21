@@ -1,1 +1,1 @@
-{"last_output_at":"2026-09-18T10:15:00Z","waiting_on_pr":true,"wait_state":"awaiting-merge"}
+{"status":"running","ref":"AGTE-83","task_id":"pr-712","fix_rounds":1,"started_at":"2026-09-18T10:00:00Z","pid":999999999,"last_output_at":"2026-09-18T10:39:00Z","waiting_on_pr":true,"wait_state":"awaiting-merge"}
