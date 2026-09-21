@@ -64,6 +64,7 @@ command -v htbot >> "$RESOLVED_CAPTURE"
 command -v gh >> "$RESOLVED_CAPTURE"
 hypertask --json status > "$TOKEN_CAPTURE"
 gh pr create --repo example/repo --title test --body test > "$PR_CREATE_OUTPUT"
+cat "$AGENT_OPENED_PRS" > "$PR_OWNERSHIP_CAPTURE"
 printf 'after-pr-create\n' >> "$GH_CAPTURE"
 if gh pr merge 7 > /dev/null 2> "$MANUAL_MERGE_ERROR"; then
   printf '0\n' > "$MANUAL_MERGE_RC"
@@ -142,7 +143,8 @@ run_poll() {
     BOARD_JSON="$TMP/board.json" BOARD_POSTED="$TMP/posted" \
     RESOLVED_CAPTURE="$TMP/resolved" TOKEN_CAPTURE="$TMP/received-token" \
     GH_CAPTURE="$TMP/gh-calls" GH_LABEL_BODY="$TMP/gh-label-body" \
-    PR_CREATE_OUTPUT="$TMP/pr-create-output" MANUAL_MERGE_RC="$TMP/manual-merge.rc" \
+    PR_CREATE_OUTPUT="$TMP/pr-create-output" PR_OWNERSHIP_CAPTURE="$TMP/pr-ownership" \
+    MANUAL_MERGE_RC="$TMP/manual-merge.rc" \
     MANUAL_MERGE_ERROR="$TMP/manual-merge.error" API_MERGE_RC="$TMP/api-merge.rc" \
     API_MERGE_ERROR="$TMP/api-merge.error" GRAPHQL_MERGE_RC="$TMP/graphql-merge.rc" \
     GRAPHQL_MERGE_ERROR="$TMP/graphql-merge.error" PROTECTED_PR_RC="$TMP/protected-pr.rc" \
@@ -176,6 +178,12 @@ assert create < labels < returned
   ok identity-shim-pr-labels 'configured labels use the REST endpoint before pull request creation returns'
 else
   bad identity-shim-pr-labels "calls=$(cat "$TMP/gh-calls") body=$(cat "$TMP/gh-label-body" 2>/dev/null || true)"
+fi
+
+if grep -qxF $'example/repo\t7\tTEST-1' "$TMP/pr-ownership"; then
+  ok identity-shim-pr-ownership 'pull request ownership is durable before the create command returns'
+else
+  bad identity-shim-pr-ownership "opened-prs=$(cat "$TMP/pr-ownership" 2>/dev/null || true)"
 fi
 
 if [ "$(cat "$TMP/manual-merge.rc")" -ne 0 ] \

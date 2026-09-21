@@ -445,10 +445,14 @@ label before any pull request mutation. A GitHub rate-limit response records its
 reset time for the repository. Every runner skips GitHub calls until then, treats
 ownership as unknown, and continues its tick.
 
-Ownership is proved only by `<slug>/` (case-insensitive), `<slug>.opened-prs`, or
-an explicitly configured `GH_LOGIN` that differs from the host `gh` login.
-`dev-2` also recognizes its historical `dev-cursor-2/` and `cursor-dev-2/`
-branches. QA agents recognize only PRs recorded in their own opened-PR ledger.
+Ownership is proved only when a branch starts with the agent slug, directly or
+after `agent/` (case-insensitive), by `<slug>.opened-prs`, or by an explicitly
+configured `GH_LOGIN` that differs from the host `gh` login. Slash, hyphen, and
+underscore separators count without allowing `dev-2` to claim `dev-20`.
+`dev-2` also recognizes its historical `dev-cursor-2` and `cursor-dev-2` names.
+The runner records a PR in the ledger before its successful `gh pr create`
+command returns, so a later watchdog stop cannot orphan it. QA agents recognize
+only PRs recorded in their own opened-PR ledger.
 Board assignment and shared GitHub authorship never transfer PR ownership.
 
 A red or pending PR stops pickup for its first two hours, then remains monitored

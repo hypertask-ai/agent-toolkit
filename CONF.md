@@ -61,7 +61,7 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 | `AGENT_KIND` | `dev`, `qa`, `worker`, or `cli`. |
 | `AGENT_REPO` | Checkout used for build work. Reply-only runs do not require it. |
 | `PR_REPO` | Required `org/name` memory repository, validated by `create-agent.sh`. |
-| `PR_BRANCH_PREFIX` | Deprecated compatibility setting. PR ownership uses `<slug>/` and the runner's opened-PR ledger. |
+| `PR_BRANCH_PREFIX` | Deprecated compatibility setting. PR ownership uses a delimiter-bounded agent slug at the start of the branch or after `agent/`, plus the runner's opened-PR ledger. |
 | `GH_LOGIN` | Optional agent-specific GitHub author login for PR ownership. It is used only when explicitly set and different from the host `gh` login. |
 | `BOARD_ADAPTER` | Adapter loaded by the runner. |
 | `BOARD_ID` | Board id, or comma-separated ids. |

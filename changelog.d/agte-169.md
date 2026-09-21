@@ -1,0 +1,2 @@
+- AGTE-169 records pull request ownership as soon as `gh pr create` succeeds, so watchdog-capped runs keep their PR binding and repair red checks before claiming new work.
+- Agent-named branches now prove ownership across slash, hyphen, and underscore prefix styles without matching another agent's longer slug.
