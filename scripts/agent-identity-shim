@@ -90,6 +90,30 @@ if path.is_file():
 print(json.dumps({"labels": labels}, separators=(",", ":")))
 PYEOF
 }
+if [ "${1:-} ${2:-}" = "run watch" ]; then
+  echo "GitHub polling refused: gh run watch is not allowed in model runs" >&2
+  exit 2
+fi
+if [ "${1:-} ${2:-}" = "pr checks" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "--watch" ]; then
+      echo "GitHub polling refused: gh pr checks --watch is not allowed in model runs" >&2
+      exit 2
+    fi
+  done
+fi
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  interval=""
+  case "${args[$i]}" in
+    --interval) interval="${args[$((i + 1))]:-}" ;;
+    --interval=*) interval="${args[$i]#*=}" ;;
+  esac
+  if [[ "$interval" =~ ^[0-9]+$ ]] && [ "$interval" -lt 90 ]; then
+    echo "GitHub polling refused: intervals must be at least 90 seconds" >&2
+    exit 2
+  fi
+done
 if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then
   output="$("$REAL_GH" "$@")"
   created="$(OUTPUT="$output" python3 - <<'PYEOF'

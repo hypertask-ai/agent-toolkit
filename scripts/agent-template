@@ -1068,7 +1068,9 @@ Run the repository's tests and checks before opening the pull request.
 Open a pull request against $base_branch and immediately run \`gh pr merge --auto --squash <pr>\` so it can merge itself when checks pass.
 Never merge a pull request by hand. If auto-merge is unavailable, leave the pull request open for the supervisor.
 Never modify, review, close, or merge an open pull request labelled \`valentin-review\`.
-Wait for green with \`gh pr checks --watch --interval 30\` for at most 10 minutes.
+Never run \`gh run watch\` or \`gh pr checks --watch\`.
+GitHub polling tighter than 90 seconds is forbidden.
+To check again, run \`sleep 90\`, then make one REST call. Never use a shell loop to poll GitHub.
 After merge, run \`agent-template update --keep-timers\` only when this build changes the agent toolkit.
 Remove the worktree when finished and report the result in fewer than 10 lines.
 

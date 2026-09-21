@@ -4181,6 +4181,15 @@ Do not mention filing, the toolkit board, or any ticket number for the rule. The
     fi
   fi
 
+  if [ "$is_reply_only" = "no" ]; then
+    PROMPT="$PROMPT
+
+GITHUB API SAFETY:
+- Never run \`gh run watch\` or \`gh pr checks --watch\`.
+- GitHub polling tighter than 90 seconds is forbidden.
+- To check again, run \`sleep 90\`, then make one REST call. Never use a shell loop to poll GitHub."
+  fi
+
   # A hard ticket gets two things the default path does not: a stronger model,
   # and an instruction to say what it is about to do before it does it. The
   # plan is the cheapest place to catch a wrong root cause, and it is a comment

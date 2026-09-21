@@ -258,7 +258,11 @@ if [ "$build" = "build started: $build_id" ] \
    && grep -q 'gh pr merge --auto --squash' "$prompt" \
    && grep -q 'Never merge a pull request by hand' "$prompt" \
    && grep -q 'labelled `valentin-review`' "$prompt" \
+   && grep -qF 'Never run `gh run watch` or `gh pr checks --watch`.' "$prompt" \
+   && grep -qF 'GitHub polling tighter than 90 seconds is forbidden.' "$prompt" \
+   && grep -qF 'run `sleep 90`, then make one REST call' "$prompt" \
    && ! grep -q 'merge the green pull request yourself' "$prompt" \
+   && ! grep -qF 'gh pr checks --watch --interval 30' "$prompt" \
    && grep -q 'never edit VERSION or CHANGELOG.md' "$prompt" \
    && grep -q 'change one file' "$prompt" \
    && grep -q -- '--provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session' "$TMP/hax.log" \
