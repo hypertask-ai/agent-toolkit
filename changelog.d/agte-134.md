@@ -1,0 +1,1 @@
+- AGTE-134 requires a board-owner comment before managers stop or manually freeze agents, audits and alarms each approved change, and detects fleet-wide empty-intake freezes after 30 minutes.

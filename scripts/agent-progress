@@ -23,7 +23,6 @@ SCHEMA_VERSION = 1
 WAIT_STATES = {"checks-pending", "awaiting-merge", "blocked"}
 WAIT_SECONDS = 2 * 60 * 60
 ELIGIBLE_SECONDS = 3 * 60 * 60
-MANUAL_SECONDS = 6 * 60 * 60
 TICKET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*-[0-9]+$")
 
 
@@ -485,8 +484,8 @@ def make_findings(row: dict[str, Any], current: dt.datetime) -> list[dict[str, A
     return findings
 
 
-def comment_body(finding: dict[str, Any], manual: bool) -> str:
-    next_step = "Product Bot switched this runner to manual and will keep the existing alert updated." if manual else "Product Bot is monitoring this runner and will update this alert when the reason changes."
+def comment_body(finding: dict[str, Any]) -> str:
+    next_step = "Product Bot is monitoring this runner and will update this alert when the reason changes."
     return (
         f"<p><strong>Decision: {html.escape(finding['runner'])} is stalled.</strong></p>"
         f"<p>Reason: {finding['html_reason']}</p>"
@@ -837,23 +836,6 @@ curl -sf --max-time 15 "https://api.telegram.org/bot${TELEGRAM_HYPERTASK_BOT_TOK
     return True
 
 
-def switch_manual(manager_cli: str, manager_slug: str, slug: str) -> bool:
-    environment = dict(os.environ)
-    environment["AGENT_SLUG"] = manager_slug
-    try:
-        result = subprocess.run(
-            [manager_cli, "mode", "manual", "--runner", slug],
-            capture_output=True, text=True, timeout=30, check=False, env=environment,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        print(f"fleet progress: manual switch failed for {slug}: {error}", file=sys.stderr)
-        return False
-    if result.returncode != 0:
-        print(f"fleet progress: manual switch failed for {slug}: {result.stderr.strip()[:300]}", file=sys.stderr)
-        return False
-    return True
-
-
 def update_analytics(path: Path, active: list[dict[str, Any]]) -> None:
     with locked(path):
         row = load_json(path, {})
@@ -890,10 +872,7 @@ def command_supervise(args: argparse.Namespace) -> int:
         if not isinstance(entries, dict):
             entries = {}
             state["stalls"] = entries
-        manual_runners = state.setdefault("manual_runners", {})
-        if not isinstance(manual_runners, dict):
-            manual_runners = {}
-            state["manual_runners"] = manual_runners
+        state.pop("manual_runners", None)
         active_keys = {finding["key"] for finding in findings}
         for key, entry in list(entries.items()):
             if key in active_keys or not isinstance(entry, dict):
@@ -934,6 +913,8 @@ def command_supervise(args: argparse.Namespace) -> int:
                 "target": ticket_target(finding.get("ticket"), args.toolkit_ticket),
                 "last_seen_at": at,
             })
+            entry.pop("manual_at", None)
+            entry.pop("owner_notified_at", None)
             if finding.get("pr_bug") and not entry.get("bug_ticket"):
                 bug_ticket = file_pr_bug(args.board_cli, finding)
                 if bug_ticket:
@@ -955,14 +936,7 @@ def command_supervise(args: argparse.Namespace) -> int:
             if alarm_line and not entry.get("alarm_telegram_notified_at"):
                 if alarm_telegram_notify(alarm_line):
                     entry["alarm_telegram_notified_at"] = at
-            age = (current - (parse_time(finding["since"]) or current)).total_seconds()
-            runner_manual = manual_runners.setdefault(finding["runner"], {})
-            if age >= MANUAL_SECONDS and not runner_manual.get("manual_at"):
-                if switch_manual(args.manager_cli, args.manager_slug, finding["runner"]):
-                    runner_manual["manual_at"] = at
-            if runner_manual.get("manual_at"):
-                entry["manual_at"] = runner_manual["manual_at"]
-            body = comment_body(finding, bool(runner_manual.get("manual_at")))
+            body = comment_body(finding)
             if body != entry.get("comment_body"):
                 comment_id = str(entry.get("comment_id") or "")
                 if comment_id:
@@ -979,12 +953,6 @@ def command_supervise(args: argparse.Namespace) -> int:
                     entry["notified_at"] = entry["alarm_telegram_notified_at"]
             elif not entry.get("notified_at") and notify(f"[fleet stall] {finding['reason']}"):
                 entry["notified_at"] = at
-            if runner_manual.get("manual_at") and not runner_manual.get("owner_notified_at"):
-                line = f"[fleet manual] {finding['runner']} switched to manual after six hours without progress."
-                if notify(line):
-                    runner_manual["owner_notified_at"] = at
-            if runner_manual.get("owner_notified_at"):
-                entry["owner_notified_at"] = runner_manual["owner_notified_at"]
         state["updated_at"] = at
         atomic_json(state_path, state)
 

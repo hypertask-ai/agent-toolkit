@@ -62,13 +62,18 @@ Manager access is per agent, not per host. Set `MANAGER="on"` only in a trusted
 manager's current-schema conf. `MAINTAINER="on"` includes the manager controls
 and adds the setup commands below. Missing or any other value means off.
 
-- `agent-template ctl start|stop|status <slug>` controls only
+- `agent-template ctl start|status <slug>` controls only
   `agent-board-poll@<slug>.timer` and `.service` for a current-schema conf.
+  Stopping uses `agent-template ctl stop <slug> --owner-request <ticket>`.
 - `agent-template delegate <ticket> <slug> --why "<one line reason>"` uses the
   manager's `BOARD_CLI`, assigns the target agent UUID, and posts the handoff.
-- `agent-template mode manual|auto [--board <id>|--runner <slug>]` changes
-  `CLAIM_UNASSIGNED` for every dev and QA conf on that board, or only the named
-  runner. The manager's board is the default.
+- `agent-template mode manual [--board <id>|--runner <slug>] --owner-request
+  <ticket>` changes `CLAIM_UNASSIGNED` to `no`; `mode auto` uses the same optional
+  scope without an owner request and changes it to `yes`.
+- Stop and manual-mode commands verify that the named ticket is on the affected
+  board and has an owner-authored comment. Every completed change quotes the
+  latest such comment in the action log and posts an owner-mentioned alarm
+  comment on that ticket.
 - `agent-template model <slug> <preset>` accepts `grok-fast`, `glm-flash`, or
   `codex-sol` and writes only that preset's exact `MODEL_CLI` command.
 - `agent-template sections <slug> <list>` writes a comma-separated
@@ -243,13 +248,14 @@ contains the observation and asks agents to take no merge, assignment, or releas
 action. Dev and QA runners skip that label. The watch sends no toast, chat-room
 message, or Telegram message. When a rule recovers, its open alarm moves to `Done`.
 
-The seven rules cover: three hours without a merge while unassigned intake work
+The eight rules cover: three hours without a merge while unassigned intake work
 waits during local daytime; an eligible agent with no completed run for one hour
 and no run in flight; three failed runner ticks in a row; duplicate agent bindings
 to one pull request; host disk use above 85 percent; exhausted GitHub REST
-capacity; and an agent left in manual claiming mode for two hours while
-unassigned intake work waits. A running record counts as in flight while the
-watchdog has refreshed it within that agent's `RUN_STALL_SECONDS` limit. The
+capacity; an agent left in manual claiming mode for two hours while unassigned
+intake work waits; and the whole readable fleet left in manual mode for longer
+than 30 minutes while intake is empty. A running record counts as in flight while
+the watchdog has refreshed it within that agent's `RUN_STALL_SECONDS` limit. The
 one-hour idle-agent rule queues an immediate poll only when eligible work waits
 and no run is in flight. Its alarm, durable rule state, health snapshot, and
 summary log record each start and whether systemd accepted it.
@@ -310,11 +316,10 @@ past two hours; non-zero eligible work without a completed run for three hours;
 three attempts on one ticket with one failure signature; and a build or
 instruction unit ending without a result. A pull request that is red or still
 unmerged after two hours also creates one deduplicated bug in the toolkit Backlog.
-A red-PR bug names every failing check reported by GitHub. After six hours from
-`stalled_since`,
-Product Bot runs `mode manual --runner <slug>` and sends one separate owner
-notification once. `FLEET_STALL_TICKET` selects the toolkit ticket used when a
-stall has no runner ticket and defaults to `AGTE-37`.
+A red-PR bug names every failing check reported by GitHub. Stalls remain reports
+and alarms; Product Bot never changes a runner to manual mode without a board-owner
+request. `FLEET_STALL_TICKET` selects the toolkit ticket used when a stall has no
+runner ticket and defaults to `AGTE-37`.
 
 ## Quiet ticket traffic
 

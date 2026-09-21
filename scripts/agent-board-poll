@@ -4196,9 +4196,10 @@ $PROMPT"
     PROMPT="$PROMPT
 
 MANAGER COMMANDS:
-- \`agent-template ctl start|stop|status <slug>\`. Example: "stop dev 1" runs \`agent-template ctl stop dev-1\`.
+- \`agent-template ctl start|status <slug>\`.
+- \`agent-template ctl stop <slug> --owner-request <ticket>\` only when that ticket has the board owner's request in a comment. Example: an owner comment on HTPR-6550 saying "stop dev 1" runs \`agent-template ctl stop dev-1 --owner-request HTPR-6550\`.
 - \`agent-template delegate <ticket> <slug> --why \"<one line reason>\"\`. Example: "give HTPR-6550 to dev 2" runs \`agent-template delegate HTPR-6550 dev-2 --why \"Take the implementation\"\`.
-- \`agent-template mode manual|auto [--board <id>|--runner <slug>]\`. Example: "switch the product board to manual" runs \`agent-template mode manual\`.
+- \`agent-template mode manual [--board <id>|--runner <slug>] --owner-request <ticket>\` requires the same owner-comment approval. \`agent-template mode auto [--board <id>|--runner <slug>]\` does not. Example: an owner request on HTPR-6550 to switch the product board to manual runs \`agent-template mode manual --owner-request HTPR-6550\`.
 - \`agent-template model <slug> <preset>\`. Presets are \`grok-fast\`, \`glm-flash\`, and \`codex-sol\`. Example: "put dev 2 on grok fast" runs \`agent-template model dev-2 grok-fast\`.
 - \`agent-template quiet on|off [<slug>|all]\`. Example: "quiet off for qa-1" runs \`agent-template quiet off qa-1\`.
 - \`agent-template feedback --as <slug> --kind bug|change|idea --what \"<summary>\" --got \"<current behavior or context>\" --expected \"<desired behavior>\"\`. Example: "file a toolkit ticket: add a setup report" runs \`agent-template feedback --as $SLUG --kind idea --what \"Add a setup report\" --got \"No setup report exists\" --expected \"Provide a setup report\"\`.

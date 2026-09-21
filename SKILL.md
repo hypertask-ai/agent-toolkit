@@ -641,18 +641,24 @@ them. All other agents are refused and do not receive them in runner or chat
 prompts.
 
 ```sh
-agent-template ctl start|stop|status <slug>
+agent-template ctl start|status <slug>
+agent-template ctl stop <slug> --owner-request <ticket>
 agent-template delegate <ticket> <slug> --why "<one line reason>"
-agent-template mode manual|auto [--board <id>|--runner <slug>]
+agent-template mode manual [--board <id>|--runner <slug>] --owner-request <ticket>
+agent-template mode auto [--board <id>|--runner <slug>]
 agent-template model <slug> <preset>
 agent-template sections <slug> <list>
 agent-template quiet on|off [<slug>|all]
 agent-template feedback --as <slug> --kind bug|change|idea --what "<summary>" --got "<context>" --expected "<result>"
 ```
 
-`mode` sets `CLAIM_UNASSIGNED` to `no` for manual or `yes` for auto on every
-dev and QA conf matching the selected board. An omitted board uses the
-manager's `BOARD_ID`. `model` accepts only the named `grok-fast`, `glm-flash`,
+Stopping a runner or setting manual mode requires `--owner-request` naming a
+ticket on the affected board with an owner-authored comment that requests the
+change. Each approved change quotes the latest such comment in the local action
+log and posts an owner-mentioned alarm comment on the ticket. `mode` sets
+`CLAIM_UNASSIGNED` to `no` for manual or `yes` for auto on every dev and QA conf
+matching the selected board. An omitted board uses the manager's `BOARD_ID`.
+`model` accepts only the named `grok-fast`, `glm-flash`,
 and `codex-sol` presets and writes their exact template policy command, never text
 supplied as a command. `sections` sets `WATCH_SECTIONS` to a comma-separated
 list, or `*`, for one current agent. `quiet` sets `QUIET` for one current agent
