@@ -9,7 +9,7 @@ _hypertask_base_pr_gate() (
   adapter_pr_gate "$@"
 )
 
-adapter_pr_gate() {
+_hypertask_checked_pr_gate() {
   local rc
   _hypertask_base_pr_gate "$@" && return 0
   rc=$?
@@ -111,10 +111,7 @@ adapter_pr_gate() (
   root="${CORE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}"
   state_dir="$(dirname "${opened_prs:-${6%/*}/none}")"
   monitor="$state_dir/$slug.monitored-prs.json"
-  # This wrapper runs in a subshell, so restoring the adapter implementation
-  # here cannot replace the wrapper for the next call.
-  . "$root/adapters/hypertask/adapter.sh"
-  if rows="$(adapter_pr_gate "$@")"; then
+  if rows="$(CORE_ROOT="$root" _hypertask_checked_pr_gate "$@")"; then
     rc=0
   else
     rc=$?
