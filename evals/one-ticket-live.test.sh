@@ -34,7 +34,10 @@ if [ "${1:-} ${2:-}" = "task create" ]; then
   exit 0
 fi
 if [ "${1:-}" = "--json" ] && [ "${2:-} ${3:-}" = "task get" ]; then
-  printf '{"task":{"ticketNumber":"%s","projectId":"15","section":"Bugs","assignees":[{"agent":{"id":"agent-1"}}]}}\n' "${4:-HTPR-1}"
+  ref="${4:-HTPR-1}"
+  index="${ref##*-}"
+  printf '{"task":{"ticketNumber":"%s","title":"PR ticket","projectId":"15","uniqueIndex":"%s","section":"%s","assignees":[{"agent":{"id":"agent-1"}}]}}\n' \
+    "$ref" "$index" "${TASK_SECTION:-Bugs}"
 fi
 if [ "${1:-} ${2:-}" = "task move" ] && [ "${MOVE_FAIL:-no}" = "yes" ]; then
   exit 1
@@ -314,7 +317,7 @@ elif [[ "$url" == *'/mcp/tasks?'* ]]; then
   fi
   emergency_labels='[{"name":"emergency"}]'
   [ "${BOARD_TEST_SCENARIO:-}" != "no-emergency" ] || emergency_labels='[]'
-  ticket_section='Bugs'
+  ticket_section="${API_TASK_SECTION:-Bugs}"
   [ "${PR_TEST_SCENARIO:-}" != "qa-passed" ] || ticket_section='Done'
   [ "${BOARD_TEST_SCENARIO:-}" != "blocked" ] || ticket_section='Agent Blocked (Infra)'
   task1_assignees='[{"agent":{"id":"agent-1"}}]'
@@ -761,6 +764,8 @@ echo 'PASS one red PR starts only its structured repair path'
 
 run_actual() {
   local scenario="$1" board_scenario="${2:-no-emergency}"
+  local -a runner_args=(--once)
+  [ "${EXACT_TICKET:-no}" != yes ] || runner_args+=(--ticket HTPR-1)
   AGENT_PR_CACHE_DIR="$TMP/actual-pr-cache-$scenario" PR_TEST_SCENARIO="$scenario" \
     BOARD_TEST_SCENARIO="$board_scenario" RUN_COOLDOWN_SECONDS=0 \
     HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" \
@@ -768,8 +773,15 @@ run_actual() {
     WORKER_LOG="$TMP/worker-prompts" REVIEWER_LOG="$TMP/reviewer-prompts" \
     GH_CALL_LOG="$TMP/gh-calls" ACTION_LOG="$TMP/actions" UNASSIGNED_MARKER="$TMP/unassigned" \
     SECOND_OPINION_RESULT="${SECOND_OPINION_RESULT:-}" WORKER_COMMIT="${WORKER_COMMIT:-no}" \
-    WORKER_EXIT="${WORKER_EXIT:-0}" \
-    "$ROOT/scripts/agent-board-poll" --once dev-1 >/dev/null
+    WORKER_EXIT="${WORKER_EXIT:-0}" TASK_SECTION="${TASK_SECTION:-}" \
+    API_TASK_SECTION="${API_TASK_SECTION:-}" \
+    "$ROOT/scripts/agent-board-poll" "${runner_args[@]}" dev-1 >/dev/null
+}
+
+seed_unfixable_release() {
+  mkdir -p "$state/run-records"
+  printf '%s\n' '{"fix_rounds":2,"second_opinion":"not fixable here because the repository secret is owner-only.","second_opinion_round":2}' \
+    > "$state/run-records/dev-1-HTPR-1.json"
 }
 
 for hold_case in blocked human owner-hold; do
@@ -846,10 +858,32 @@ echo 'PASS board 15 releases use its available manager lane'
 rm -rf "$state/run-records" "$state/pr-live-cache"
 rm -f "$state/dev-1.released-prs" "$state/dev-1.runs" "$TMP/board-comments" \
   "$TMP/worker-prompts" "$TMP/reviewer-prompts" "$TMP/actions" "$TMP/unassigned"
-run_actual red
-run_actual red
-MOVE_FAIL=yes SECOND_OPINION_RESULT='not fixable here because the repository secret is owner-only.' run_actual red
-grep -qF 'Second opinion: not fixable here because the repository secret is owner-only.' "$TMP/board-comments"
+seed_unfixable_release
+EXACT_TICKET=yes TASK_SECTION=Done API_TASK_SECTION=Done run_actual red
+! grep -qF 'board task move HTPR-1' "$TMP/actions"
+grep -qF 'board task unassign HTPR-1 --assignee agent-1' "$TMP/actions"
+grep -qF 'gh pr close 1' "$TMP/actions"
+[[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "1" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.released-prs")" = yes ]]
+grep -qF 'PR release skipped move for HTPR-1: ticket is already in Done' "$state/dev-1.log"
+echo 'PASS a ticket already in Done skips its release move and clears the PR binding'
+
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$state/dev-1.released-prs" "$state/dev-1.runs" "$TMP/board-comments" \
+  "$TMP/worker-prompts" "$TMP/reviewer-prompts" "$TMP/actions" "$TMP/unassigned"
+seed_unfixable_release
+EXACT_TICKET=yes TASK_SECTION='Owner Review' run_actual red
+! grep -qF 'board task move HTPR-1' "$TMP/actions"
+grep -qF 'board task unassign HTPR-1 --assignee agent-1' "$TMP/actions"
+[[ "$(awk -F '\t' '$1 == "example/repo" && $2 == "1" && $3 == "HTPR-1" { print "yes" }' "$state/dev-1.released-prs")" = yes ]]
+grep -qF 'PR release skipped move for HTPR-1: ticket was moved by a human from Bugs to Owner Review' "$state/dev-1.log"
+echo 'PASS a human-moved ticket skips its release move and clears the PR binding'
+
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$state/dev-1.released-prs" "$state/dev-1.runs" "$TMP/board-comments" \
+  "$TMP/worker-prompts" "$TMP/reviewer-prompts" "$TMP/actions" "$TMP/unassigned"
+printf '%s\n' '{"boards":{"15":{"ref":"AGTE-999"}}}' > "$state/board-health.json"
+seed_unfixable_release
+EXACT_TICKET=yes MOVE_FAIL=yes run_actual red
 grep -qF 'gh pr comment 1' "$TMP/actions"
 [[ "$(grep -cF 'board task move HTPR-1 --section HT Manager Review' "$TMP/actions")" = 2 ]]
 grep -qF 'board task unassign HTPR-1 --assignee agent-1' "$TMP/actions"
@@ -858,7 +892,10 @@ grep -qF 'PR release could not move HTPR-1 to HT Manager Review; agent unbound a
 ! grep -qF 'release of PR #1 failed; binding remains' "$state/dev-1.log"
 ! grep -qF 'gh pr close 1' "$TMP/actions"
 [ ! -e "$state/dev-1.blocked" ]
-echo 'PASS failed PR release move retains the verdict and clears both agent bindings'
+failure_comment="$(grep -F 'PR release could not move' "$TMP/board-comments")"
+[[ "$failure_comment" == *'<a href="https://app.hypertask.ai/detail/project-15/1">HTPR-1 PR ticket</a>'* ]]
+printf '%s' "$failure_comment" | python3 "$ROOT/adapters/hypertask/plain-language/check-comment.py"
+echo 'PASS failed PR release move retains the verdict, clears both bindings, and links its health comment'
 
 rm -rf "$state/run-records" "$state/pr-live-cache"
 rm -f "$state/dev-1.released-prs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/actions"
@@ -922,4 +959,4 @@ orphan_tick_log="$(tail -n "+$((orphan_log_before + 1))" "$state/dev-1.log")"
 [[ -s "$TMP/worker-prompts" ]]
 echo 'PASS dev tick logs an orphan once, ignores it, and claims work'
 
-echo '55 one-ticket-until-live checks passed'
+echo '57 one-ticket-until-live checks passed'

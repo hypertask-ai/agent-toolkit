@@ -254,8 +254,8 @@ fi
 run_case Done '[]' '{"comments":[]}' \
   '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' yes
 if [ "$(grep -cFx 'move TEST-1 Done' "$TMP/board.log")" -eq 2 ] \
-   && grep -qF 'health <p><strong>Decision: QA lifecycle could not move TEST-1 to Done after two attempts.</strong></p><p>Next: Check the run log and restore the board move.</p>' "$TMP/board.log"; then
-  ok qa-move-retry-health 'a failed QA move retries once and reports Board health'
+   && grep -qF 'health <p><strong>Decision: QA lifecycle could not move <a href="https://app.hypertask.ai/detail/project-15/1">TEST-1 Verify checkout</a> to Done after two attempts.</strong></p><p>Next: Check the run log and restore the board move.</p>' "$TMP/board.log"; then
+  ok qa-move-retry-health 'a failed QA move retries once and reports Board health with a linked ticket'
 else
   bad qa-move-retry-health "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
 fi
