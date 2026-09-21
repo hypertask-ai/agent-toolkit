@@ -33,20 +33,18 @@ printf '[]\n'
 EOF
 cat > "$TMP/bin/model" <<'EOF'
 #!/usr/bin/env bash
+prompt="${!#}"
 printf 'model ran\n' >> "$MOCK_MODEL_LOG"
-printf '%s\n--- prompt ---\n' "${!#}" >> "${MOCK_PROMPT_LOG:-/dev/null}"
-case "$MOCK_VERDICT" in
+printf '%s\n' "$prompt" >> "${MOCK_PROMPT_LOG:-/dev/null}"
+verdict="$MOCK_VERDICT"
+if [[ "$prompt" == *'QA VERDICT RETRY:'* ]]; then
+  verdict="${MOCK_RETRY_VERDICT:-$MOCK_VERDICT}"
+fi
+case "$verdict" in
   Done) text='<p><strong>Done: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>' ;;
   Handoff) text='<p><strong>Handoff: Dev must fix the failing payment step.</strong></p><p>Next: Fix the payment step.</p>' ;;
   Question) text='<p><strong>Question: QA needs test credentials.</strong></p><p>Can the manager provide them?</p>' ;;
-  MissingThenDone)
-    if [ "$(wc -l < "$MOCK_MODEL_LOG")" -eq 1 ]; then
-      text='<p><strong>Decision: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>'
-    else
-      text='<p><strong>Done: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>'
-    fi
-    ;;
-  Missing) text='<p><strong>Decision: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>' ;;
+  Unmarked) text='<p><strong>QA passed every acceptance step.</strong></p><p>Ready to release.</p>' ;;
 esac
 "$AGENT_BOARD_CLI" comment add TEST-1 --text "$text" >/dev/null
 EOF
@@ -128,7 +126,7 @@ FLEET_PROGRESS_SUPERVISOR="off"
 EOF
 
 run_case() {
-  local verdict="$1" labels="$2" comments="$3" assignees move_fail="${5:-no}"
+  local verdict="$1" labels="$2" comments="$3" assignees move_fail="${5:-no}" retry_verdict="${6:-}"
   if [ "$#" -ge 4 ]; then
     assignees="$4"
   else
@@ -138,18 +136,21 @@ run_case() {
   if [ "$move_fail" = "yes" ]; then
     printf '%s\n' '{"boards":{"15":{"ref":"BOARD-HEALTH"}}}' > "$TMP/state/agent-board-poll/board-health.json"
   fi
-  : > "$TMP/board.log"; : > "$TMP/model.log"; : > "$TMP/prompts.log"
+  : > "$TMP/board.log"; : > "$TMP/model.log"; : > "$TMP/prompt.log"
   cat > "$TMP/tasks.json" <<EOF
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"QA","title":"Verify checkout","description":"Test every acceptance step","assignees":$assignees,"labels":$labels,"commentCount":1}]}
 EOF
   printf '%s\n' "$comments" > "$TMP/comments.json"
+  set +e
   env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
     HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT="$verdict" \
-    MOCK_MOVE_FAIL="$move_fail" MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
-    MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
-    MOCK_PROMPT_LOG="$TMP/prompts.log" \
-    "$ROOT/scripts/agent-board-poll" --once qa-runner > "$TMP/out" 2>&1 || true
+    MOCK_RETRY_VERDICT="$retry_verdict" MOCK_MOVE_FAIL="$move_fail" \
+    MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
+    MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" MOCK_PROMPT_LOG="$TMP/prompt.log" \
+    "$ROOT/scripts/agent-board-poll" --once qa-runner > "$TMP/out" 2>&1
+  printf '%s\n' "$?" > "$TMP/exit"
+  set -e
 }
 
 run_case Done '[]' '{"comments":[]}'
@@ -159,6 +160,11 @@ if grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
 else
   bad qa-pass-fallback-move "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
 fi
+if grep -qF "MANDATORY: your final verdict comment's plain text must start with exactly one of" "$TMP/prompt.log"; then
+  ok qa-prompt-requires-marker 'the QA prompt makes a verdict marker mandatory'
+else
+  bad qa-prompt-requires-marker "prompt=$(cat "$TMP/prompt.log")"
+fi
 if [ -x "$AGENT_IDENTITY_SHIM_DIR/qa-runner/hypertask" ] \
    && [ ! -e "$XDG_RUNTIME_DIR/agent-identity-shims/qa-runner/hypertask" ]; then
   ok qa-identity-shim-isolated 'the QA runner cannot collide with host identity shims'
@@ -166,27 +172,28 @@ else
   bad qa-identity-shim-isolated 'the QA eval wrote its identity shim outside the private directory'
 fi
 
-run_case MissingThenDone '[]' '{"comments":[]}'
-if [ "$(wc -l < "$TMP/model.log")" -eq 2 ] \
-   && grep -qF 'The verdict marker is mandatory' "$TMP/prompts.log" \
-   && grep -qF 'QA VERDICT RETRY:' "$TMP/prompts.log" \
+run_case Unmarked '[]' '{"comments":[]}' \
+  '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' no Done
+if [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 2 ] \
    && grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
-   && ! grep -qF 'exit=65' "$TMP/state/agent-board-poll/qa-runner.log"; then
-  ok qa-missing-marker-retry 'an unmarked response gets one retry and a marked retry completes'
+   && ! grep -qF 'Agent Blocked (Infra)' "$TMP/board.log" \
+   && ! grep -qF 'exited 65' "$TMP/out" \
+   && grep -qF 'QA verdict retry for TEST-1 returned a marked verdict' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-unmarked-retry-pass 'an unmarked response gets one retry and its marked verdict completes'
 else
-  bad qa-missing-marker-retry "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+  bad qa-unmarked-retry-pass "exit=$(cat "$TMP/exit") board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 
-printf 'QA_BLOCKED_SECTION="HT Manager Review"\n' >> "$TMP/config/qa-runner.conf"
-run_case Missing '[]' '{"comments":[]}'
-sed -i '/^QA_BLOCKED_SECTION=/d' "$TMP/config/qa-runner.conf"
-if [ "$(wc -l < "$TMP/model.log")" -eq 2 ] \
-   && grep -qF 'run FAILED TEST-1 exit=65' "$TMP/state/agent-board-poll/qa-runner.log" \
+run_case Unmarked '[]' '{"comments":[]}' \
+  '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' no Unmarked
+if [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 2 ] \
    && grep -qxF 'move TEST-1 QA' "$TMP/board.log" \
-   && ! grep -qF 'move TEST-1 HT Manager Review' "$TMP/board.log"; then
-  ok qa-missing-marker-stays-in-qa 'one failed retry exits 65 without parking the ticket in manager review'
+   && ! grep -qF 'Agent Blocked (Infra)' "$TMP/board.log" \
+   && grep -qF 'exited 65' "$TMP/out" \
+   && grep -qF 'no verdict marker after one retry' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-unmarked-retry-fails-in-qa 'two unmarked responses fail once without entering a human lane'
 else
-  bad qa-missing-marker-stays-in-qa "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+  bad qa-unmarked-retry-fails-in-qa "exit=$(cat "$TMP/exit") board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 
 run_case Handoff '[]' '{"comments":[]}'

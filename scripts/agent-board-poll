@@ -1731,6 +1731,20 @@ PYEOF
   fi
 }
 
+qa_latest_posted_comment() {
+  local ref="$1" task_id="$2" board="$3" ids comments
+  ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
+  [ -n "$ids" ] || return 0
+  comments="$(adapter_ticket_comments "$TOKEN_FILE" "$task_id" "$board" 2>>"$LOG" || printf '[]')"
+  COMMENTS="$comments" IDS="$ids" python3 -c '
+import json, os
+ids = set(os.environ["IDS"].split())
+rows = [row for row in json.loads(os.environ["COMMENTS"]) if str(row.get("id") or "") in ids]
+if rows:
+    print(json.dumps(max(rows, key=lambda row: (row.get("createdAt") or "", row.get("id") or 0))))
+'
+}
+
 run_verdict_marker() {
   local ref="$1" task_id="$2" board="$3" ids comments
   ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
@@ -4071,6 +4085,7 @@ be true for a different customer? Yes is a rule, no is a fact."
     PROMPT="$PROMPT
 
 QA VERDICT CONTRACT:
+- MANDATORY: your final verdict comment's plain text must start with exactly one of \`Done:\`, \`Handoff:\`, or \`Question:\`.
 - PASS: post exactly one \`Done:\` comment, then move $ref to \`Done\`.
 - FAIL: post exactly one \`Handoff:\` comment whose single line names the failing step, then move $ref to \`$qa_fail_target\`. The runner clears every assignee.
 - CANNOT TEST: post exactly one \`Question:\` comment naming what is needed, then ${qa_blocked_target:+move $ref to \`$qa_blocked_target\`}${qa_blocked_target:-leave it in place because this board has no manager review column}.
@@ -4517,6 +4532,7 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
   merged_pr_outcome="no"
   merged_pr_url=""
   run_verdict=""
+  qa_missing_verdict="no"
   if [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ] && declare -F adapter_open_pr_numbers >/dev/null 2>&1; then
     OPEN_PRS_BEFORE="$(adapter_open_pr_numbers "$ref" 2>>"$LOG" || true)"
   fi
@@ -4835,32 +4851,102 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
       "$run_started_at" "$RUN_OUTPUT" "$WATCHDOG_REASON"
   else
   if [ "$quota_exhausted" = "no" ] && [ "$AGENT_KIND" = "qa" ] && [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
-    qa_posted_ids="$(awk -v ref="$ref" '$1 == ref { print $2 }' "$POSTED")"
-    if [ -z "$qa_posted_ids" ]; then
-      printf 'QA run ended without one verdict comment\n' >> "$ERRFILE"
-      [ "$rc" -ne 0 ] || rc=65
-      log "QA lifecycle failed for $ref: run ended without one verdict comment"
-    else
-      qa_comments="$(adapter_ticket_comments "$TOKEN_FILE" "$task_id" "$board" 2>>"$LOG" || printf '[]')"
-      qa_comment="$(COMMENTS="$qa_comments" IDS="$qa_posted_ids" python3 -c '
-import json, os
-ids = set(os.environ["IDS"].split())
-rows = [row for row in json.loads(os.environ["COMMENTS"]) if str(row.get("id") or "") in ids]
-if rows:
-    print(json.dumps(max(rows, key=lambda row: (row.get("createdAt") or "", row.get("id") or 0))))
-')"
-      qa_info="$(qa_verdict_info "$qa_comment")"
-      if [ -z "$qa_info" ]; then
-        printf 'QA verdict comment must start with Done:, Handoff:, or Question:\n' >> "$ERRFILE"
-        [ "$rc" -ne 0 ] || rc=65
-        log "QA lifecycle failed for $ref: posted comment had no QA verdict marker"
+    qa_comment="$(qa_latest_posted_comment "$ref" "$task_id" "$board")"
+    qa_info="$(qa_verdict_info "$qa_comment")"
+    qa_retried="no"
+    if [ -z "$qa_info" ] && [ "$worker_exited" = "yes" ]; then
+      qa_retried="yes"
+      qa_retry_output="$RUN_OUTPUT_DIR/$SLUG-$ref-qa-verdict-retry.log"
+      qa_retry_err="$RUN_OUTPUT_DIR/$SLUG-$ref-qa-verdict-retry.err"
+      register_run_temp "$qa_retry_output"
+      register_run_temp "$qa_retry_err"
+      : > "$qa_retry_output"
+      : > "$qa_retry_err"
+      QA_RETRY_PROMPT="$PROMPT
+
+QA VERDICT RETRY:
+Your first response did not include the mandatory verdict marker. This is the only retry. Preserve the verdict's meaning and post exactly one final HTML comment whose plain text starts with exactly one of \`Done:\`, \`Handoff:\`, or \`Question:\`. Perform the matching board move from the QA verdict contract. Do not post an unmarked comment.
+
+First response:
+${qa_comment:-No ticket comment was posted.}"
+      log "QA verdict marker missing for $ref; retrying the model once"
+      if declare -F adapter_run_activity >/dev/null 2>&1; then
+        adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" action "retrying missing QA verdict marker for $ref"
+      fi
+      QA_RETRY_PID_FILE="$RUN_OUTPUT_DIR/$SLUG-$ref-qa-verdict-retry.pid"
+      QA_RETRY_ACTIVITY_DIR="$(mktemp -d "$RUN_OUTPUT_DIR/$SLUG-$ref-qa-verdict-retry.activity.XXXXXX")"
+      register_run_temp "$QA_RETRY_PID_FILE"
+      register_run_temp "$QA_RETRY_ACTIVITY_DIR"
+      rm -f "$QA_RETRY_PID_FILE"
+      (
+        if [ -n "$RUN_DIR" ] && [ -d "$RUN_DIR" ]; then cd "$RUN_DIR"; fi
+        export PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}"
+        export TMPDIR="$QA_RETRY_ACTIVITY_DIR"
+        export AGENT_NAME AGENT_ID AGENT_BOARD_CLI="$BOARD_CLI"
+        export AGENT_QA_MOVE=yes
+        export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
+        export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
+        export AGENT_OPENED_PRS="$OPENED_PRS"
+        export AGENT_HELD_COMMENT_FILE="$QA_RETRY_ACTIVITY_DIR/held-comment.html"
+        export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
+        export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
+        export AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER"
+        export AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI"
+        exec setsid --wait bash -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' \
+          bash "$QA_RETRY_PID_FILE" "${MODEL_ARGV[@]}" "$QA_RETRY_PROMPT"
+      ) >>"$qa_retry_output" 2>"$qa_retry_err" &
+      qa_retry_wait_pid=$!
+      ACTIVE_MODEL_WAIT_PID="$qa_retry_wait_pid"
+      ACTIVE_MODEL_PROCESS_GROUP="$qa_retry_wait_pid"
+      for _ in $(seq 1 100); do
+        [ ! -s "$QA_RETRY_PID_FILE" ] || break
+        kill -0 "$qa_retry_wait_pid" 2>/dev/null || break
+        sleep 0.05
+      done
+      if [ -s "$QA_RETRY_PID_FILE" ]; then
+        read -r qa_retry_process_group < "$QA_RETRY_PID_FILE"
       else
-        IFS=$'\t' read -r qa_marker _ _ <<< "$qa_info"
-        run_verdict="$qa_marker"
+        qa_retry_process_group="$qa_retry_wait_pid"
+      fi
+      ACTIVE_MODEL_WAIT_PID="$qa_retry_wait_pid"
+      ACTIVE_MODEL_PROCESS_GROUP="$qa_retry_process_group"
+      if watch_model_process "$qa_retry_wait_pid" "$qa_retry_process_group" "$run_record" \
+          "$qa_retry_output" "$qa_retry_err" "$ref" "$QA_RETRY_ACTIVITY_DIR"; then
+        qa_retry_rc=0
+      else
+        qa_retry_rc=$?
+      fi
+      ACTIVE_MODEL_WAIT_PID=""
+      ACTIVE_MODEL_PROCESS_GROUP=""
+      rm -f "$QA_RETRY_PID_FILE"
+      cat "$qa_retry_output" >> "$RUN_OUTPUT"
+      cat "$qa_retry_output" >> "$LOG"
+      cat "$qa_retry_err" >> "$ERRFILE"
+      cat "$qa_retry_err" >> "$LOG"
+      qa_comment="$(qa_latest_posted_comment "$ref" "$task_id" "$board")"
+      qa_info="$(qa_verdict_info "$qa_comment")"
+      if [ -n "$qa_info" ]; then
+        rc=0
+        log "QA verdict retry for $ref returned a marked verdict"
+      else
+        log "QA verdict retry for $ref still had no verdict marker (model exit $qa_retry_rc)"
+      fi
+    fi
+    if [ -z "$qa_info" ]; then
+      printf 'QA verdict comment must start with Done:, Handoff:, or Question: after one retry\n' >> "$ERRFILE"
+      rc=65
+      qa_missing_verdict="yes"
+      log "QA lifecycle failed for $ref: no verdict marker after one retry"
+    else
+      IFS=$'\t' read -r qa_marker _ _ <<< "$qa_info"
+      run_verdict="$qa_marker"
+      if [ "$qa_retried" = "yes" ]; then
+        log "QA outcome $ref verdict=$qa_marker after-retry=yes"
+      else
         log "QA outcome $ref verdict=$qa_marker"
-        if ! qa_apply_verdict "$row" "$qa_marker" "run fallback"; then
-          [ "$rc" -ne 0 ] || rc=74
-        fi
+      fi
+      if ! qa_apply_verdict "$row" "$qa_marker" "run fallback"; then
+        [ "$rc" -ne 0 ] || rc=74
       fi
     fi
   fi
@@ -4910,6 +4996,12 @@ if rows:
     elif [ "$merged_pr_outcome" = "yes" ]; then
       run_record_status="done"
       if ! move_ticket_or_report "$ref" "$DONE_SECTION" "$board" "merged PR outcome"; then
+        rc=74
+        run_record_status="move-failed"
+      fi
+    elif [ "$qa_missing_verdict" = "yes" ]; then
+      run_record_status="qa-missing-verdict"
+      if ! move_ticket_or_report "$ref" "$origin_section" "$board" "missing QA verdict marker"; then
         rc=74
         run_record_status="move-failed"
       fi
