@@ -2351,21 +2351,18 @@ print(",".join(ids))')" || {
 
 # ---------- one ticket until live ----------
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
-# Prints one JSON object per pull request still owned by this agent, open PRs
-# before merged PRs awaiting QA. Ownership comes only from the <slug>/ branch
-# prefix (plus dev-2's two historical aliases), the opened-PR ledger, or an
-# explicitly configured GH_LOGIN that differs from the host gh identity.
+# Prints one JSON object per open pull request still owned by this agent.
+# Ownership comes only from the <slug>/ branch prefix (plus dev-2's two
+# historical aliases), the opened-PR ledger, or an explicitly configured
+# GH_LOGIN that differs from the host gh identity. Merged and closed pull
+# requests never become binding candidates.
 #
 # An open PR with no owner among the living conf files is ignored and logged
 # once per UTC day through stderr, which core appends to the tick log.
-#
-# LIVE is merged + the base contains the merge commit + the newest Production
-# deployment created after the merge succeeded and contains that commit. Repos
-# with no deployment records use merged + contained as the documented fallback.
 adapter_pr_gate() (
   local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
   local config_dir="${7:-}" opened_prs="${8:-}" repo="${PR_REPO:-}"
-  local state_dir released_prs tmp pr number live branch marker today owner_conf owner_slug one board_json pr_state
+  local state_dir released_prs tmp pr number branch marker today owner_conf owner_slug one board_json pr_state
   local offset path returned github_login host_login cache_rc agent_role rc
 
   [ -n "$repo" ] || return 1
@@ -2389,7 +2386,7 @@ import json, sys
 print(json.dumps([row for row in json.load(open(sys.argv[1]))
                   if str(row.get("state") or "").upper() == "OPEN"]))
 PYEOF
-  if python3 - "$tmp/prs.json" <<'PYEOF'
+  if python3 - "$tmp/open.json" <<'PYEOF'
 import json, sys
 raise SystemExit(0 if not json.load(open(sys.argv[1], encoding="utf-8")) else 1)
 PYEOF
@@ -2457,7 +2454,7 @@ PYEOF
   done
 
   SLUG="$slug" REPO="$repo" OPENED_PRS="$opened_prs" RELEASED_PRS="$released_prs" BOARDS="$board_ids" \
-    python3 - "$tmp/prs.json" "$tmp/owners.tsv" "$tmp/tasks.jsonl" <<'PYEOF' > "$tmp/candidates.jsonl"
+    python3 - "$tmp/open.json" "$tmp/owners.tsv" "$tmp/tasks.jsonl" <<'PYEOF' > "$tmp/candidates.jsonl"
 import json, os, re, sys
 prs_path, owners_path, tasks_path = sys.argv[1:]
 slug = os.environ["SLUG"].casefold()
@@ -2513,14 +2510,14 @@ with open(prs_path, encoding="utf-8") as handle:
     prs = json.load(handle)
 current = next((owner for owner in owners if owner[0] == slug and owner[4]),
                next((owner for owner in owners if owner[0] == slug), (slug, "", "", "", "")))
-for pr in sorted(prs, key=lambda row: (str(row.get("state") or "").upper() != "OPEN", row.get("createdAt") or "")):
+for pr in sorted(prs, key=lambda row: row.get("createdAt") or ""):
     state = str(pr.get("state") or "").upper()
     number = str(pr.get("number"))
-    if state not in ("OPEN", "MERGED") or number in released:
+    if state != "OPEN" or number in released:
         continue
     branch = str(pr.get("headRefName") or "").casefold()
     ref = title_ticket(pr)
-    if ref in released_tickets or (state == "MERGED" and ref not in tasks):
+    if ref in released_tickets:
         continue
     author = pr.get("author") or {}
     author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
@@ -2603,11 +2600,18 @@ import json, os, sys
 row = json.loads(os.environ["ROW"])
 sys.exit(0 if "valentin-review" in row.get("prLabels", []) else 1)
 '; then
+      if pr_state="$(_ht_gh "$repo" pr view "$number" --repo "$repo" --json state --jq .state 2>/dev/null)"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      [ "$rc" -eq 0 ] || { _ht_github_paused "$repo" && return 75; return 1; }
+      [ "$pr_state" = "OPEN" ] || continue
       PR="$pr" python3 -c '
 import json, os
 pr = json.loads(os.environ["PR"])
 print(json.dumps({"action":"wait", "state":"protected", "wait_reason":"label valentin-review",
-                  "definition":"pull request labelled valentin-review is manager-only",
+                  "definition":"open pull request labelled valentin-review is manager-only",
                   "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
                   "title":pr["title"], "branch":pr["headRefName"], "since":pr["createdAt"],
                   "task_id":pr.get("task_id") or "", "board":pr.get("board") or "",
@@ -2617,67 +2621,12 @@ print(json.dumps({"action":"wait", "state":"protected", "wait_reason":"label val
 '
       continue
     fi
-    if live="$(_ht_pr_live_state "$repo" "$number" "$cache_dir")"; then
-      rc=0
-    else
-      rc=$?
-    fi
-    [ "$rc" -eq 0 ] || { _ht_github_paused "$repo" && return 75; return 1; }
-    pr_state="$(ROW="$pr" python3 -c 'import json,os;print(str(json.loads(os.environ["ROW"]).get("state") or "").upper())')"
-    if [ "$pr_state" = "MERGED" ]; then
-      _ht_pr_qa_state "$token_file" "$pr" "$live" "${DONE_SECTION:-Done}" || return 1
-    elif ! _ht_pr_work_state "$repo" "$pr" "$live"; then
+    if ! _ht_pr_work_state "$repo" "$pr"; then
       _ht_github_paused "$repo" && return 75
       return 1
     fi
   done < "$tmp/candidates.jsonl"
 )
-
-# A merged PR remains this agent's work until QA passes and the reconciler moves
-# its ticket to Done. A new QA Handoff is a red round on the same PR counter.
-_ht_pr_qa_state() {
-  local token_file="$1" pr="$2" live="$3" done_section="$4" task_id board comments="[]"
-  task_id="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get("task_id") or "")')"
-  board="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"]).get("board") or "")')"
-  if ROW="$pr" DONE="$done_section" python3 -c 'import json,os,sys; row=json.loads(os.environ["ROW"]); sys.exit(0 if str(row.get("ticket_section") or "").casefold() == os.environ["DONE"].casefold() else 1)'; then
-    return 0
-  fi
-  if [ -n "$task_id" ] && [ -n "$board" ]; then
-    comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board}" 2>/dev/null || printf '{"comments":[]}')"
-  fi
-  PR="$pr" LIVE="$live" COMMENTS="$comments" python3 -c '
-import html, json, os, re
-pr, live = json.loads(os.environ["PR"]), json.loads(os.environ["LIVE"])
-comments = json.loads(os.environ["COMMENTS"]).get("comments") or []
-merged_at = str(pr.get("mergedAt") or "")
-def plain(row):
-    value = row.get("text") or row.get("commentText") or row.get("html") or ""
-    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", str(value))).split())
-def agent_comment(row):
-    return bool(row.get("agent") or row.get("agentId") or row.get("agent_id"))
-failures = [row for row in comments
-            if agent_comment(row) and str(row.get("createdAt") or "") > merged_at
-            and re.match(r"Handoff:", plain(row), re.I)]
-latest = max(failures, key=lambda row: (row.get("createdAt") or "", str(row.get("id") or ""))) if failures else {}
-message = plain(latest) if latest else ""
-qa_failed = bool(latest)
-state = "red" if qa_failed else "in-qa"
-checks = ["QA fail"] if qa_failed else []
-print(json.dumps({"action":"fix" if qa_failed else "wait", "state":state,
-                  "wait_reason":("red: QA fail" if qa_failed else "in-qa"),
-                  "definition":live.get("definition") or "merged and awaiting QA",
-                  "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
-                  "title":pr["title"], "branch":pr["headRefName"],
-                  "base":pr.get("baseRefName") or "main", "since":pr.get("mergedAt") or pr["createdAt"],
-                  "merged_at":pr.get("mergedAt"), "task_id":pr.get("task_id") or "",
-                  "board":pr.get("board") or "", "ticket_section":pr.get("ticket_section") or "",
-                  "labels":pr.get("labels") or [], "human_assignee_ids":pr.get("human_assignee_ids") or [],
-                  "feedback":("QA failure comment:\n" + message if qa_failed else ""),
-                  "failed_checks":checks, "first_error_line":message if qa_failed else "",
-                  "qa_failure_id":str(latest.get("id") or "") if qa_failed else "",
-                  "pickup_slot":True, "unfixable":False}))
-'
-}
 
 # _ht_pr_live_state <repo> <number> <cache-dir>: one JSON answer, cached 60s.
 _ht_pr_live_state() {
@@ -2760,21 +2709,11 @@ sys.exit(0 if os.environ["DEP_STATE"] == "success" and os.environ["CONTAINS"] ==
 
 # Add current checks, failed-run logs, and review feedback to an owed PR.
 _ht_pr_work_state() {
-  local repo="$1" pr="$2" live="$3" number view checks reviews inline feedback action wait_state head run_rows check_name run_id logs first_error rc run_log
+  local repo="$1" pr="$2" number view state checks reviews inline feedback action wait_state head run_rows check_name run_id logs first_error rc run_log
   number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
   view="$(_ht_gh "$repo" pr view "$number" --repo "$repo" --json state,url,title,body,headRefName,headRefOid,baseRefName,createdAt,statusCheckRollup,reviews,comments 2>/dev/null)" || return $?
   state="$(printf '%s' "$view" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("state") or "")')"
-  if [ "$state" = "MERGED" ]; then
-    PR="$pr" LIVE="$live" python3 -c '
-import json, os
-pr, live = json.loads(os.environ["PR"]), json.loads(os.environ["LIVE"])
-print(json.dumps({"action":"wait", "state":live["state"], "definition":live["definition"],
-                  "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
-                  "title":pr["title"], "branch":pr["headRefName"], "since":pr["createdAt"],
-                  "merged_at":pr.get("mergedAt"), "pickup_slot":False, "unfixable":False}))
-'
-    return 0
-  fi
+  [ "$state" = "OPEN" ] || return 0
   if inline="$(_ht_gh "$repo" api "repos/$repo/pulls/$number/comments?per_page=100" 2>/dev/null)"; then
     rc=0
   else
@@ -2838,10 +2777,10 @@ print((match or (lines[0] if lines else "no error line reported"))[:500])
 ')"
   action="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("fix" if d["failed"] or d["review"] else "wait")')"
   wait_state="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("pending" if d["pending"] else "awaiting-review")')"
-  PR="$pr" VIEW="$view" LIVE="$live" FEEDBACK="$feedback" LOGS="$logs" FIRST_ERROR="$first_error" ACTION="$action" WAIT_STATE="$wait_state" python3 -c '
+  PR="$pr" VIEW="$view" FEEDBACK="$feedback" LOGS="$logs" FIRST_ERROR="$first_error" ACTION="$action" WAIT_STATE="$wait_state" python3 -c '
 import json, os
 pr, view = json.loads(os.environ["PR"]), json.loads(os.environ["VIEW"])
-live, feedback = json.loads(os.environ["LIVE"]), json.loads(os.environ["FEEDBACK"])
+feedback = json.loads(os.environ["FEEDBACK"])
 parts = []
 if feedback["failed"]:
     parts.append("Failing checks (exact names):\n" + "\n".join("- %s [%s] %s" % (c["name"], c["conclusion"], c["url"]) for c in feedback["failed"]))
@@ -2854,7 +2793,7 @@ state = "red" if action == "fix" else os.environ["WAIT_STATE"]
 failed_names = [check["name"] for check in feedback["failed"]]
 wait_reason = "red: " + ", ".join(failed_names) if state == "red" else state
 print(json.dumps({"action":action, "state":state, "wait_reason":wait_reason,
-                  "definition":live["definition"], "number":pr["number"], "url":pr["url"],
+                  "definition":"open pull request checks and review", "number":pr["number"], "url":pr["url"],
                   "ticket":pr["ticket"], "title":view.get("title") or pr["title"],
                   "branch":view.get("headRefName") or pr["headRefName"],
                   "base":view.get("baseRefName") or "main", "head":view.get("headRefOid") or "",
@@ -3141,7 +3080,7 @@ adapter_run_prompt() {
 FINISH IT AS THE SETUP MAINTAINER. A ticket asking for an allowlisted update or build is direct maintainer work:
 - Start a requested code change with `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]`.
 - Deploy a merged toolkit release with `agent-template update --keep-timers`.
-Never merge a pull request by hand. Auto-merge or the supervisor handles merges. Never modify, review, close, or merge a pull request labelled `valentin-review`.
+Never merge a pull request by hand. Auto-merge or the supervisor handles merges. Never modify, review, close, or merge an open pull request labelled `valentin-review`.
 Run the relevant command in this run. This replaces the ordinary developer pull request workflow. Do not create an implementation branch for a direct operation, delegate it, hand it to a developer, or say that a developer must release it. A background build is not done when it starts; its completion checker posts the final result.
 EOF
   else
