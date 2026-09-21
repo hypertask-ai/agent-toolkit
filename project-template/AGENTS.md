@@ -68,6 +68,13 @@ Any edit happens in a git worktree on a branch and lands as a PR. Never run
 `git stash` in a shared checkout: the stash is shared across every worktree of
 that repo, and another agent's work disappears.
 
+## Finish your pull request
+
+After opening your pull request, request squash auto-merge. Never merge it by
+hand. When GitHub cannot enable auto-merge, leave the pull request open for the
+reconciler, which merges it only after its checks are green and GitHub reports
+it as mergeable.
+
 ## What a PR description looks like
 
 Start with `## Summary for non-engineers`, written for someone who does not
