@@ -776,6 +776,8 @@ or `Question:`. If the first response has no marker, the runner asks the model
 once more for a marked verdict. A marked retry completes normally and supplies
 a missing move. If the retry is also unmarked, the run fails and returns the
 ticket to its original QA lane instead of moving it to a human review lane.
+Treat this formatting failure separately from infrastructure failures so generic
+blocked-run handling can never send it to a human review lane.
 
 On every tick the runner also backfills QA tickets whose newest comment is that
 agent's verdict and is at least ten minutes old. A ticket labelled `valentin`
