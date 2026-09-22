@@ -48,7 +48,7 @@ cat > "$TMP/bin/gh" <<'EOF'
 [ -z "${GH_CAPTURE:-}" ] || printf '%s\n' "$*" >> "$GH_CAPTURE"
 if [ "${GITHUB_RATE_LIMIT:-no}" = yes ] && [ "${1:-}" = api ]; then
   printf 'HTTP/2 403\nX-RateLimit-Reset: %s\n\n{"message":"API rate limit exceeded"}\n' \
-    "${RATE_LIMIT_RESET:-1790000000}"
+    "${RATE_LIMIT_RESET:-$(( $(date +%s) + 3600 ))}"
   printf 'API rate limit exceeded (HTTP 403)\n' >&2
   exit 1
 elif [ "${GH_PR_FIXTURE:-}" = "merged-812" ] && [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
@@ -230,7 +230,7 @@ else
   bad reply-only-sandbox-contract "timeout=$(cat "$TMP/timeout" 2>/dev/null) mode=$(cat "$TMP/reply-mode" 2>/dev/null) cwd=$(cat "$TMP/reply-cwd" 2>/dev/null) args=$(tr '\n' ' ' < "$TMP/hax" 2>/dev/null)"
 fi
 
-rate_reset=1790000123
+rate_reset="$(( $(date +%s) + 3600 ))"
 set +e
 PROMPT_CAPTURE="$TMP/rate-prompt" TIMEOUT_CAPTURE="$TMP/rate-timeout" HAX_CAPTURE="$TMP/rate-hax" \
   REPLY_CWD_CAPTURE="$TMP/rate-reply-cwd" REPLY_MODE_CAPTURE="$TMP/rate-reply-mode" \
