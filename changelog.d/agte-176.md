@@ -1,0 +1,1 @@
+- AGTE-176 requires marked QA verdicts, retries an unmarked response once, and keeps a twice-unmarked ticket in QA instead of sending it to human review.

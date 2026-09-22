@@ -232,7 +232,7 @@ if [ "$1" = "api" ]; then
   if [[ "$endpoint" == repos/example/repo/pulls\?state=* ]]; then
     if [ "$scenario" = "rate-limit" ]; then
       printf 'HTTP/2 403\nX-RateLimit-Reset: %s\n\n{"message":"API rate limit exceeded"}\n' \
-        "${RATE_LIMIT_RESET:-1790000000}"
+        "${RATE_LIMIT_RESET:-$(( $(date +%s) + 3600 ))}"
       printf 'API rate limit exceeded (HTTP 403)\n' >&2
       exit 1
     fi
@@ -309,7 +309,7 @@ PYEOF
   fi
   case "$endpoint" in
     user) printf 'shared-bot\n' ;;
-    rate_limit) printf '1790000000\n' ;;
+    rate_limit) printf '%s\n' "$(( $(date +%s) + 3600 ))" ;;
     */pulls/*/comments*) printf '[]\n' ;;
     */compare/*)
       if [ "$scenario" = "base-missing" ]; then
@@ -667,7 +667,7 @@ PYEOF
 echo 'PASS cache keeps recent merges with the required identity fields'
 
 rate_cache="$TMP/rate-pr-cache"
-rate_reset=1790000123
+rate_reset="$(( $(date +%s) + 3600 ))"
 rate_clock="$(date -d "@$rate_reset" +%H:%M)"
 : > "$TMP/rate-gh-calls"
 set +e

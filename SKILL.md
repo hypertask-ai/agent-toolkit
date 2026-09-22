@@ -771,11 +771,17 @@ single line names the failing step, clears every assignee, and moves to
 `Question:` and moves to `QA_BLOCKED_SECTION`, or `HT Manager Review` when it
 exists; with neither column configured it stays in QA.
 
-The runner enforces this contract after the model exits. It parses `Done:`,
-`Handoff:`, or `Question:` from the verdict comment and supplies a missing move.
-On every tick it also backfills QA tickets whose newest comment is that agent's
-verdict and is at least ten minutes old. A ticket labelled `valentin` or
-directly assigned to the board owner is skipped and never moved.
+The QA prompt requires every verdict comment to start with `Done:`, `Handoff:`,
+or `Question:`. If the first response has no marker, the runner asks the model
+once more for a marked verdict. A marked retry completes normally and supplies
+a missing move. If the retry is also unmarked, the run fails and returns the
+ticket to its original QA lane instead of moving it to a human review lane.
+Treat this formatting failure separately from infrastructure failures so generic
+blocked-run handling can never send it to a human review lane.
+
+On every tick the runner also backfills QA tickets whose newest comment is that
+agent's verdict and is at least ten minutes old. A ticket labelled `valentin`
+or directly assigned to the board owner is skipped and never moved.
 
 When `RESEARCH_CLI` exists, an agent stuck mid-run can use `agent-advisor
 "<one precise question>"`. It receives the ticket, last ten comments and current

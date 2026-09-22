@@ -29,7 +29,7 @@ cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 if [ "${GITHUB_RATE_LIMIT:-no}" = yes ] && [ "${1:-}" = api ]; then
   printf 'HTTP/2 403\nX-RateLimit-Reset: %s\n\n{"message":"API rate limit exceeded"}\n' \
-    "${RATE_LIMIT_RESET:-1790000000}"
+    "${RATE_LIMIT_RESET:-$(( $(date +%s) + 3600 ))}"
   printf 'API rate limit exceeded (HTTP 403)\n' >&2
   exit 1
 fi
@@ -190,15 +190,16 @@ fi
 
 reset_case
 write_record '2026-09-20T08:30:00+00:00'
+rate_reset="$(( $(date +%s) + 3600 ))"
 set +e
-GITHUB_RATE_LIMIT=yes RATE_LIMIT_RESET=1790000123 run_tick > "$TMP/paused.out" 2>&1
+GITHUB_RATE_LIMIT=yes RATE_LIMIT_RESET="$rate_reset" run_tick > "$TMP/paused.out" 2>&1
 paused_rc=$?
 set -e
 if [ "$paused_rc" -eq 75 ] \
    && grep -qx $'unassign\tTEST-1' "$TMP/board.log" \
    && grep -qx $'move\tTEST-1\tBacklog' "$TMP/board.log" \
    && grep -qF 'requeued' "$TMP/board.log" \
-   && grep -qF "GitHub paused until $(date -d @1790000123 +%H:%M)" \
+   && grep -qF "GitHub paused until $(date -d "@$rate_reset" +%H:%M)" \
       "$TMP/state/agent-board-poll/dev.log"; then
   pass paused-dead-run-reconcile 'dead-run board reconciliation finishes before a paused tick exits 75'
 else
