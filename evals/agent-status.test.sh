@@ -8,6 +8,20 @@ FIXTURE="$HERE/fixtures/agent-status"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 cp -a "$FIXTURE/." "$TMP/"
+TEST_PID="$$" TMP="$TMP" python3 <<'PY'
+import json
+import os
+from pathlib import Path
+
+pid = int(os.environ["TEST_PID"])
+pid_start = Path(f"/proc/{pid}/stat").read_text().split()[21]
+for path in (Path(os.environ["TMP"]) / "state" / "run-records").glob("*.json"):
+    row = json.loads(path.read_text())
+    row["pid"] = pid
+    row["pid_start_ticks"] = pid_start
+    path.write_text(json.dumps(row) + "\n")
+    os.utime(path, (1789727940, 1789727940))
+PY
 
 "$ROOT/scripts/agent-status" collect \
   --config-dir "$TMP/confs" --state-dir "$TMP/state" --health "$TMP/health.json" \
@@ -29,9 +43,12 @@ const dev=normalized.agents.find(agent=>agent.slug==='tk-dev-1');
 assert.equal(dev.current_ticket.ticket_key,'AGTE-83');
 assert.equal(dev.execution.phase,'waiting');
 const rawDev=snapshot.agents.find(agent=>agent.slug==='tk-dev-1');
-assert.equal(rawDev.execution.last_output_at,1789726500);
+assert.equal(rawDev.execution.last_output_at,1789727940);
 assert.equal(rawDev.execution.waiting_on_pr,true);
 assert.equal(rawDev.execution.wait_state,'awaiting-merge');
+const qa=normalized.agents.find(agent=>agent.slug==='tk-qa-1');
+assert.equal(qa.current_ticket.ticket_key,'AGTE-84');
+assert.equal(qa.execution.phase,'qa');
 assert.equal(normalized.sources.supervisor.state,'needs_attention');
 assert.equal(normalized.incidents.length,1);
 assert.equal(normalized.incidents[0].affected_agent_slug,'tk-dev-1');
@@ -48,9 +65,22 @@ assert.equal(feed.agents.find(agent=>agent.slug==='tk-dev-1').lastRun.provider,'
 assert.equal(feed.agents.find(agent=>agent.slug==='tk-dev-1').lastRun.rung,'Grok');
 assert.equal(feed.agents.length,3);
 const feedDev=feed.agents.find(agent=>agent.slug==='tk-dev-1');
-assert.equal(feedDev.lastRun.lastOutputAt,'2026-09-18T10:15:00Z');
+assert.equal(feedDev.lastRun.lastOutputAt,'2026-09-18T10:39:00Z');
 assert.equal(feedDev.lastRun.waitingOnPr,true);
 assert.equal(feedDev.lastRun.waitState,'awaiting-merge');
+const activity=JSON.parse(fs.readFileSync(`${root}/state/agent-activity.json`));
+assert.equal(activity.collectedAt,'2026-09-18T10:40:00Z');
+assert.deepEqual(activity.agents['tk-dev-1'].liveState,{
+  kind:'fix',ticket:'AGTE-83',startedAt:'2026-09-18T10:00:00Z',recordAt:'2026-09-18T10:39:00Z',
+  runMinutes:40,text:'Fixing PR 712 (round 2), 40 min',prNumber:712,round:2,
+});
+assert.equal(activity.agents['tk-dev-1'].processAlive,true);
+assert.equal(activity.agents['tk-dev-1'].waitingOnPr.number,712);
+assert.deepEqual(activity.agents['tk-qa-1'].liveState,{
+  kind:'qa',ticket:'AGTE-84',startedAt:'2026-09-18T10:20:00Z',recordAt:'2026-09-18T10:39:00Z',
+  runMinutes:20,text:'QA on AGTE-84, 20 min',prNumber:null,round:null,
+});
+assert.equal(activity.agents['tk-qa-1'].processAlive,true);
 NODE
 
 ROOT="$ROOT" TMP="$TMP" python3 <<'PY'
@@ -82,14 +112,16 @@ class Opener:
         return Response(b'{"ok":true}')
 with patch.object(module.urllib.request, "build_opener", return_value=Opener()):
     module.publish({"schema_version": 1}, app, "https://hypertask.app", "/api/factory-status", module.MAX_BYTES)
+    module.publish({"schemaVersion": 1}, app, "https://hypertask.app", "/api/agent-activity", module.MAX_BYTES)
 request, timeout = requests[0]
 assert request.full_url == "https://hypertask.app/api/factory-status?project=hypertask"
 assert request.get_header("Authorization") == "Bearer test-bearer"
 assert request.get_header("Cf-access-client-id") == "test-client"
 assert request.get_header("Cf-access-client-secret") == "test-access"
 assert timeout == 15
+assert requests[1][0].full_url == "https://hypertask.app/api/agent-activity"
 PY
 
 grep -qF 'OnUnitActiveSec=60s' "$ROOT/install.sh"
 grep -qF 'ExecStart=$BIN/agent-status publish' "$ROOT/install.sh"
-printf 'PASS %-36s %s\n' agent-status-snapshot 'fixtures normalize and publish current work, health, first-pass, and duration cost metrics'
+printf 'PASS %-36s %s\n' agent-status-snapshot 'fixtures publish fix rounds, QA minutes, CI-red repair identity, health, and metrics'

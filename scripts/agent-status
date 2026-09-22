@@ -29,6 +29,8 @@ MODEL_ROUTE = re.compile(r"\bmodel route for ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*): 
 PROVIDER_ROUTE = re.compile(r"\bprovider route for ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*): ([a-z][a-z0-9_-]*) \((.*)\)$")
 QA_OUTCOME = re.compile(r"\bQA outcome ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*) verdict=(Done|Handoff)\b", re.I)
 QA_MOVE_OUTCOME = re.compile(r"\bQA (?:run fallback|backfill comment \S+) moved ([A-Z][A-Z0-9]{0,15}-[1-9][0-9]*) .* verdict (Done|Handoff)\b", re.I)
+PR_TASK = re.compile(r"^pr-([1-9][0-9]*)$")
+LIVE_RECORD_SECONDS = 10 * 60
 
 
 def parse_time(value: Any) -> float | None:
@@ -190,6 +192,95 @@ def ticket_from_lock(lock: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def run_record_for(state_dir: Path, slug: str, ticket: str | None) -> tuple[dict[str, Any], float | None]:
+    directory = state_dir / "run-records"
+    candidates = []
+    for path in directory.glob(f"{slug}-*.json"):
+        row = read_json(path)
+        if row.get("status") != "running" or not TICKET.fullmatch(str(row.get("ref") or "")):
+            continue
+        try:
+            touched = path.stat().st_mtime
+        except OSError:
+            continue
+        candidates.append((row, touched))
+    matching = [item for item in candidates if item[0].get("ref") == ticket]
+    return max(matching or candidates, key=lambda item: (parse_time(item[0].get("started_at")) or 0, item[1]), default=({}, None))
+
+
+def process_alive(record: dict[str, Any]) -> bool:
+    pid = record.get("pid")
+    expected_start = str(record.get("pid_start_ticks") or "")
+    if not isinstance(pid, int) or pid <= 0 or not expected_start:
+        return False
+    try:
+        actual_start = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()[21]
+    except (OSError, IndexError):
+        return False
+    return actual_start == expected_start
+
+
+def active_run_state(record: dict[str, Any], record_at: float | None, log_path: Path,
+                     role: str, now: float) -> dict[str, Any] | None:
+    ticket = str(record.get("ref") or "")
+    started = parse_time(record.get("started_at"))
+    if (record.get("status") != "running" or not TICKET.fullmatch(ticket) or started is None
+            or record_at is None or record_at > now or now - record_at > LIVE_RECORD_SECONDS):
+        return None
+    minutes = max(0, int((now - started + 30) // 60))
+    task = PR_TASK.fullmatch(str(record.get("task_id") or ""))
+    if task:
+        number = int(task.group(1))
+        try:
+            text = log_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        escaped = re.escape(ticket)
+        starts = len(re.findall(rf"\brun start {escaped} key=pr-{number}:", text))
+        completed = [int(value) for value in re.findall(rf"\bfix round ([1-9][0-9]*) for {escaped}\b", text)]
+        recorded = record.get("fix_rounds")
+        next_round = int(recorded) + 1 if isinstance(recorded, int) and recorded >= 0 else 0
+        round_number = max([1, starts, next_round, *completed])
+        return {
+            "kind": "fix", "ticket": ticket, "startedAt": iso(started), "recordAt": iso(record_at),
+            "runMinutes": minutes, "text": f"Fixing PR {number} (round {round_number}), {minutes} min",
+            "prNumber": number, "round": round_number,
+        }
+    kind = "qa" if role == "qa" else "work"
+    return {
+        "kind": kind, "ticket": ticket, "startedAt": iso(started), "recordAt": iso(record_at),
+        "runMinutes": minutes, "text": f"{'QA on' if kind == 'qa' else 'Working'} {ticket}, {minutes} min",
+        "prNumber": None, "round": None,
+    }
+
+
+def activity_row(state_dir: Path, slug: str, role: str, current: dict[str, Any] | None,
+                 now: float) -> dict[str, Any] | None:
+    current_key = current.get("ticket_key") if current else None
+    record, record_at = run_record_for(state_dir, slug, current_key)
+    live = active_run_state(record, record_at, state_dir / f"{slug}.log", role, now)
+    output_at = parse_time(record.get("last_output_at"))
+    progress = read_json(state_dir / f"{slug}.progress.json")
+    progress_at = parse_time(progress.get("updated_at"))
+    signals = [("run record", output_at), ("progress", progress_at)]
+    signal = max((item for item in signals if item[1] is not None), key=lambda item: item[1], default=None)
+    if signal is None and live is None:
+        return None
+    task = PR_TASK.fullmatch(str(record.get("task_id") or ""))
+    waiting = None
+    if record.get("waiting_on_pr") is True:
+        waiting = {"number": int(task.group(1)) if task else None}
+    return {
+        "lastOutputAt": iso(signal[1]) if signal else None,
+        "lastOutputSource": signal[0] if signal else None,
+        "ticket": current_key,
+        "runTicket": str(record.get("ref")) if record.get("status") == "running" else None,
+        "processAlive": process_alive(record),
+        "waitingOnPr": waiting,
+        "liveState": live,
+    }
+
+
 def incident_rows(health: dict[str, Any], slugs: set[str], now: float) -> list[dict[str, Any]]:
     checked = parse_time(health.get("at")) or now
     rows = []
@@ -273,9 +364,10 @@ def calculate_metrics(runs: list[dict[str, Any]], outcomes: list[dict[str, Any]]
     }
 
 
-def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     agents = []
     feed_agents = []
+    activity_agents = {}
     all_runs: list[dict[str, Any]] = []
     all_outcomes: list[dict[str, Any]] = []
     for conf_path in sorted(config_dir.glob("*.conf")):
@@ -295,6 +387,9 @@ def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) ->
         lock = read_json(state_dir / f"{slug}.lock")
         current = ticket_from_lock(lock)
         current_key = current.get("ticket_key") if current else None
+        activity = activity_row(state_dir, slug, role, current, now)
+        if activity:
+            activity_agents[slug] = activity
         lock_at = parse_time(lock.get("started_at"))
         run_record = read_json(state_dir / "run-records" / f"{slug}-{current_key}.json") if current_key else {}
         last_output_at = parse_time(run_record.get("last_output_at"))
@@ -386,7 +481,8 @@ def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) ->
         "qaNote": "First pass is the first QA outcome in the last seven days: Done versus returned.",
         "sources": ["agent confs, runner locks and logs", "supervisor health violations"], "errors": [],
     }
-    return snapshot, metrics, feed
+    activity = {"schemaVersion": 1, "collectedAt": iso(now), "agents": activity_agents}
+    return snapshot, metrics, feed, activity
 
 
 def atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -446,22 +542,25 @@ def main() -> int:
     parser.add_argument("--now", type=float)
     args = parser.parse_args()
     now = args.now if args.now is not None else dt.datetime.now(dt.timezone.utc).timestamp()
-    snapshot, metrics, feed = collect(args.config_dir, args.state_dir, args.health, now)
+    snapshot, metrics, feed, activity = collect(args.config_dir, args.state_dir, args.health, now)
     output = args.output or args.state_dir / "factory-status.json"
     if args.command == "collect":
         if args.output:
             atomic_json(output, snapshot)
             atomic_json(args.state_dir / "agent-status-metrics.json", metrics)
             atomic_json(args.state_dir / "agent-feed.json", feed)
+            atomic_json(args.state_dir / "agent-activity.json", activity)
         else:
             print(json.dumps(snapshot, separators=(",", ":"), allow_nan=False))
         return 0
     atomic_json(output, snapshot)
     atomic_json(args.state_dir / "agent-status-metrics.json", metrics)
     atomic_json(args.state_dir / "agent-feed.json", feed)
+    atomic_json(args.state_dir / "agent-activity.json", activity)
     credentials = Path(os.environ.get("HYPERTASK_APP_CREDENTIALS", "~/.config/hypertask-app/credentials.env")).expanduser()
     publish(snapshot, credentials, "https://hypertask.app", "/api/factory-status", MAX_BYTES)
     publish(feed, credentials, "https://hypertask.app", "/api/agent-feed", 512_000)
+    publish(activity, credentials, "https://hypertask.app", "/api/agent-activity", MAX_BYTES)
     return 0
 
 
