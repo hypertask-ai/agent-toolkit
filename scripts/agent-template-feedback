@@ -7,7 +7,7 @@
 #
 # Every run first reconciles AGTE references in the merged CHANGELOG: it posts
 # "Shipped in <version>: <one line>" once as the template bot and moves the
-# ticket to Done. It then reads Backlog, urgent first, and asks the configured
+# ticket to QA. It then reads Backlog, urgent first, and asks the configured
 # model for accept, need_info, or decline. Every verdict receives a comment.
 # Accepted tickets get one isolated fix branch and pull request, auto-merge is
 # enabled, and the ticket moves to In Progress.
@@ -151,22 +151,22 @@ if [ -z "$BACKLOG" ]; then
   log "feedback board section \"$CONFIGURED_BACKLOG\" was not found; using first section \"$BACKLOG\"."
 fi
 IN_PROGRESS="$(section_named 'In Progress')"
-DONE="$(section_named Done)"
+QA="$(section_named QA)"
 DECLINED="$(section_named Declined)"
 [ -n "$DECLINED" ] || DECLINED="$(section_named Rejected)"
-[ -n "$IN_PROGRESS" ] && [ -n "$DONE" ] \
-  || die "In Progress or Done is missing from project $BOARD_ID" \
+[ -n "$IN_PROGRESS" ] && [ -n "$QA" ] \
+  || die "In Progress or QA is missing from project $BOARD_ID" \
          "create the lifecycle sections or correct their names"
 
 # Merged changelog entries are the source of truth for shipping. Comment and
 # move have separate state so a transient move failure never repeats a comment.
 while IFS=$'\t' read -r ref version summary; do
   [ -n "$ref" ] || continue
-  text="Shipped in $version: $summary"
+  text="Handoff: QA can verify the change shipped in $version. $summary"
   if ! grep -qxF "$ref" "$SHIPPED_COMMENTS"; then
     if [ "$DRY_RUN" = yes ]; then
       printf 'DRY-RUN %s: %s\n' "$ref" "$text"
-    elif "$BOARD_CLI" comment add "$ref" --text "<p><strong>$(printf '%s' "$text" | html_escape)</strong></p>" >/dev/null; then
+    elif "$BOARD_CLI" comment add "$ref" --raw --text "<p><strong>$(printf '%s' "$text" | html_escape)</strong></p><p>Next: QA verifies every acceptance criterion on live.</p>" >/dev/null; then
       printf '%s\n' "$ref" >> "$SHIPPED_COMMENTS"
       log "shipped comment posted on $ref for $version"
     else
@@ -176,12 +176,12 @@ while IFS=$'\t' read -r ref version summary; do
   fi
   if ! grep -qxF "$ref" "$SHIPPED_MOVES"; then
     if [ "$DRY_RUN" = yes ]; then
-      printf 'DRY-RUN move %s to %s\n' "$ref" "$DONE"
-    elif "$BOARD_CLI" task move "$ref" --section "$DONE" >/dev/null; then
+      printf 'DRY-RUN move %s to %s\n' "$ref" "$QA"
+    elif "$BOARD_CLI" task move "$ref" --section "$QA" >/dev/null; then
       printf '%s\n' "$ref" >> "$SHIPPED_MOVES"
-      log "moved $ref to $DONE"
+      log "moved $ref to $QA"
     else
-      log "could not move $ref to $DONE; will retry without repeating the comment"
+      log "could not move $ref to $QA; will retry without repeating the comment"
     fi
   fi
 done <<< "$SHIPPED_ROWS"

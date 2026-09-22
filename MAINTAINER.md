@@ -354,8 +354,9 @@ activity, and sends no raw comment. When a closing `Done:` or `Handoff:` comment
 is held, the runner keeps its draft until the worker exits. If that run merged
 its pull request, the runner refreshes GitHub, links the draft's ticket and pull
 request references, checks it again, and posts it. A rewrite failure leaves the
-comment held. In either case, the merged pull request makes the run successful
-and moves the ticket to Done.
+comment held. In either case, the merged pull request makes the development run
+successful and moves the ticket to QA. Only QA moves it to Done, after its verdict
+names every acceptance criterion and gives evidence from the live product.
 
 Direct human questions use the fixed high-effort Codex Sol reply route instead
 of the conf provider. The five-minute process uses `hax --raw`, which provides
@@ -673,7 +674,7 @@ filed URL. The maintainer host reads urgent first every four hours. Every
 ticket gets an accepted, need-info, or declined reply; need-info contains one
 question. Accepted tickets get one auto-merge fix pull request and move to
 In Progress. A merged changelog line naming the ticket triggers one `Shipped in
-<version>: <one line>` reply and moves it to Done. The filing host's daily
+<version>: <one line>` reply and moves it to QA for live verification. The filing host's daily
 update prints `feedback waiting: AGTE-n` while the ticket remains open. The
 paste-it-yourself fallback appears only when no bot token is configured.
 

@@ -69,7 +69,8 @@ create_default_mission qa 'QA Mission' "$TMP/repo-qa-mission" example/qa-mission
 
 skill_order="$TMP/company/INDEX.md, then $TMP/INDEX.md (the company pack first, then your own)"
 if grep -Fq "Step one, before anything else: read $skill_order, in that order" "$TMP/config/dev-mission.conf" \
-   && grep -Fq "You verify, you never fix. Read $skill_order, in that order" "$TMP/config/qa-mission.conf" \
+   && grep -Fq 'You verify, you never fix. Test every acceptance criterion on live' "$TMP/config/qa-mission.conf" \
+   && grep -Fq "live evidence. Read $skill_order, in that order" "$TMP/config/qa-mission.conf" \
    && ! grep -Fq "literal absolute path $TMP/company/INDEX.md,$TMP/INDEX.md" "$TMP/config/dev-mission.conf" \
    && ! grep -Fq "literal absolute path $TMP/company/INDEX.md,$TMP/INDEX.md" "$TMP/config/qa-mission.conf"; then
   ok create-mission-skill-order "generated missions read shared conventions before board-specific skills"

@@ -12,6 +12,33 @@ _hypertask_checked_pr_gate() {
   _hypertask_base_pr_gate "$@"
 }
 
+_hypertask_base_run_prompt() (
+  # shellcheck disable=SC1091
+  . "$CORE_ROOT/adapters/hypertask/adapter.sh"
+  adapter_run_prompt "$@"
+)
+
+adapter_run_prompt() {
+  _hypertask_base_run_prompt "$@"
+  if [ "${AGENT_KIND:-}" = qa ]; then
+    cat <<'EOF'
+
+Before a passing QA verdict, test every acceptance criterion on the live product.
+In the one `Done:` comment, include `AC 1, <criterion name>. Live evidence:
+<observed live result>` for every criterion, in ticket order. A PR, merge, staging
+result, or developer report is not live evidence. Do not move the ticket to Done
+unless every acceptance criterion has that evidence.
+EOF
+  else
+    cat <<'EOF'
+
+Shipping is a handoff to QA, not completion. After reporting a shipped change,
+move the ticket to `QA`, never directly to `Done`. Only QA can complete it after
+verifying every acceptance criterion on live and posting the evidence.
+EOF
+  fi
+}
+
 _hypertask_base_install_board_cli() (
   # shellcheck disable=SC1091
   . "$CORE_ROOT/adapters/hypertask/adapter.sh"
@@ -25,6 +52,8 @@ adapter_install_board_cli() {
   _hypertask_base_install_board_cli "$@" || return
   [ "${caller##*/}" = agent-board-poll ] || return 0
   export AGENT_RUNNER_BOARD_CLI_TARGET="$3"
+  export AGENT_RUNNER_ID="$5"
+  export AGENT_RUNNER_KIND="${AGENT_KIND:-}"
   BOARD_CLI="$CORE_ROOT/scripts/hypertask-runner-cli"
 }
 

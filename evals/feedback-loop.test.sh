@@ -70,7 +70,7 @@ cat > "$TMP/triage-board" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TRIAGE_CALLS"
 if [ "${1:-} ${2:-}" = "section list" ]; then
-  printf '%s\n' '{"sections":[{"name":"Custom Queue"},{"name":"In Progress"},{"name":"Done"}]}'
+  printf '%s\n' '{"sections":[{"name":"Custom Queue"},{"name":"In Progress"},{"name":"QA"},{"name":"Done"}]}'
 elif [ "${1:-} ${2:-}" = "task list" ]; then
   printf '%s\n' '{"tasks":[]}'
 else

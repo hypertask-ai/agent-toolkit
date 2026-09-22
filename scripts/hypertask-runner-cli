@@ -5,4 +5,50 @@ TARGET="${AGENT_RUNNER_BOARD_CLI_TARGET:?AGENT_RUNNER_BOARD_CLI_TARGET is not se
 if [ "${1:-} ${2:-}" = "comment add" ]; then
   exec python3 "$(dirname "$0")/hypertask-runner-comment.py" "$@"
 fi
+if [ "${1:-} ${2:-}" = "task move" ]; then
+  args=("$@")
+  ref="${3:-}"
+  section=""
+  section_index=""
+  for ((i = 3; i < ${#args[@]} - 1; i++)); do
+    if [ "${args[$i]}" = "--section" ]; then
+      section="${args[$((i + 1))]}"
+      section_index=$((i + 1))
+      break
+    fi
+  done
+  done_section="${DONE_SECTION:-Done}"
+  if [ "${AGENT_RUNNER_KIND:-}" = qa ] && [ "${section,,}" != "${done_section,,}" ]; then
+    task="$($TARGET --json task get "$ref")"
+    current="$(TASK="$task" python3 -c '
+import json, os
+raw = os.environ["TASK"]
+doc = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+print(task.get("section") or "")
+')"
+    if [ "${current,,}" = "${done_section,,}" ]; then
+      comments="$($TARGET --json comment list "$ref")"
+      if python3 "$(dirname "$0")/qa-live-verdict.py" \
+          --task "$task" --comments "$comments" --qa-agent-id "${AGENT_ID:-${AGENT_RUNNER_ID:-}}" >/dev/null; then
+        printf 'QA move skipped for %s: its live-evidence verdict already moved it to %s\n' "$ref" "$current" >&2
+        exit 0
+      fi
+    fi
+  fi
+  if [ "${section,,}" = "${done_section,,}" ]; then
+    if [ "${AGENT_QA_MOVE:-no}" != yes ]; then
+      args[$section_index]="${QA_SECTION:-QA}"
+      exec "$TARGET" "${args[@]}"
+    fi
+    task="$($TARGET --json task get "$ref")"
+    comments="$($TARGET --json comment list "$ref")"
+    if ! python3 "$(dirname "$0")/qa-live-verdict.py" \
+        --task "$task" --comments "$comments" --qa-agent-id "${AGENT_ID:-${AGENT_RUNNER_ID:-}}" >/dev/null; then
+      printf 'Done move refused for %s: QA must name every acceptance criterion with live evidence\n' "$ref" >&2
+      args[$section_index]="${QA_SECTION:-QA}"
+      exec "$TARGET" "${args[@]}"
+    fi
+  fi
+fi
 exec "$TARGET" "$@"

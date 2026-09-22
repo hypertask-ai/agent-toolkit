@@ -23,12 +23,14 @@ MERGE_READY_SCANS="$STATE_DIR/reconcile-merge-ready-scans.$$"
 DIRECT_REPOS="$STATE_DIR/reconcile-direct-repos.$$"
 DIRECT_COMMITS="$STATE_DIR/reconcile-direct-commits.$$"
 DIRECT_CURSORS="$STATE_DIR/reconcile-direct-cursors.$$"
+QA_AGENTS="$STATE_DIR/reconcile-qa-agents.$$"
 : > "$MERGED_SCANS"
 : > "$MERGE_READY_SCANS"
 : > "$DIRECT_REPOS"
 : > "$DIRECT_COMMITS"
 : > "$DIRECT_CURSORS"
-trap 'rm -f "$MERGED_SCANS" "$MERGE_READY_SCANS" "$DIRECT_REPOS" "$DIRECT_COMMITS" "$DIRECT_CURSORS"' EXIT
+: > "$QA_AGENTS"
+trap 'rm -f "$MERGED_SCANS" "$MERGE_READY_SCANS" "$DIRECT_REPOS" "$DIRECT_COMMITS" "$DIRECT_CURSORS" "$QA_AGENTS"' EXIT
 
 record_field() {
   local path="$1" field="$2"
@@ -66,6 +68,22 @@ else
     for conf in "$dir"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
   done < <(core_conf_dirs)
 fi
+
+for conf in "${CONF_FILES[@]}"; do
+  (
+    unset AGENT_ID AGENT_KIND AGENT_ROLE ROLE BOARD_ADAPTER BOARD_ID
+    # shellcheck disable=SC1090
+    . "$conf"
+    kind="${AGENT_KIND:-${AGENT_ROLE:-${ROLE:-}}}"
+    [ "${BOARD_ADAPTER:-}" = hypertask ] && [ "$kind" = qa ] || exit 0
+    [ -n "${AGENT_ID:-}" ] && [ -n "${BOARD_ID:-}" ] || exit 0
+    printf '%s\n' "$BOARD_ID" | tr ',' '\n' | while IFS= read -r board; do
+      board="${board#"${board%%[![:space:]]*}"}"
+      board="${board%"${board##*[![:space:]]}"}"
+      [ -z "$board" ] || printf '%s\t%s\n' "$board" "$AGENT_ID"
+    done
+  ) >> "$QA_AGENTS"
+done
 
 ALLOW_FILES=()
 for conf in "${CONF_FILES[@]}"; do
@@ -130,7 +148,7 @@ done < "$DIRECT_REPOS"
 
 for conf in "${CONF_FILES[@]}"; do
   (
-    unset AGENT_ID AGENT_NAME AGENT_SLUG AGENT_KIND AGENT_ROLE ROLE BOARD_ADAPTER BOARD_ID BOARD_CLI TOKEN_FILE PR_REPO PR_BRANCH_PREFIX GH_LOGIN GITHUB_LOGIN DONE_SECTION
+    unset AGENT_ID AGENT_NAME AGENT_SLUG AGENT_KIND AGENT_ROLE ROLE BOARD_ADAPTER BOARD_ID BOARD_CLI TOKEN_FILE PR_REPO PR_BRANCH_PREFIX GH_LOGIN GITHUB_LOGIN DONE_SECTION QA_SECTION
     # shellcheck disable=SC1090
     . "$conf"
     [ "${BOARD_ADAPTER:-}" = "hypertask" ] || exit 0
@@ -139,6 +157,7 @@ for conf in "${CONF_FILES[@]}"; do
     : "${BOARD_CLI:?missing BOARD_CLI in $conf}" "${TOKEN_FILE:?missing TOKEN_FILE in $conf}"
     IN_PROGRESS_SECTION="${IN_PROGRESS_SECTION:-In Progress}"
     DONE_SECTION="${DONE_SECTION:-Done}"
+    QA_SECTION="${QA_SECTION:-QA}"
     PR_BRANCH_PREFIX="${PR_BRANCH_PREFIX:-agent/$slug-}"
     log="$STATE_DIR/$slug.log"
     opened="$STATE_DIR/$slug.opened-prs"
@@ -147,6 +166,20 @@ for conf in "${CONF_FILES[@]}"; do
     SLUG="$slug"
     export STATE_DIR SLUG
     core_load_adapter "$BOARD_ADAPTER"
+
+    ticket_has_live_qa_verdict() {
+      local ref="$1" board="$2" task comments qa_id
+      local qa_args=()
+      task="$($BOARD_CLI --json task get "$ref" 2>>"$log")" || return 1
+      comments="$($BOARD_CLI --json comment list "$ref" 2>>"$log")" || return 1
+      while IFS= read -r qa_id; do
+        [ -n "$qa_id" ] || continue
+        qa_args+=(--qa-agent-id "$qa_id")
+      done < <(awk -F '\t' -v board="$board" '$1 == board { print $2 }' "$QA_AGENTS")
+      [ "${#qa_args[@]}" -gt 0 ] || return 1
+      python3 "$CORE_ROOT/scripts/qa-live-verdict.py" --task "$task" --comments "$comments" \
+        "${qa_args[@]}" >/dev/null 2>>"$log"
+    }
 
     health_log() {
       local board="$1" message="$2" health_ref
@@ -312,25 +345,33 @@ print(row.get("section") or "")
            || [ "$current_lower" = "archived" ] || [ "$current_lower" = "archive" ]; then
           continue
         fi
-        if ! adapter_move_task "$BOARD_CLI" "$ref" "$DONE_SECTION" >>"$log" 2>&1; then
-          health_log "$board" "Reconciler could not move $ref to $DONE_SECTION after direct commit ${commit_sha:0:7} shipped."
+        destination="$QA_SECTION"
+        if ticket_has_live_qa_verdict "$ref" "$board"; then
+          destination="$DONE_SECTION"
+        fi
+        if ! adapter_move_task "$BOARD_CLI" "$ref" "$destination" >>"$log" 2>&1; then
+          health_log "$board" "Reconciler could not move $ref to $destination after direct commit ${commit_sha:0:7} shipped."
           continue
         fi
         current="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$log" || true)"
-        if [ "${current,,}" != "${DONE_SECTION,,}" ]; then
-          health_log "$board" "Reconciler could not verify $ref in $DONE_SECTION after direct commit ${commit_sha:0:7} shipped."
+        if [ "${current,,}" != "${destination,,}" ]; then
+          health_log "$board" "Reconciler could not verify $ref in $destination after direct commit ${commit_sha:0:7} shipped."
           continue
         fi
         if ! adapter_clear_assignees "$BOARD_CLI" "$ref" >>"$log" 2>&1; then
-          health_log "$board" "Reconciler moved $ref to $DONE_SECTION for direct commit ${commit_sha:0:7}, but could not clear its assignees."
+          health_log "$board" "Reconciler moved $ref to $destination for direct commit ${commit_sha:0:7}, but could not clear its assignees."
         fi
-        shipped_comment="Shipped by commit ${commit_sha:0:7} $commit_url, moved to Done."
+        if [ "${destination,,}" = "${DONE_SECTION,,}" ]; then
+          shipped_comment="Decision: QA supplied live evidence for every acceptance criterion after commit ${commit_sha:0:7} shipped at $commit_url."
+        else
+          shipped_comment="Handoff: QA must verify commit ${commit_sha:0:7} on live against every acceptance criterion. $commit_url"
+        fi
         if AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$ref" --raw \
             --text "$shipped_comment" >>"$log" 2>&1; then
           printf '%s reconciler moved %s to %s because direct commit %s shipped in %s\n' \
-            "$(date -Is)" "$ref" "$DONE_SECTION" "$commit_sha" "$commit_repo" >> "$log"
+            "$(date -Is)" "$ref" "$destination" "$commit_sha" "$commit_repo" >> "$log"
         else
-          health_log "$board" "Reconciler moved $ref to $DONE_SECTION for direct commit ${commit_sha:0:7}, but could not post its shipping comment."
+          health_log "$board" "Reconciler moved $ref to $destination for direct commit ${commit_sha:0:7}, but could not post its shipping comment."
         fi
       done < "$DIRECT_COMMITS"
     fi
@@ -392,25 +433,33 @@ if str(pull.get("state") or "").upper() == "MERGED":
           continue
         fi
         [ "$merged_rc" -eq 0 ] || continue
-        if ! adapter_move_task "$BOARD_CLI" "$ref" "$DONE_SECTION" >>"$log" 2>&1; then
-          health_log "$board" "Reconciler could not move $ref to $DONE_SECTION after $merged_url merged."
+        destination="$QA_SECTION"
+        if ticket_has_live_qa_verdict "$ref" "$board"; then
+          destination="$DONE_SECTION"
+        fi
+        if ! adapter_move_task "$BOARD_CLI" "$ref" "$destination" >>"$log" 2>&1; then
+          health_log "$board" "Reconciler could not move $ref to $destination after $merged_url merged."
           continue
         fi
         current="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$log" || true)"
-        if [ "${current,,}" != "${DONE_SECTION,,}" ]; then
-          health_log "$board" "Reconciler could not verify $ref in $DONE_SECTION after $merged_url merged."
+        if [ "${current,,}" != "${destination,,}" ]; then
+          health_log "$board" "Reconciler could not verify $ref in $destination after $merged_url merged."
           continue
         fi
         if ! adapter_clear_assignees "$BOARD_CLI" "$ref" >>"$log" 2>&1; then
-          health_log "$board" "Reconciler moved $ref to $DONE_SECTION for $merged_url, but could not clear its assignees."
+          health_log "$board" "Reconciler moved $ref to $destination for $merged_url, but could not clear its assignees."
         fi
-        shipped_comment="Shipped by merged pull request $merged_url, moved to Done."
+        if [ "${destination,,}" = "${DONE_SECTION,,}" ]; then
+          shipped_comment="Decision: QA supplied live evidence for every acceptance criterion after $merged_url merged."
+        else
+          shipped_comment="Handoff: QA must verify $merged_url on live against every acceptance criterion."
+        fi
         if AGENT_COMMENT_VERBATIM=yes "$BOARD_CLI" comment add "$ref" --raw \
             --text "$shipped_comment" >>"$log" 2>&1; then
           printf '%s reconciler moved %s to %s because %s is merged\n' \
-            "$(date -Is)" "$ref" "$DONE_SECTION" "$merged_url" >> "$log"
+            "$(date -Is)" "$ref" "$destination" "$merged_url" >> "$log"
         else
-          health_log "$board" "Reconciler moved $ref to $DONE_SECTION for $merged_url, but could not post its shipping comment."
+          health_log "$board" "Reconciler moved $ref to $destination for $merged_url, but could not post its shipping comment."
         fi
       done <<< "$rows"
     fi

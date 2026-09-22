@@ -129,7 +129,7 @@ value_after() {
 }
 case "$args" in
   *' task get '*) cat "$MOCK_TASKS" ;;
-  *' comment list '*) printf '{"comments":[]}\n' ;;
+  *' comment list '*) cat "$MOCK_COMMENTS" ;;
   *' task assign '*)
     ref="$(value_after assign)"
     printf 'assign %s agent-dev\n' "$ref" >> "$MOCK_BOARD_LOG"
@@ -263,7 +263,7 @@ env "${run_env[@]}" MOCK_MODEL_MODE=merged-comment-failure \
   MOCK_PR_TITLE='AGTE-168: keep merged runs successful' \
   "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/merged-comment.out" 2>&1
 merged_record="$TMP/state/agent-board-poll/run-records/dev-AGTE-168.json"
-if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = QA ] \
    && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$merged_record")" = done ] \
    && grep -qF '<a href="https://app.hypertask.ai/detail/project-5500/168">AGTE-168 Keep merged PR runs successful when closing comments fail</a>' "$TMP/board.log" \
    && grep -qF '<a href="https://github.com/example/repo/pull/9">https://github.com/example/repo/pull/9</a>' "$TMP/board.log" \
@@ -282,7 +282,7 @@ env "${run_env[@]}" MOCK_MODEL_MODE=merged-comment-failure MOCK_LINK_REWRITE_FAI
   MOCK_PR_TITLE='AGTE-168: keep merged runs successful' \
   "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/held-comment.out" 2>&1
 held_record="$TMP/state/agent-board-poll/run-records/dev-AGTE-168.json"
-if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = QA ] \
    && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$held_record")" = done ] \
    && [ "$(grep -c '^comment AGTE-168 ' "$TMP/board.log")" -eq 1 ] \
    && grep -qF 'closing comment for AGTE-168 remains held: ticket reference rewrite failed' "$TMP/state/agent-board-poll/dev.log" \
@@ -300,11 +300,39 @@ cat > "$TMP/comments.json" <<'EOF'
 {"comments":[{"id":1,"createdAt":"2026-01-01T00:00:00Z","agent":{"id":"agent-dev","displayName":"Dev"},"text":"<p>Done: Shipped in <a href=\"https://github.com/example/repo/pull/9\">https://github.com/example/repo/pull/9</a>.</p>"}]}
 EOF
 env "${run_env[@]}" MOCK_PR_STATE=MERGED "$ROOT/scripts/agent-board-reconcile"
-if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
-   && [ "$(grep -cFx 'move TEST-1 Done' "$TMP/board.log")" -eq 1 ]; then
-  echo 'PASS merged-pr-reconciled               one pass moves a Review ticket with a linked merged PR to Done'
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = QA ] \
+   && [ "$(grep -cFx 'move TEST-1 QA' "$TMP/board.log")" -eq 1 ] \
+   && ! grep -qFx 'move TEST-1 Done' "$TMP/board.log"; then
+  echo 'PASS merged-pr-reconciled               a developer shipped comment and merged PR hand the ticket to QA, not Done'
 else
   echo "FAIL merged-pr-reconciled               tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
+fi
+
+reset_case
+cat > "$TMP/config/qa.conf" <<EOF
+AGENT_ID="agent-qa"
+AGENT_NAME="QA"
+AGENT_KIND="qa"
+AGENT_SLUG="qa"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+BOARD_CLI="$TMP/board"
+PR_REPO="example/repo"
+EOF
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"Review","title":"Change it","description":"<h2>Acceptance criteria</h2><ul><li><p>Checkout completes.</p></li><li><p>Receipt appears.</p></li></ul>","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":2,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+cat > "$TMP/comments.json" <<'EOF'
+{"comments":[{"id":1,"createdAt":"2026-01-01T00:00:00Z","agent":{"id":"agent-dev","displayName":"Dev"},"text":"<p>Handoff: QA can verify <a href=\"https://github.com/example/repo/pull/9\">https://github.com/example/repo/pull/9</a>.</p>"},{"id":2,"createdAt":"2026-01-01T01:00:00Z","agent":{"id":"agent-qa","displayName":"QA"},"text":"<p>Done: verified on live.</p><ul><li>AC 1, checkout completes. Live evidence: checkout completed at https://live.example.test/checkout.</li><li>AC 2, receipt appears. Live evidence: receipt 42 appeared on the live account.</li></ul>"}]}
+EOF
+env "${run_env[@]}" MOCK_PR_STATE=MERGED "$ROOT/scripts/agent-board-reconcile"
+rm "$TMP/config/qa.conf"
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+   && grep -qFx 'move TEST-1 Done' "$TMP/board.log"; then
+  echo 'PASS merged-pr-live-qa-verdict          the reconciler completes only after QA records live evidence for every criterion'
+else
+  echo "FAIL merged-pr-live-qa-verdict          tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
 fi
 
 reset_case
@@ -312,10 +340,10 @@ cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-158","ticketNumber":"AGTE-158","projectId":15,"section":"Review","title":"Bug: PR #713 stayed red for two hours","description":"<p><a href=\"https://github.com/example/repo/pull/713\">PR 713</a> has stayed red.</p>","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[{"name":"bug"}],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
 EOF
 env "${run_env[@]}" MOCK_PR_STATE=MERGED "$ROOT/scripts/agent-board-reconcile"
-if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = QA ] \
    && grep -qxF 'unassign AGTE-158 agent-dev' "$TMP/board.log" \
-   && grep -qxF 'comment AGTE-158 Shipped by merged pull request https://github.com/example/repo/pull/713, moved to Done.' "$TMP/board.log"; then
-  echo 'PASS merged-pr-report-reconciled        a stayed-red report closes when its described pull request merges'
+   && grep -qxF 'comment AGTE-158 Handoff: QA must verify https://github.com/example/repo/pull/713 on live against every acceptance criterion.' "$TMP/board.log"; then
+  echo 'PASS merged-pr-report-reconciled        a stayed-red report enters QA when its described pull request merges'
 else
   echo "FAIL merged-pr-report-reconciled        tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
 fi
@@ -325,10 +353,10 @@ cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-9","ticketNumber":"AGTE-9","projectId":15,"section":"Review","title":"Change it","description":"Opened and merged by a human","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
 EOF
 env "${run_env[@]}" MOCK_MERGED_PR_TITLE='Agent template: AGTE-9 x' "$ROOT/scripts/agent-board-reconcile"
-if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = QA ] \
    && grep -qxF 'unassign AGTE-9 agent-dev' "$TMP/board.log" \
-   && [ "$(grep -cF 'comment AGTE-9 Shipped by merged pull request https://github.com/example/repo/pull/999, moved to Done.' "$TMP/board.log")" -eq 1 ]; then
-  echo 'PASS title-matched-merged-pr            a prefixed merged PR title closes its zero-comment ticket'
+   && [ "$(grep -cF 'comment AGTE-9 Handoff: QA must verify https://github.com/example/repo/pull/999 on live against every acceptance criterion.' "$TMP/board.log")" -eq 1 ]; then
+  echo 'PASS title-matched-merged-pr            a prefixed merged PR title sends its zero-comment ticket to QA'
 else
   echo "FAIL title-matched-merged-pr            tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
 fi
@@ -402,16 +430,13 @@ cat > "$TMP/tasks.json" <<'EOF'
 EOF
 env "${run_env[@]}" MOCK_GIT_COMMIT=yes MOCK_GIT_BRANCH=master \
   MOCK_GIT_TITLE='HTPR-6591 Show the shipped change' "$ROOT/scripts/agent-board-reconcile"
-sed -i 's/WATCH_SECTIONS="Backlog"/WATCH_SECTIONS="*"/' "$TMP/config/dev.conf"
-env "${run_env[@]}" "$ROOT/scripts/agent-board-poll" --once --explain dev >"$TMP/direct-pickup.out" 2>&1
-if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Done ] \
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = QA ] \
    && grep -qxF 'unassign HTPR-6591 agent-dev' "$TMP/board.log" \
-   && grep -qxF 'comment HTPR-6591 Shipped by commit aaaaaaa https://github.com/example/repo/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, moved to Done.' "$TMP/board.log" \
-   && grep -qF 'HTPR-6591 is done, nothing left to do' "$TMP/direct-pickup.out" \
-   && ! grep -qxF model "$TMP/board.log"; then
-  echo 'PASS direct-commit-shipped              a base commit closes, unassigns, comments, and prevents pickup'
+   && grep -qxF 'comment HTPR-6591 Handoff: QA must verify commit aaaaaaa on live against every acceptance criterion. https://github.com/example/repo/commit/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$TMP/board.log" \
+   && ! grep -qxF 'move HTPR-6591 Done' "$TMP/board.log"; then
+  echo 'PASS direct-commit-shipped              a shipped base commit enters QA instead of completing without evidence'
 else
-  echo "FAIL direct-commit-shipped              tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log") output=$(cat "$TMP/direct-pickup.out")"; exit 1
+  echo "FAIL direct-commit-shipped              tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
 fi
 python3 - "$TMP/tasks.json" <<'PYEOF'
 import json, sys
@@ -419,7 +444,7 @@ path = sys.argv[1]; data = json.load(open(path)); data["tasks"][0]["section"] = 
 PYEOF
 env "${run_env[@]}" MOCK_GIT_COMMIT=yes MOCK_GIT_BRANCH=master \
   MOCK_GIT_TITLE='HTPR-6591 Show the shipped change' "$ROOT/scripts/agent-board-reconcile"
-if [ "$(grep -c '^comment HTPR-6591 Shipped by commit ' "$TMP/board.log")" -eq 1 ] \
+if [ "$(grep -c '^comment HTPR-6591 Handoff: QA must verify commit ' "$TMP/board.log")" -eq 1 ] \
    && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Backlog ] \
    && grep -qF -- "--since=48 hours ago refs/remotes/origin/master" "$TMP/git.log" \
    && grep -qF 'log --reverse --format=%H%x09%s ' "$TMP/git.log" \

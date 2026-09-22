@@ -43,7 +43,9 @@ if [[ "$prompt" == *'QA VERDICT RETRY:'* ]]; then
   model_exit="${MOCK_RETRY_EXIT:-0}"
 fi
 case "$verdict" in
-  Done) text='<p><strong>Done: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>' ;;
+  Done) text='<p><strong>Done: QA passed every acceptance step on live.</strong></p><p>AC 1, checkout completes. Live evidence: checkout completed at https://live.example.test/checkout.</p><p>Next: no action.</p>' ;;
+  DoneWithPr) text='<p><strong>Done: QA passed every acceptance step on live.</strong></p><p>AC 1, checkout completes. Live evidence: checkout completed at https://live.example.test/checkout. PR <a href="https://github.com/example/repo/pull/1">https://github.com/example/repo/pull/1</a>.</p><p>Next: no action.</p>' ;;
+  WeakDone) text='<p><strong>Done: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>' ;;
   Handoff) text='<p><strong>Handoff: Dev must fix the failing payment step.</strong></p><p>Next: Fix the payment step.</p>' ;;
   Question) text='<p><strong>Question: QA needs test credentials.</strong></p><p>Can the manager provide them?</p>' ;;
   Unmarked) text='<p><strong>QA passed every acceptance step.</strong></p><p>Ready to release.</p>' ;;
@@ -95,7 +97,19 @@ PYEOF
       [ "${argv[$i]}" = "--section" ] && section="${argv[$((i + 1))]:-}"
     done
     printf 'move TEST-1 %s\n' "$section" >> "$MOCK_BOARD_LOG"
-    [ "${MOCK_MOVE_FAIL:-no}" != "yes" ] || [ "$section" != "Done" ]
+    if [ "${MOCK_MOVE_FAIL:-no}" != "yes" ] || [ "$section" != "Done" ]; then
+      SECTION="$section" python3 - "$MOCK_TASKS" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+for task in doc["tasks"]:
+    if task["ticketNumber"] == "TEST-1":
+        task["section"] = os.environ["SECTION"]
+json.dump(doc, open(path, "w", encoding="utf-8"))
+PYEOF
+    else
+      exit 1
+    fi
     ;;
   *' task unassign '*)
     assignee=""
@@ -143,7 +157,7 @@ run_case() {
   fi
   : > "$TMP/board.log"; : > "$TMP/model.log"; : > "$TMP/prompt.log"
   cat > "$TMP/tasks.json" <<EOF
-{"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"QA","title":"Verify checkout","description":"Test every acceptance step","assignees":$assignees,"labels":$labels,"commentCount":1}]}
+{"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"QA","title":"Verify checkout","description":"<h2>Acceptance criteria</h2><ul><li><p>Checkout completes.</p></li></ul>","assignees":$assignees,"labels":$labels,"commentCount":1}]}
 EOF
   printf '%s\n' "$comments" > "$TMP/comments.json"
   set +e
@@ -170,6 +184,30 @@ if grep -qF "MANDATORY: your final verdict comment's plain text must start with 
   ok qa-prompt-requires-marker 'the QA prompt makes a verdict marker mandatory'
 else
   bad qa-prompt-requires-marker "prompt=$(cat "$TMP/prompt.log")"
+fi
+if grep -qF 'AC 1, <criterion name>. Live evidence:' "$TMP/prompt.log" \
+   && grep -qF 'result, or developer report is not live evidence.' "$TMP/prompt.log"; then
+  ok qa-prompt-requires-live-evidence 'the QA prompt requires criterion-by-criterion live evidence'
+else
+  bad qa-prompt-requires-live-evidence "prompt=$(cat "$TMP/prompt.log")"
+fi
+
+run_case DoneWithPr '[]' '{"comments":[]}'
+if grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
+   && ! grep -qxF 'move TEST-1 AI Review' "$TMP/board.log" \
+   && grep -qF 'QA move skipped for TEST-1: its live-evidence verdict already moved it to Done' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-live-verdict-stays-done 'a linked PR cannot pull a qualifying live QA verdict back out of Done'
+else
+  bad qa-live-verdict-stays-done "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out") log=$(cat "$TMP/state/agent-board-poll/qa-runner.log")"
+fi
+
+run_case WeakDone '[]' '{"comments":[]}'
+if grep -qxF 'move TEST-1 QA' "$TMP/board.log" \
+   && ! grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
+   && grep -qF 'Done move refused for TEST-1: QA must name every acceptance criterion with live evidence' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-pass-needs-live-evidence 'a QA Done marker without per-criterion live evidence stays in QA'
+else
+  bad qa-pass-needs-live-evidence "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out") log=$(cat "$TMP/state/agent-board-poll/qa-runner.log")"
 fi
 if [ -x "$AGENT_IDENTITY_SHIM_DIR/qa-runner/hypertask" ] \
    && [ ! -e "$XDG_RUNTIME_DIR/agent-identity-shims/qa-runner/hypertask" ]; then
@@ -302,7 +340,7 @@ else
 fi
 
 old="$(date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
-run_case Done '[]' "{\"comments\":[{\"id\":90,\"createdAt\":\"$old\",\"agent\":{\"id\":\"agent-qa\",\"displayName\":\"QA Runner\"},\"text\":\"<p><strong>Done: QA passed.</strong></p><p>Next: Release.</p>\"}]}"
+run_case Done '[]' "{\"comments\":[{\"id\":90,\"createdAt\":\"$old\",\"agent\":{\"id\":\"agent-qa\",\"displayName\":\"QA Runner\"},\"text\":\"<p><strong>Done: QA passed on live.</strong></p><p>AC 1, checkout completes. Live evidence: checkout completed at https://live.example.test/checkout.</p><p>Next: no action.</p>\"}]}"
 if grep -qxF 'move TEST-1 Done' "$TMP/board.log" && [ ! -s "$TMP/model.log" ] \
    && grep -qF 'QA backfill comment 90 moved TEST-1 to Done from verdict Done' "$TMP/state/agent-board-poll/qa-runner.log"; then
   ok qa-verdict-backfill 'an own verdict older than ten minutes is moved without another run'
