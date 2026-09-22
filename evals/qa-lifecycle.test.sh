@@ -175,8 +175,9 @@ fi
 run_case Unmarked '[]' '{"comments":[]}' \
   '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' no Done
 if [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 2 ] \
+   && [ "$(cat "$TMP/exit")" -eq 0 ] \
    && grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
-   && ! grep -qF 'Agent Blocked (Infra)' "$TMP/board.log" \
+   && ! grep -Eq 'Agent Blocked \(Infra\)|HT Manager Review|Valentin Review' "$TMP/board.log" \
    && ! grep -qF 'exited 65' "$TMP/out" \
    && grep -qF 'QA verdict retry for TEST-1 returned a marked verdict' "$TMP/state/agent-board-poll/qa-runner.log"; then
   ok qa-unmarked-retry-pass 'an unmarked response gets one retry and its marked verdict completes'
@@ -188,7 +189,7 @@ run_case Unmarked '[]' '{"comments":[]}' \
   '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' no Unmarked
 if [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 2 ] \
    && grep -qxF 'move TEST-1 QA' "$TMP/board.log" \
-   && ! grep -qF 'Agent Blocked (Infra)' "$TMP/board.log" \
+   && ! grep -Eq 'Agent Blocked \(Infra\)|HT Manager Review|Valentin Review' "$TMP/board.log" \
    && grep -qF 'exited 65' "$TMP/out" \
    && grep -qF 'no verdict marker after one retry' "$TMP/state/agent-board-poll/qa-runner.log"; then
   ok qa-unmarked-retry-fails-in-qa 'two unmarked responses fail once without entering a human lane'
