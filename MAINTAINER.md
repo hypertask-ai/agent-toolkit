@@ -586,14 +586,18 @@ conf under `~/.config/hypertask-agents`, the runner locks and logs under
 `~/.local/state/ht-supervisor/health.json`. It never calls a model or writes to
 the board.
 
-Each collection atomically writes `factory-status.json`, `agent-feed.json`, and
-`agent-status-metrics.json` beside the runner state. The factory document uses
-schema version 1 and is uploaded through `/api/factory-status?project=hypertask`,
-which stores `ops/factory-status/hypertask.json`. The page KPI document goes to
-`/api/agent-feed`. Both uploads load the Cloudflare Access headers from the
-mode-0600 `~/.config/hypertask-app/credentials.env` and the route's dedicated
-bearer from `~/.config/hypertask-agent-runtime.env`; errors never print a
-credential or response body.
+Each collection atomically writes `factory-status.json`, `agent-feed.json`,
+`agent-activity.json`, and `agent-status-metrics.json` beside the runner state.
+The factory document uses schema version 1 and is uploaded through
+`/api/factory-status?project=hypertask`, which stores
+`ops/factory-status/hypertask.json`. The page KPI document goes to
+`/api/agent-feed`; `/api/agent-activity` receives current work, QA, and PR-fix
+rounds with elapsed minutes. The activity also identifies a live red-PR repair
+so the page's pile-up bar can mark it as being fixed. All uploads load the
+Cloudflare Access headers from the mode-0600
+`~/.config/hypertask-app/credentials.env` and the route's dedicated bearer from
+`~/.config/hypertask-agent-runtime.env`; errors never print a credential or
+response body.
 
 Current work comes from `<slug>.lock`, including the numeric ticket identity
 written by new runner versions. Execution falls back to structured run lines in
