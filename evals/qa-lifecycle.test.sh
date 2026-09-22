@@ -37,16 +37,20 @@ prompt="${!#}"
 printf 'model ran\n' >> "$MOCK_MODEL_LOG"
 printf '%s\n' "$prompt" >> "${MOCK_PROMPT_LOG:-/dev/null}"
 verdict="$MOCK_VERDICT"
+model_exit="${MOCK_MODEL_EXIT:-0}"
 if [[ "$prompt" == *'QA VERDICT RETRY:'* ]]; then
   verdict="${MOCK_RETRY_VERDICT:-$MOCK_VERDICT}"
+  model_exit="${MOCK_RETRY_EXIT:-0}"
 fi
 case "$verdict" in
   Done) text='<p><strong>Done: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>' ;;
   Handoff) text='<p><strong>Handoff: Dev must fix the failing payment step.</strong></p><p>Next: Fix the payment step.</p>' ;;
   Question) text='<p><strong>Question: QA needs test credentials.</strong></p><p>Can the manager provide them?</p>' ;;
   Unmarked) text='<p><strong>QA passed every acceptance step.</strong></p><p>Ready to release.</p>' ;;
+  Silent) exit "$model_exit" ;;
 esac
 "$AGENT_BOARD_CLI" comment add TEST-1 --text "$text" >/dev/null
+exit "$model_exit"
 EOF
 cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
@@ -127,6 +131,7 @@ EOF
 
 run_case() {
   local verdict="$1" labels="$2" comments="$3" assignees move_fail="${5:-no}" retry_verdict="${6:-}"
+  local model_exit="${7:-0}" retry_exit="${8:-0}"
   if [ "$#" -ge 4 ]; then
     assignees="$4"
   else
@@ -145,7 +150,8 @@ EOF
   env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
     HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT="$verdict" \
-    MOCK_RETRY_VERDICT="$retry_verdict" MOCK_MOVE_FAIL="$move_fail" \
+    MOCK_MODEL_EXIT="$model_exit" MOCK_RETRY_VERDICT="$retry_verdict" MOCK_RETRY_EXIT="$retry_exit" \
+    MOCK_MOVE_FAIL="$move_fail" \
     MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" MOCK_PROMPT_LOG="$TMP/prompt.log" \
     "$ROOT/scripts/agent-board-poll" --once qa-runner > "$TMP/out" 2>&1
@@ -195,6 +201,18 @@ if [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 2 ] \
   ok qa-unmarked-retry-fails-in-qa 'two unmarked responses fail once without entering a human lane'
 else
   bad qa-unmarked-retry-fails-in-qa "exit=$(cat "$TMP/exit") board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+
+run_case Silent '[]' '{"comments":[]}' \
+  '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' no '' 75
+if [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 1 ] \
+   && grep -qxF 'move TEST-1 Agent Blocked (Infra)' "$TMP/board.log" \
+   && grep -qF 'exited 75' "$TMP/out" \
+   && ! grep -qF 'QA verdict marker missing for TEST-1' "$TMP/state/agent-board-poll/qa-runner.log" \
+   && grep -qF 'model exited 75 before returning a verdict' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-process-failure-no-retry 'a failed QA process keeps its exit and does not spend the marker retry'
+else
+  bad qa-process-failure-no-retry "exit=$(cat "$TMP/exit") board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 
 run_case Handoff '[]' '{"comments":[]}'

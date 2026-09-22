@@ -4854,7 +4854,8 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     qa_comment="$(qa_latest_posted_comment "$ref" "$task_id" "$board")"
     qa_info="$(qa_verdict_info "$qa_comment")"
     qa_retried="no"
-    if [ -z "$qa_info" ] && [ "$worker_exited" = "yes" ]; then
+    qa_retry_rc=0
+    if [ -z "$qa_info" ] && [ "$worker_exited" = "yes" ] && [ "$rc" -eq 0 ]; then
       qa_retried="yes"
       qa_retry_output="$RUN_OUTPUT_DIR/$SLUG-$ref-qa-verdict-retry.log"
       qa_retry_err="$RUN_OUTPUT_DIR/$SLUG-$ref-qa-verdict-retry.err"
@@ -4933,10 +4934,17 @@ ${qa_comment:-No ticket comment was posted.}"
       fi
     fi
     if [ -z "$qa_info" ]; then
-      printf 'QA verdict comment must start with Done:, Handoff:, or Question: after one retry\n' >> "$ERRFILE"
-      rc=65
-      qa_missing_verdict="yes"
-      log "QA lifecycle failed for $ref: no verdict marker after one retry"
+      if [ "$qa_retried" = "no" ] && [ "$rc" -ne 0 ]; then
+        log "QA verdict check skipped for $ref: model exited $rc before returning a verdict"
+      elif [ "$qa_retry_rc" -ne 0 ]; then
+        rc="$qa_retry_rc"
+        log "QA verdict retry failed for $ref: model exited $qa_retry_rc before returning a verdict"
+      else
+        printf 'QA verdict comment must start with Done:, Handoff:, or Question: after one retry\n' >> "$ERRFILE"
+        rc=65
+        qa_missing_verdict="yes"
+        log "QA lifecycle failed for $ref: no verdict marker after one retry"
+      fi
     else
       IFS=$'\t' read -r qa_marker _ _ <<< "$qa_info"
       run_verdict="$qa_marker"
