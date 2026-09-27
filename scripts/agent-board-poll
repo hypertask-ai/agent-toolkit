@@ -4858,11 +4858,16 @@ The required post-check failed. No pull request may open until it passes. Fix th
           cd "$RUN_DIR"
           export PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}"
           export TMPDIR="$repair_activity_dir"
-          export AGENT_NAME AGENT_ID AGENT_BOARD_CLI="$BOARD_CLI"
+          export AGENT_NAME AGENT_ID AGENT_BOARD_CLI="$BOARD_CLI" AGENT_QA_MOVE=no
+          export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
           export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
           export AGENT_OPENED_PRS="$OPENED_PRS"
           export AGENT_TICKET_CHECK_FILE="$ticket_check_file" AGENT_TICKET_WORKTREE="$RUN_DIR"
           export AGENT_HELD_COMMENT_FILE="$repair_activity_dir/held-comment.html"
+          export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
+          export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
+          export AGENT_ADVISOR_CONTEXT="$ADVISOR_CONTEXT" AGENT_ADVISOR_COUNTER="$ADVISOR_COUNTER"
+          export AGENT_ADVISOR_MAX="$ADVISOR_MAX" AGENT_ADVISOR_CLI="$ADVISOR_CLI"
           exec setsid --wait bash -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' \
             bash "$repair_pid_file" "${MODEL_ARGV[@]}" "$PROMPT"
         ) >>"$repair_output" 2>"$repair_err" &
