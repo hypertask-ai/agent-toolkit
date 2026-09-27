@@ -1,6 +1,6 @@
 # Agent conf schema
 
-Each agent has a 0600 `<config dir>/<slug>.conf`. It is declarative `KEY=value` shell syntax with uppercase keys only.
+Each agent has a 0600 `<config dir>/<board title>/<slug>.conf` (for example `~/.config/hypertask-agents/Agent Toolkit/tk-dev-1.conf`). Multi-board agents live under the FIRST board in `BOARD_ID`. Look up by slug, not by title: the board title is only a creation-time folder name. Flat `<config dir>/<slug>.conf` files still work. Sibling files (env and credentials) live beside the conf, with a flat fallback. It is declarative `KEY=value` shell syntax with uppercase keys only.
 
 ## The conf decides the provider
 

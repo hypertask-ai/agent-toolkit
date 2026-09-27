@@ -241,7 +241,7 @@ manager_current_conf() {
     ''|*[!a-z0-9-]*) return 1 ;;
   esac
   if [ -n "${MANAGER_CONFIG_DIR:-}" ]; then
-    conf="$MANAGER_CONFIG_DIR/$slug.conf"
+    conf="$(core_find_conf_in_dir "$MANAGER_CONFIG_DIR" "$slug")" || return 1
   else
     conf="$(core_find_conf "$slug")" || return 1
   fi
@@ -252,6 +252,17 @@ manager_current_conf() {
   grep -q '^BOARD_ADAPTER=' "$conf" || return 1
   grep -qvE '^\s*(#.*)?$|^[A-Z][A-Z0-9_]*=' "$conf" && return 1
   printf '%s' "$conf"
+}
+manager_config_root() {
+  local conf="$1" root
+  while IFS= read -r root; do
+    if [ "$(dirname "$conf")" = "$root" ] \
+       || [ "$(dirname "$(dirname "$conf")")" = "$root" ]; then
+      printf '%s' "$root"
+      return 0
+    fi
+  done < <(core_conf_dirs)
+  return 1
 }
 manager_conf_value() {
   python3 - "$1" "$2" <<'PYEOF'
@@ -352,7 +363,7 @@ manager_authorize() {
   [ "$manager" = "on" ] || [ "$maintainer" = "on" ] \
     || manager_refuse "$SUBCOMMAND refused: caller $MANAGER_CALLER is not a manager"
   MANAGER_CONF="$conf"
-  MANAGER_CONFIG_DIR="$(dirname "$conf")"
+  MANAGER_CONFIG_DIR="$(manager_config_root "$conf")"
   MANAGER_NAME="$(manager_conf_value "$conf" AGENT_NAME)"
   MANAGER_BOARD_CLI="$(manager_conf_value "$conf" BOARD_CLI)"
 }
@@ -493,7 +504,7 @@ maintainer_authorize() {
   [ "$(manager_conf_value "$conf" MAINTAINER)" = "on" ] \
     || manager_refuse "$SUBCOMMAND refused: caller $MANAGER_CALLER is not a maintainer"
   MANAGER_CONF="$conf"
-  MANAGER_CONFIG_DIR="$(dirname "$conf")"
+  MANAGER_CONFIG_DIR="$(manager_config_root "$conf")"
   MANAGER_NAME="$(manager_conf_value "$conf" AGENT_NAME)"
   MANAGER_BOARD_CLI="$(manager_conf_value "$conf" BOARD_CLI)"
 }
@@ -732,7 +743,7 @@ if [ "${SUBCOMMAND:-feedback}" = "mode" ]; then
   fi
   config_dir="$(readlink -f "$MANAGER_CONFIG_DIR")"
   shopt -s nullglob
-  for candidate in "$config_dir"/*.conf; do
+  for candidate in "$config_dir"/*/*.conf "$config_dir"/*.conf; do
     slug="$(basename "$candidate" .conf)"
     conf="$(manager_current_conf "$slug" 2>/dev/null)" || continue
     kind="$(manager_conf_value "$conf" AGENT_KIND)"
@@ -810,7 +821,7 @@ if [ "${SUBCOMMAND:-feedback}" = "quiet" ]; then
   if [ "$target" = "all" ]; then
     config_dir="$(readlink -f "$MANAGER_CONFIG_DIR")"
     shopt -s nullglob
-    for candidate in "$config_dir"/*.conf; do
+    for candidate in "$config_dir"/*/*.conf "$config_dir"/*.conf; do
       slug="$(basename "$candidate" .conf)"
       conf="$(manager_current_conf "$slug" 2>/dev/null)" || continue
       if manager_set_conf_value "$conf" QUIET "$setting"; then
@@ -1335,7 +1346,7 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   AUTO_UPDATE="$(host_config_value AUTO_UPDATE on)"
 
   if [ -z "$UPDATE_BOARD_CLI" ]; then
-    for update_conf in "$CONFIG_DIR"/*.conf; do
+    for update_conf in "$CONFIG_DIR"/*/*.conf "$CONFIG_DIR"/*.conf; do
       [ -f "$update_conf" ] || continue
       [ "$(manager_conf_value "$update_conf" MAINTAINER 2>/dev/null || true)" = "on" ] || continue
       candidate_cli="$(manager_conf_value "$update_conf" BOARD_CLI 2>/dev/null || true)"
@@ -1347,7 +1358,7 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
     done
   fi
   if [ -z "$UPDATE_BOARD_CLI" ]; then
-    for update_conf in "$CONFIG_DIR"/*.conf; do
+    for update_conf in "$CONFIG_DIR"/*/*.conf "$CONFIG_DIR"/*.conf; do
       [ -f "$update_conf" ] || continue
       candidate_cli="$(manager_conf_value "$update_conf" BOARD_CLI 2>/dev/null || true)"
       [ -x "$candidate_cli" ] || continue
@@ -1849,7 +1860,7 @@ PYEOF
   else
     synced_any=no
     synced_repos=""
-    for conf in $(core_conf_dirs | while IFS= read -r d; do ls -1 "$d"/*.conf 2>/dev/null; done); do
+    while IFS= read -r conf; do
       [ -f "$conf" ] || continue
       repo="$(sed -n 's/^AGENT_REPO="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$conf" | tail -n1)"
       [ -n "$repo" ] || continue
@@ -1862,7 +1873,7 @@ PYEOF
       else
         bash "$SYNC_SH" "$repo" 2>&1 | sed 's/^/  /' || true
       fi
-    done
+    done < <(core_conf_dirs | while IFS= read -r d; do core_conf_files_in_dir "$d"; done)
     [ "$synced_any" = "yes" ] || echo "  no conf names a checkout that exists on this host"
   fi
 
@@ -1893,7 +1904,7 @@ PYEOF
   CONVERTED=0
   SKIPPED=0
   if [ -d "$CONFIG_DIR" ]; then
-    for f in "$CONFIG_DIR"/*.conf; do
+    for f in "$CONFIG_DIR"/*/*.conf "$CONFIG_DIR"/*.conf; do
       [ -f "$f" ] || continue
       base="$(basename "$f" .conf)"
       grep -qE '^HT_(AGENT_ID|MODEL|MISSION|START_SECTIONS)=' "$f" || continue
@@ -2026,7 +2037,7 @@ PYEOF
   echo "== 3c. chat lane for template-wired agents =="
   CHAT_ENABLED=0
   if [ -d "$CONFIG_DIR" ]; then
-    for f in "$CONFIG_DIR"/*.conf; do
+    for f in "$CONFIG_DIR"/*/*.conf "$CONFIG_DIR"/*.conf; do
       [ -f "$f" ] || continue
       grep -qE '^WIRING="?(poll|fleet)"?$' "$f" || continue
       grep -q '^CHAT=' "$f" && continue
@@ -2053,7 +2064,7 @@ PYEOF
   GRAFT_DEFAULTED=0
   for dir in "${CONF_DIRS[@]}"; do
     [ -d "$dir" ] || continue
-    for f in "$dir"/*.conf; do
+    for f in "$dir"/*/*.conf "$dir"/*.conf; do
       [ -f "$f" ] || continue
       grep -q '^BOARD_ADAPTER=' "$f" || continue
       grep -q '^GRAFT=' "$f" && continue

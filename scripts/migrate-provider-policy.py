@@ -118,7 +118,7 @@ def main() -> int:
     for directory in dict.fromkeys(Path(item).expanduser() for item in args.directories):
         if not directory.is_dir():
             continue
-        for path in sorted(directory.glob("*.conf")):
+        for path in sorted((*directory.glob("*/*.conf"), *directory.glob("*.conf"))):
             changed += int(migrate(path, args.version, args.dry_run))
     action = "would rewrite" if args.dry_run else "rewrote"
     print(f"  {action} {changed} conf(s) with provider policy updates")

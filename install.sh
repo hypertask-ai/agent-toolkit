@@ -233,13 +233,11 @@ migrate_queued_instructions() {
     fi
     parent="$(basename "$(dirname "$queue")")"
     slug="${parent%-instructions}"
-    conf=""
-    for candidate in "$AGENT_CONF_DIR/$slug.conf" \
-      "$HOME/.config/agents/$slug.conf" "$HOME/.config/hypertask-agents/$slug.conf"; do
-      [ -f "$candidate" ] || continue
-      conf="$candidate"
-      break
-    done
+    conf="$(
+      CORE_ROOT="$SRC"
+      . "$SRC/scripts/lib/core.sh"
+      AGENT_CONFIG_DIR="$AGENT_CONF_DIR" core_find_conf "$slug"
+    )" || true
     [ -n "$conf" ] || fail "queued instruction $queue has no agent conf" \
       "restore the conf, then run install.sh again"
     echo "instruction migration: $(basename "$queue") -> board $INSTRUCTION_BOARD_ID"
@@ -643,7 +641,7 @@ EOF
           "$SYSTEMD_USER_DIR/agent-template-feedback.timer"
   fi
 
-  for conf in "$AGENT_CONF_DIR"/*.conf; do
+  for conf in "$AGENT_CONF_DIR"/*/*.conf "$AGENT_CONF_DIR"/*.conf; do
     [ -f "$conf" ] || continue
     slug="$(basename "$conf" .conf)"
     if grep -qE '^WIRING="?events"?$' "$conf"; then

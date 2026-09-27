@@ -1076,7 +1076,7 @@ class ChatDaemon:
 
     def agents(self) -> list[Agent]:
         agents: list[Agent] = []
-        for path in sorted(self.config_dir.glob("*.conf")):
+        for path in sorted((*self.config_dir.glob("*/*.conf"), *self.config_dir.glob("*.conf"))):
             try:
                 agent = Agent.from_conf(path)
                 if agent:
@@ -1090,7 +1090,7 @@ class ChatDaemon:
 
     def runtime_agents(self) -> list[RuntimeAgent]:
         agents: list[RuntimeAgent] = []
-        for path in sorted(self.config_dir.glob("*.conf")):
+        for path in sorted((*self.config_dir.glob("*/*.conf"), *self.config_dir.glob("*.conf"))):
             try:
                 agent = RuntimeAgent.from_conf(path)
                 if agent:
@@ -1494,7 +1494,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 def show_status(config_dir: Path, state_dir: Path) -> int:
     status = read_json(state_dir / "runtime-status.json")
     shown = 0
-    for path in sorted(config_dir.glob("*.conf")):
+    for path in sorted((*config_dir.glob("*/*.conf"), *config_dir.glob("*.conf"))):
         agent = RuntimeAgent.from_conf(path)
         if not agent:
             continue

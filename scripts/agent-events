@@ -68,7 +68,7 @@ def state_dir() -> Path:
 
 
 def agent_rows(events_only: bool = False) -> list[tuple[Path, dict[str, str]]]:
-    rows = [(path, parse_config(path)) for path in sorted(config_dir().glob("*.conf"))]
+    rows = [(path, parse_config(path)) for path in sorted((*config_dir().glob("*/*.conf"), *config_dir().glob("*.conf")))]
     if events_only:
         rows = [(path, values) for path, values in rows if values.get("WIRING") == "events"]
     return rows

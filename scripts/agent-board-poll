@@ -2594,7 +2594,7 @@ MENTION="$(adapter_mention_token "$AGENT_ID")"
 answerer_agent_rows() {
   local current_adapter="$BOARD_ADAPTER" dir agent_conf token
   while IFS= read -r dir; do
-    for agent_conf in "$dir"/*.conf; do
+    for agent_conf in "$dir"/*/*.conf "$dir"/*.conf; do
       [ -f "$agent_conf" ] || continue
       (
         unset AGENT_ID AGENT_SLUG BOARD_ADAPTER BOARD_ID

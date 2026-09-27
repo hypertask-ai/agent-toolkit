@@ -22,12 +22,16 @@ cat > "$TMP/evals/command-policy.test.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 23
 EOF
+cat > "$TMP/evals/board-folders.test.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'PASS board-folder-stub isolated suite carries the new check\n'
+EOF
 cat > "$TMP/evals/identity-shim.test.sh" <<'EOF'
 #!/usr/bin/env bash
 printf 'PASS continued-after-crash runner continued after the crashing file\n'
 EOF
 chmod +x "$TMP/evals/run-evals.sh" "$TMP/evals/command-policy.test.sh" \
-  "$TMP/evals/identity-shim.test.sh" "$TMP/scripts/triage.sh"
+  "$TMP/evals/identity-shim.test.sh" "$TMP/evals/board-folders.test.sh" "$TMP/scripts/triage.sh"
 
 set +e
 EVAL_TEST_TIMEOUT_SECONDS=0 bash "$TMP/evals/run-evals.sh" > "$TMP/output" 2>&1
@@ -36,7 +40,7 @@ set -e
 if [ "$status" -eq 1 ] \
    && grep -q '^FAIL command-policy.test.sh exited 23$' "$TMP/output" \
    && grep -q '^PASS continued-after-crash ' "$TMP/output" \
-   && grep -q '^7 subtest file(s) run, 1 failed$' "$TMP/output" \
+   && grep -q '^8 subtest file(s) run, 1 failed$' "$TMP/output" \
    && grep -q '^failing subtest files: command-policy.test.sh$' "$TMP/output"; then
   ok crashing-subtest-reported "a crashing file is named and later files plus the summary still run"
 else

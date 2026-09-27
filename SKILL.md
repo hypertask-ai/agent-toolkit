@@ -940,3 +940,5 @@ it for you), `agent-template update` re-runs it daily on every checkout a conf
 names. It is idempotent, and it never overwrites a file a project has edited:
 each file it writes carries a header naming the template version and a hash of
 its own body, so an edit is visible as a hash that no longer matches.
+
+Agent settings are stored at `~/.config/hypertask-agents/<board title>/<slug>.conf` (for example `Agent Toolkit/tk-dev-1.conf`). Multi-board agents use the FIRST board in `BOARD_ID`. Look up by slug, not by title; existing flat confs still work, and sibling env/credentials follow the conf with flat fallback.

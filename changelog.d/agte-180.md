@@ -1,0 +1,1 @@
+- AGTE-180 stores agent settings under board-title folders, keeps flat conf lookup compatible, and lets QA pick up merged tickets awaiting a verdict.

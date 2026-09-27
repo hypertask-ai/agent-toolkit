@@ -392,7 +392,7 @@ class Health:
             fingerprint = hashlib.sha256((stamp + str(row.get("detail") or "")).encode()).hexdigest()[:12]
             active[f"runner:{slug}:error:{fingerprint}"] = f"Runner {html.escape(slug)} error at {html.escape(stamp)}."
         config_dir = Path(self.args.config_dir)
-        for conf in config_dir.glob("*.conf"):
+        for conf in (*config_dir.glob("*/*.conf"), *config_dir.glob("*.conf")):
             if self.conf_value(conf, "BOARD_ADAPTER") == "":
                 continue
             slug = self.conf_value(conf, "AGENT_SLUG") or conf.stem

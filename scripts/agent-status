@@ -370,7 +370,7 @@ def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) ->
     activity_agents = {}
     all_runs: list[dict[str, Any]] = []
     all_outcomes: list[dict[str, Any]] = []
-    for conf_path in sorted(config_dir.glob("*.conf")):
+    for conf_path in sorted((*config_dir.glob("*/*.conf"), *config_dir.glob("*.conf"))):
         config = parse_env(conf_path)
         slug = config.get("AGENT_SLUG") or conf_path.stem
         role = role_of(config, slug)

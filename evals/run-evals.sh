@@ -350,6 +350,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/release-policy.test.sh" ]; then
   echo "-- merge-time release policy checks --"
   run_test "$HERE/release-policy.test.sh" bash "$HERE/release-policy.test.sh" || :
 fi
+if [ -z "$ONLY" ]; then
+  echo ""
+  echo "-- board folder and QA merged pickup checks --"
+  run_test "$HERE/board-folders.test.sh" bash "$HERE/board-folders.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/qa-sections.test.sh" ]; then
   echo ""
   echo "-- QA section behavioural checks --"
