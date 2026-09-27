@@ -67,7 +67,15 @@ fi
 CONF="$(core_find_conf "$SLUG")" || die \
   "no conf found for agent '$SLUG'" \
   "run create-agent.sh --name \"<Name>\" --wiring poll to create one, or check the slug"
+unset PAUSED
 core_read_conf "$CONF"
+if [ "${PAUSED:-}" = "yes" ]; then
+  CORE_STATE_NAME="agent-board-poll"
+  STATE_DIR="$(core_state_dir)"
+  mkdir -p "$STATE_DIR"
+  printf '%s paused\n' "$(date -Is)" >> "$STATE_DIR/$SLUG.log"
+  exit 0
+fi
 
 # ---------- required conf keys ----------
 for key in AGENT_ID AGENT_NAME BOARD_ADAPTER BOARD_ID TOKEN_FILE WATCH_SECTIONS \

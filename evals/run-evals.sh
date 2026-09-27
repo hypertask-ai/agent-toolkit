@@ -259,6 +259,9 @@ if [ -z "$ONLY" ]; then
   echo ""
   echo "-- agent-events behavioural checks --"
   run_test "$HERE/agent-events.test.py" python3 "$HERE/agent-events.test.py" || :
+  echo ""
+  echo "-- agent pause behavioural checks --"
+  run_test "$HERE/agent-pause.test.sh" bash "$HERE/agent-pause.test.sh" || :
 fi
 
 # The case file replays text corrections. sync-project.sh is about what lands

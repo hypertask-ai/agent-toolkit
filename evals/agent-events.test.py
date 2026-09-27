@@ -11,6 +11,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import threading
@@ -116,6 +117,20 @@ with tempfile.TemporaryDirectory() as temporary:
         ("foreign-agent", {"action": "configure", "agent_id": "self", "active": False}),
         ("poll-agent", {"action": "configure", "agent_id": "self", "active": False}),
     ]
+    subscriptions["foreign-agent"]["active"] = True
+    subprocess.run([root / "scripts/agent-pause", "foreign-agent"], check=True)
+    paused_audit = io.StringIO()
+    with contextlib.redirect_stdout(paused_audit):
+        assert module.audit_all(json_output=True) == 0
+        assert module.reconcile_all() == 0
+    assert json.loads(paused_audit.getvalue())["foreign_webhooks"] == []
+    assert len(configure_calls) == 2
+    subprocess.run([root / "scripts/agent-resume", "foreign-agent"], check=True)
+    with contextlib.redirect_stdout(io.StringIO()):
+        assert module.audit_all(json_output=True) == 0
+        assert module.reconcile_all() == 0
+    assert len(configure_calls) == 3
+    assert configure_calls[-1][0] == "foreign-agent"
     module.webhook_subscription = original_subscription
     module.api_request = original_request
 
@@ -176,6 +191,23 @@ with tempfile.TemporaryDirectory() as temporary:
         assert calls.read_text(encoding="utf-8").strip().splitlines() == [
             "--once --ticket AGTE-38 --board 15 test-agent"
         ]
+        subprocess.run([root / "scripts/agent-pause", "test-agent"], check=True)
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert response.status == 202
+            assert json.load(response) == {"status": "paused"}
+        assert module.read_queue("test-agent") == []
+        backlog = dict(payload, deliveryId="delivery-backlog", ticketNumber="AGTE-39")
+        module.write_queue("test-agent", [backlog])
+        module.wake.set()
+        time.sleep(0.1)
+        assert "delivery-backlog" not in (state / "test-agent.handled").read_text()
+        assert len(calls.read_text().splitlines()) == 1
+        subprocess.run([root / "scripts/agent-resume", "test-agent"], check=True)
+        module.wake.set()
+        deadline = time.time() + 5
+        while time.time() < deadline and len(calls.read_text().splitlines()) < 2:
+            time.sleep(0.01)
+        assert calls.read_text().splitlines()[-1] == "--once --ticket AGTE-39 --board 15 test-agent"
     finally:
         server.shutdown()
         thread.join(timeout=5)

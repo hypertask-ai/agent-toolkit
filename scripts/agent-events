@@ -105,6 +105,8 @@ def foreign_webhooks(deactivate: bool = False) -> tuple[list[dict[str, str]], li
     violations: list[dict[str, str]] = []
     errors: list[str] = []
     for path, values in agent_rows():
+        if values.get("PAUSED") == "yes":
+            continue
         adapter = values.get("BOARD_ADAPTER", "")
         if adapter and adapter != "hypertask":
             continue
@@ -394,6 +396,8 @@ def dispatch() -> None:
         launched = False
         with queue_lock:
             for path, values in agent_rows(events_only=True):
+                if values.get("PAUSED") == "yes":
+                    continue
                 slug = values.get("AGENT_SLUG") or path.stem
                 try:
                     limit = max(1, int(values.get("MAX_CONCURRENT_RUNS", "1")))
@@ -495,6 +499,9 @@ class EventHandler(BaseHTTPRequestHandler):
         expected = "sha256=" + hmac.new(secret.encode(), timestamp.encode() + b"." + raw, hashlib.sha256).hexdigest()
         if not fresh or not hmac.compare_digest(signature, expected):
             self.reply(401, "invalid signature")
+            return
+        if values.get("PAUSED") == "yes":
+            self.reply(202, "paused")
             return
         boards = {item.strip() for item in values.get("BOARD_ID", "").split(",") if item.strip()}
         if str(payload.get("projectId") or "") not in boards or not payload.get("ticketNumber"):
