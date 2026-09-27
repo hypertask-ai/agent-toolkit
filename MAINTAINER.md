@@ -581,7 +581,7 @@ acknowledgement stays visible either way.
 
 `agent-status.timer` runs every 60 seconds and publishes the owner-facing
 Agents page independently of any retired factory loop. It reads every valid
-conf under `~/.config/hypertask-agents`, the runner locks and logs under
+conf in board folders under `~/.config/hypertask-agents` and legacy flat confs, the runner locks and logs under
 `~/.local/state/agent-board-poll`, and supervisor violations from
 `~/.local/state/ht-supervisor/health.json`. It never calls a model or writes to
 the board.

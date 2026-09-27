@@ -16,6 +16,9 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config_files import config_files
 from typing import Any
 
 MAX_BODY = 1024 * 1024
@@ -64,7 +67,7 @@ def api_base(values: dict[str, str]) -> str:
 
 
 def agents() -> list[tuple[Path, dict[str, str]]]:
-    return [(path, parse_config(path)) for path in sorted(config_dir().glob("*.conf"))]
+    return [(path, parse_config(path)) for path in config_files(config_dir())]
 
 
 def api_request(values: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:
