@@ -155,6 +155,16 @@ os.chmod(path, 0o600)
 PYEOF
 }
 
+# Return success for any paused value, warning on unrecognized non-empty values.
+core_is_paused() {
+  local value="${1:-}" slug="${2:-agent}"
+  case "${value,,}" in
+    ''|no|false|0|off) return 1 ;;
+    yes|true|1|on) return 0 ;;
+    *) printf 'WARNING: %s: unrecognized PAUSED=%q; treating as paused\n' "$slug" "$value" >&2; return 0 ;;
+  esac
+}
+
 # core_read_conf <path> : source a KEY=value conf, refusing anything else
 core_read_conf() {
   local path="$1"

@@ -160,6 +160,24 @@ with tempfile.TemporaryDirectory() as temporary:
     assert second_api.replies == [("session-beta", "message-beta", "reply from beta")]
     print("PASS agent-chat-two-agents-independent")
 
+with tempfile.TemporaryDirectory() as temporary:
+    temporary = Path(temporary)
+    config = temporary / "conf"
+    config.mkdir()
+    (config / "paused.conf").write_text('PAUSED="TrUe"\n')
+    daemon = ChatDaemon(config, temporary / "state")
+    calls = []
+    module["run_provider"].__globals__["run_provider"] = lambda *_args, **_kwargs: calls.append(1) or "reply"
+    api = FakeApi()
+    message = {"id": "pause-message", "sessionId": "session-paused", "text": "hello"}
+    daemon.handle(agent("paused"), message, api)
+    assert calls == [] and api.replies == []
+    assert "pause-message paused; no reply" in (daemon.state_dir / "paused.log").read_text()
+    (config / "paused.conf").write_text('PAUSED="off"\n')
+    daemon.handle(agent("paused"), message, api)
+    assert len(calls) == 1 and api.replies == [("session-paused", "pause-message", "reply")]
+    print("PASS agent-chat-paused-silent-until-resume")
+
 
 class FakeRoomApi:
     def __init__(self, history):

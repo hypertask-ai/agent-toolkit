@@ -1,6 +1,16 @@
 """Agent config files in board folders, with legacy flat files as fallback."""
 
+import sys
 from pathlib import Path
+
+
+def is_paused(value: str | None, slug: str = "") -> bool:
+    normalized = (value or "").casefold()
+    if normalized in {"", "no", "false", "0", "off"}:
+        return False
+    if normalized not in {"yes", "true", "1", "on"}:
+        print(f"WARNING: {slug or 'agent'}: unrecognized PAUSED={value!r}; treating as paused", file=sys.stderr)
+    return True
 
 
 def config_files(root: Path):

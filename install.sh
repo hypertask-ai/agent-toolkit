@@ -292,6 +292,8 @@ echo "bin:    $BIN/agent-fleet-watch -> $DEST/scripts/agent-fleet-watch"
 echo "bin:    $BIN/agent-status -> $DEST/scripts/agent-status"
 echo "bin:    $BIN/agent-chat -> $DEST/scripts/agent-chat"
 echo "bin:    $BIN/agent-events -> $DEST/scripts/agent-events"
+echo "bin:    $BIN/agent-pause -> $DEST/scripts/agent-pause"
+echo "bin:    $BIN/agent-resume -> $DEST/scripts/agent-resume"
 echo "bin:    $BIN/agent-kick -> $DEST/scripts/agent-kick"
 echo "bin:    $BIN/agent-template -> $DEST/scripts/agent-template"
 echo "bin:    $BIN/agent-template-feedback -> $DEST/scripts/agent-template-feedback"
@@ -375,7 +377,7 @@ chmod 755 "$DEST/scripts/create-agent.sh" "$DEST/scripts/agent-board-poll" \
           "$DEST/scripts/agent-board-poll-tick" "$DEST/scripts/agent-board-reconcile" \
           "$DEST/scripts/agent-fleet-watch" \
           "$DEST/scripts/agent-progress" "$DEST/scripts/agent-reply-contract" \
-          "$DEST/scripts/agent-board-health" "$DEST/scripts/agent-status" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-events" "$DEST/scripts/agent-kick" \
+          "$DEST/scripts/agent-board-health" "$DEST/scripts/agent-status" "$DEST/scripts/agent-chat" "$DEST/scripts/agent-events" "$DEST/scripts/agent-pause" "$DEST/scripts/agent-resume" "$DEST/scripts/agent-kick" \
           "$DEST/scripts/agent-template" "$DEST/scripts/agent-template-feedback" \
           "$DEST/scripts/agent-template-weekly" \
           "$DEST/scripts/agent-advisor" "$DEST/scripts/agent-rules" "$DEST/scripts/triage.sh" \
@@ -393,6 +395,8 @@ ln -sfn "$DEST/scripts/agent-fleet-watch" "$BIN/agent-fleet-watch"
 ln -sfn "$DEST/scripts/agent-status" "$BIN/agent-status"
 ln -sfn "$DEST/scripts/agent-chat" "$BIN/agent-chat"
 ln -sfn "$DEST/scripts/agent-events" "$BIN/agent-events"
+ln -sfn "$DEST/scripts/agent-pause" "$BIN/agent-pause"
+ln -sfn "$DEST/scripts/agent-resume" "$BIN/agent-resume"
 ln -sfn "$DEST/scripts/agent-kick" "$BIN/agent-kick"
 ln -sfn "$DEST/scripts/agent-template" "$BIN/agent-template"
 ln -sfn "$DEST/scripts/agent-template-feedback" "$BIN/agent-template-feedback"

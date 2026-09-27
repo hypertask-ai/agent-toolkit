@@ -259,6 +259,9 @@ if [ -z "$ONLY" ]; then
   echo ""
   echo "-- agent-events behavioural checks --"
   run_test "$HERE/agent-events.test.py" python3 "$HERE/agent-events.test.py" || :
+  echo ""
+  echo "-- agent pause behavioural checks --"
+  run_test "$HERE/agent-pause.test.sh" bash "$HERE/agent-pause.test.sh" || :
 fi
 
 # The case file replays text corrections. sync-project.sh is about what lands
@@ -341,7 +344,7 @@ fi
 if [ -z "$ONLY" ] && [ -x "$HERE/one-ticket-live.test.sh" ]; then
   echo ""
   echo "-- one ticket until live behavioural checks --"
-  run_test "$HERE/one-ticket-live.test.sh" bash "$HERE/one-ticket-live.test.sh" || :
+  TEST_TIMEOUT_SECONDS=600 run_test "$HERE/one-ticket-live.test.sh" bash "$HERE/one-ticket-live.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/agent-template-update.test.sh" ]; then
   echo ""

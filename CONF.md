@@ -54,7 +54,9 @@ A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one
 
 ## Agent settings by board
 
-New Hypertask agents keep their settings at `~/.config/hypertask-agents/<Board title>/<slug>.conf`. The folder uses the first board for agents on several boards. Agent lookup uses the slug across folders, never a board title. Flat confs still load during migration. Installation moves only the three Hypertask Product agents, dev-1, dev-2 and qa-1, into that board folder. Other boards stay flat until their owner approves moving them. Tokens stay in the shared credentials folder.
+New Hypertask agents keep their settings at `~/.config/hypertask-agents/<Board title>/<slug>.conf`. The folder uses the first board for agents on several boards. Agent lookup uses the slug across folders, never a board title. Flat confs still load during migration. Installation moves only the three Hypertask Product agents, dev-1, dev-2 and qa-1, into that board folder. Other boards stay flat until their owner approves moving them. Tokens stay in the shared credentials folder. Run `agent-pause <slug> [--reason "text"]` to set the pause keys in the selected conf, and `agent-resume <slug>` to remove them. Neither command changes systemd or webhook registration; already-running work is not interrupted, and events queued before pause wait for resume.
+
+Pause is not a security boundary while agents run as the same Unix user: they can still access each other's files and credentials. The planned move to a separate Unix user fixes that isolation gap.
 
 ## Other keys
 
@@ -81,6 +83,8 @@ New Hypertask agents keep their settings at `~/.config/hypertask-agents/<Board t
 | `QA_BLOCKED_SECTION` | Blocked or cannot-test destination, default `Agent Blocked (Infra)`. |
 | `QA_TURNAROUND_HOURS` | Hours a ticket may remain in QA without an agent verdict before it becomes eligible again, default `4`. |
 | `SKILLS_INDEX` | Optional comma-separated extra indexes. |
+| `PAUSED` | `yes`, `true`, `1`, or `on` (case-insensitive) pauses poll ticks (including manual `--once`/`--ticket`), event delivery, chat replies, and board reconciliation. Only empty/absent, `no`, `false`, `0`, or `off` means running. Any other non-empty value warns and pauses (fail closed). The webhook remains registered; signed events received during a pause return 202 but are dropped, not replayed on resume. Queued events from before the pause wait until the dispatcher sees the resumed conf. Foreign-webhook audits and deactivation still run while paused. |
+| `PAUSED_REASON`, `PAUSED_AT` | Optional reason and UTC timestamp written by `agent-pause`; removed by `agent-resume`. |
 | `MAX_CONCURRENT_RUNS` | Runs started per tick, default 1. |
 | `RETRY_LIMIT` | Total failed attempts allowed per window. By default this is three plus the number of `LADDER` commands. |
 | `RETRY_WINDOW_SECONDS` | Failure window, default 21600. |

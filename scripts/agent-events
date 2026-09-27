@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config_files import config_files
+from config_files import config_files, is_paused
 from typing import Any
 
 MAX_BODY = 1024 * 1024
@@ -394,6 +394,8 @@ def dispatch() -> None:
         launched = False
         with queue_lock:
             for path, values in agent_rows(events_only=True):
+                if is_paused(values.get("PAUSED"), values.get("AGENT_SLUG") or path.stem):
+                    continue
                 slug = values.get("AGENT_SLUG") or path.stem
                 try:
                     limit = max(1, int(values.get("MAX_CONCURRENT_RUNS", "1")))
@@ -495,6 +497,9 @@ class EventHandler(BaseHTTPRequestHandler):
         expected = "sha256=" + hmac.new(secret.encode(), timestamp.encode() + b"." + raw, hashlib.sha256).hexdigest()
         if not fresh or not hmac.compare_digest(signature, expected):
             self.reply(401, "invalid signature")
+            return
+        if is_paused(values.get("PAUSED"), slug):
+            self.reply(202, "paused")
             return
         boards = {item.strip() for item in values.get("BOARD_ID", "").split(",") if item.strip()}
         if str(payload.get("projectId") or "") not in boards or not payload.get("ticketNumber"):

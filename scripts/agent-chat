@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config_files import config_files
+from config_files import config_files, is_paused
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1077,6 +1077,12 @@ class ChatDaemon:
         with (self.state_dir / f"{agent.slug}.log").open("a", encoding="utf-8") as handle:
             handle.write(line)
 
+    def paused(self, agent: Agent) -> bool:
+        for path in config_files(self.config_dir):
+            if path.stem == agent.slug:
+                return is_paused(parse_conf(path).get("PAUSED"), agent.slug)
+        return False
+
     def agents(self) -> list[Agent]:
         agents: list[Agent] = []
         for path in config_files(self.config_dir):
@@ -1116,10 +1122,15 @@ class ChatDaemon:
         session_id = str(message.get("sessionId") or "")
         if not message_id or not session_id or self.state.contains(message_id):
             return
+        if self.paused(agent):
+            self.log(agent, f"message {message_id} paused; no reply")
+            return
         client = api or AgentApi(agent)
         try:
             history = client.history(session_id)
-            if self.stop.is_set():
+            if self.stop.is_set() or self.paused(agent):
+                if not self.stop.is_set():
+                    self.log(agent, f"message {message_id} paused; no reply")
                 return
             reply = run_provider(agent, prompt_for(agent, message, history), stop=self.stop)
             if self.stop.is_set():
@@ -1136,6 +1147,9 @@ class ChatDaemon:
             if self.stop.is_set():
                 return
             reply = ERROR_REPLY
+        if self.paused(agent):
+            self.log(agent, f"message {message_id} paused; no reply")
+            return
         try:
             client.reply(session_id, message_id, reply)
         except ApiError as error:
@@ -1166,6 +1180,9 @@ class ChatDaemon:
         key = self.room_key(agent, room_id, message_id)
         if not message_id or not room_id or self.state.contains(key):
             return
+        if self.paused(agent):
+            self.log(agent, f"room {room_id} message {message_id} paused; no reply")
+            return
         client = api or AgentApi(agent)
         if not room_message_addressed_to(agent, message):
             self.state.mark(agent, key, "")
@@ -1181,8 +1198,10 @@ class ChatDaemon:
             return
         try:
             history = client.room_history(room_id)
-            if self.stop.is_set():
+            if self.stop.is_set() or self.paused(agent):
                 self.room_budget.release(room_id)
+                if not self.stop.is_set():
+                    self.log(agent, f"room {room_id} message {message_id} paused; no reply")
                 return
             if room_turn_limit_reached(message, history):
                 reply = f"Handoff: Continue {ticket} on its ticket; this topic has used the room's three bot-to-bot turns."
@@ -1194,6 +1213,10 @@ class ChatDaemon:
                 reply = finalize_chat_reply(reply, room_message_text(message), lambda reference: client.ticket(reference))
             if self.stop.is_set():
                 self.room_budget.release(room_id)
+                return
+            if self.paused(agent):
+                self.room_budget.release(room_id)
+                self.log(agent, f"room {room_id} message {message_id} paused; no reply")
                 return
             client.room_reply(room_id, message_id, reply, ticket, room_topic(message))
         except ApiError as error:
@@ -1273,7 +1296,7 @@ class ChatDaemon:
 
     def ack_once(self, api_factory: Any = AgentApi) -> None:
         for agent in self.agents():
-            if not agent.board_ids:
+            if not agent.board_ids or self.paused(agent):
                 continue
             try:
                 self._ack_agent(agent, api_factory)
@@ -1371,6 +1394,9 @@ class ChatDaemon:
         tasks = task_payload.get("tasks")
         task = tasks[0] if isinstance(tasks, list) and tasks and isinstance(tasks[0], dict) else {}
         question_text = str(entry.get("question_text") or "")
+        if self.paused(agent):
+            self.log(agent, f"ack lane paused for {ticket}; no answer")
+            return
         try:
             answer = run_provider(
                 agent,
