@@ -29,10 +29,13 @@ A ticket comment starts with `Question:`, `Answer:`, `Decision:`, `Handoff:`,
 or `Done:`. A question names what a human must provide and ends with a question
 mark. An answer replies to a direct owner question or mention and does not imply
 that the owner must decide anything. A decision is a fact the owner must know.
-A handoff names the receiving agent and explains what shipped. Done explains
-what shipped and includes the pull request link. Neither a handoff nor done can
-be only a link. Claims, plans, progress, checks, retries, blockers, and costs
-are run activity, not comments. Reply-only runs default to `Answer:`. If the
+A handoff names the receiving agent and explains what shipped. A developer's
+shipped handoff moves the ticket to `QA`, never `Done`. QA moves it to `Done`
+only after testing every acceptance criterion on live; its `Done:` verdict names
+each criterion and gives the live evidence for it. A merge, staging result, or
+developer report is not live evidence. Neither a handoff nor done can be only a
+link. Claims, plans, progress, checks, retries, blockers, and costs are run
+activity, not comments. Reply-only runs default to `Answer:`. If the
 answer also requires a choice, it may end with a `Decision needed:` question.
 
 The existing limit remains three comments and one reminder per ticket per day

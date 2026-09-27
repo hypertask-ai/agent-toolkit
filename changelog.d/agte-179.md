@@ -1,0 +1,1 @@
+- AGTE-179 requires criterion-by-criterion live QA evidence before Done, routes developer shipping to QA, and applies the same gate during reconciliation.

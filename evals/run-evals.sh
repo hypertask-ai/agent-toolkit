@@ -358,6 +358,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/qa-sections.test.sh" ]; then
   echo "-- QA section behavioural checks --"
   run_test "$HERE/qa-sections.test.sh" bash "$HERE/qa-sections.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/qa-live-verdict.test.sh" ]; then
+  echo ""
+  echo "-- live QA evidence checks --"
+  run_test "$HERE/qa-live-verdict.test.sh" bash "$HERE/qa-live-verdict.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/qa-lifecycle.test.sh" ]; then
   echo ""
   echo "-- QA lifecycle behavioural checks --"
