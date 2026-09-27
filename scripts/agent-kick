@@ -64,7 +64,7 @@ def api_base(values: dict[str, str]) -> str:
 
 
 def agents() -> list[tuple[Path, dict[str, str]]]:
-    return [(path, parse_config(path)) for path in sorted(config_dir().glob("*.conf"))]
+    return [(path, parse_config(path)) for path in sorted((*config_dir().glob("*/*.conf"), *config_dir().glob("*.conf")))]
 
 
 def api_request(values: dict[str, str], body: dict[str, Any]) -> dict[str, Any]:

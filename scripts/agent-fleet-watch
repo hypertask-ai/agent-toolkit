@@ -440,7 +440,7 @@ def main() -> int:
         manual_since = state.setdefault("manual_since", {})
         agents: list[dict[str, Any]] = []
         product: dict[str, str] = {}
-        for conf_path in sorted(args.config_dir.glob("*.conf")):
+        for conf_path in sorted((*args.config_dir.glob("*/*.conf"), *args.config_dir.glob("*.conf"))):
             conf = parse_env(conf_path)
             if conf.get("BOARD_ADAPTER") != "hypertask" or not conf.get("AGENT_ID"):
                 continue

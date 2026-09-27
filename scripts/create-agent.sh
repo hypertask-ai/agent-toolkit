@@ -157,7 +157,17 @@ if [ "$KIND" = "cli" ]; then DISPLAY_NAME="$NAME CLI"; fi
 # answer/Q&A kind with no code to work in, like Product Bot) does not force
 # a --repo it never needed, and resuming one that already has a skills
 # index does not force --skills-index/--skills-repo again either.
-EXISTING_CONF="$(core_config_dir)/$SLUG.conf"
+core_load_adapter "$BOARD"
+CONFIG_DIR="$(core_config_dir)"
+EXISTING_CONF=""
+if EXISTING_CONF="$(core_find_conf_in_dir "$CONFIG_DIR" "$SLUG")"; then
+  [ "$RESUME" = "yes" ] || die "agent slug $SLUG already exists at $EXISTING_CONF" \
+    "choose a different name or pass --resume"
+else
+  rc=$?
+  [ "$rc" -eq 1 ] || exit "$rc"
+  EXISTING_CONF=""
+fi
 if [ "$RESUME" = "yes" ] && [ -f "$EXISTING_CONF" ]; then
   [ -n "$REPO" ] || REPO="$(sed -n 's/^AGENT_REPO="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
   [ -n "$PR_REPO" ] || PR_REPO="$(sed -n 's/^PR_REPO="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
@@ -172,7 +182,6 @@ case "$PR_REPO" in
   *) die "--pr-repo must be org/name, got '$PR_REPO'" "pass the GitHub org and repo name, e.g. hypertask-ai/product-bot" ;;
 esac
 
-core_load_adapter "$BOARD"
 adapter_require_tools
 
 if [ -n "$REPO" ]; then core_require_abs "$REPO" "--repo"; fi
@@ -227,9 +236,43 @@ if [ "$BOARD" = "none" ] && { [ "$WIRING" = "poll" ] || [ "$WIRING" = "events" ]
 fi
 
 # ---------- paths ----------
-CONFIG_DIR="$(core_config_dir)"
-CONF_FILE="$CONFIG_DIR/$SLUG.conf"
-TOKEN_FILE="$CONFIG_DIR/credentials/$SLUG-agent-token"
+if [ -n "$EXISTING_CONF" ]; then
+  CONF_FILE="$EXISTING_CONF"
+  TOKEN_FILE="$(core_agent_file "$SLUG" "credentials/$SLUG-agent-token")"
+else
+  CONF_FILE="$CONFIG_DIR/$SLUG.conf"
+  if [ "$BOARD" = "hypertask" ]; then
+    [ -n "$BOARD_ID" ] || die "--project is missing" "pass --project <id>"
+    FIRST_BOARD="${BOARD_ID%%,*}"
+    offset=0
+    BOARD_TITLE=""
+    while :; do
+      projects="$(hypertask project list --json --limit 100 --offset "$offset")" || die \
+        "could not list boards" "check the Hypertask CLI and try again"
+      row="$(printf '%s' "$projects" | BOARD_WANTED="$FIRST_BOARD" python3 -c '
+import json, os, sys
+try:
+    doc = json.load(sys.stdin)
+    rows = doc if isinstance(doc, list) else doc.get("projects", [])
+    if isinstance(rows, dict): rows = rows.get("items", [])
+    title = next((p.get("title") or p.get("name") or "" for p in rows
+                  if str(p.get("id")) == os.environ["BOARD_WANTED"]), "")
+    paging = doc if isinstance(doc, dict) else {}
+    more = int(paging.get("offset", 0)) + len(rows) < int(paging.get("total", len(rows)))
+    print(title + "\n" + ("yes" if more else "no"))
+except (ValueError, TypeError, AttributeError, KeyError) as error:
+    sys.exit("invalid project list response: %s" % error)
+')" || die "could not read board list" "check the Hypertask CLI response"
+      BOARD_TITLE="${row%$'\n'*}"
+      [ -n "$BOARD_TITLE" ] && break
+      [ "${row##*$'\n'}" = yes ] || die "board $FIRST_BOARD not found" "check --project and board access"
+      offset=$((offset + 100))
+    done
+    case "$BOARD_TITLE" in ''|.|..|*/*) die "invalid board title for folder: $BOARD_TITLE" "rename the board without a slash" ;; esac
+    CONF_FILE="$CONFIG_DIR/$BOARD_TITLE/$SLUG.conf"
+  fi
+  TOKEN_FILE="$(dirname "$CONF_FILE")/credentials/$SLUG-agent-token"
+fi
 BOARD_CLI="$BIN_DIR/$SLUG-board"
 if [ -z "$SECTIONS" ]; then
   [ "$KIND" = "qa" ] && SECTIONS="AI Review,QA" || SECTIONS="In Progress,Backlog"
@@ -461,7 +504,7 @@ EOF
 CONF_CONTENT="$CONF_CONTENT
 PR_REPO=\"$PR_REPO\""
 if [ "$DRY_RUN" != "yes" ]; then
-  mkdir -p "$CONFIG_DIR"
+  mkdir -p "$(dirname "$CONF_FILE")"
   core_write_missing_keys "$CONF_FILE" "$CONF_CONTENT"
   # One shared copy next to every bot's conf in this config dir: whoever
   # looks after any of them starts from the same page.

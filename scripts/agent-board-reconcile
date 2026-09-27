@@ -60,10 +60,10 @@ record_preserves_ticket() {
 
 CONF_FILES=()
 if [ -n "$CONFIG_DIR" ]; then
-  for conf in "$CONFIG_DIR"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
+  for conf in "$CONFIG_DIR"/*/*.conf "$CONFIG_DIR"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
 else
   while IFS= read -r dir; do
-    for conf in "$dir"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
+    for conf in "$dir"/*/*.conf "$dir"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
   done < <(core_conf_dirs)
 fi
 

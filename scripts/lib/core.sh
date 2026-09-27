@@ -91,27 +91,56 @@ core_config_dir() {
   fi
 }
 
-# core_find_conf <slug>
-# The conf lives in core's own config dir, or in the place a given adapter
-# already keeps its identities. Core does not know those places by name: it
-# asks every installed adapter, in a subshell, and takes the first hit.
+# core_find_conf_in_dir <dir> <slug>: search board folders before legacy flat files.
+core_find_conf_in_dir() {
+  local dir="$1" slug="$2" conf found=""
+  for conf in "$dir"/*/"$slug.conf" "$dir/$slug.conf"; do
+    [ -f "$conf" ] || continue
+    if [ -n "$found" ]; then
+      printf 'ERROR: duplicate agent slug %s: %s and %s\n' "$slug" "$found" "$conf" >&2
+      return 2
+    fi
+    found="$conf"
+  done
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+# core_find_conf <slug>: resolve by slug, never by board title.
 core_find_conf() {
-  local slug="$1" dir candidate adapter
-  for dir in "${AGENT_CONFIG_DIR:-}" "$HOME/.config/agents"; do
-    [ -n "$dir" ] || continue
-    [ -f "$dir/$slug.conf" ] && { printf '%s/%s.conf' "$dir" "$slug"; return 0; }
+  local slug="$1" dir conf found="" rc
+  while IFS= read -r dir; do
+    conf="$(core_find_conf_in_dir "$dir" "$slug")" && {
+      if [ -n "$found" ] && [ "$found" != "$conf" ]; then
+        printf 'ERROR: duplicate agent slug %s: %s and %s\n' "$slug" "$found" "$conf" >&2
+        return 2
+      fi
+      found="$conf"
+      continue
+    }
+    rc=$?
+    [ "$rc" -eq 1 ] || return "$rc"
+  done < <(core_conf_dirs)
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+# core_agent_file <slug> <relative name>: sibling first, legacy flat fallback.
+core_agent_file() {
+  local slug="$1" name="$2" conf dir sibling
+  conf="$(core_find_conf "$slug")" || return $?
+  dir="$(dirname "$conf")"
+  sibling="$dir/$name"
+  if [ -e "$sibling" ]; then printf '%s' "$sibling"
+  else printf '%s/%s' "$(core_config_dir)" "$name"; fi
+}
+
+# core_conf_files_in_dir <dir>: one conf per line, including direct board folders.
+core_conf_files_in_dir() {
+  local conf
+  for conf in "$1"/*/*.conf "$1"/*.conf; do
+    [ -f "$conf" ] && printf '%s\n' "$conf"
   done
-  for adapter in "$CORE_ROOT"/adapters/*/adapter.sh; do
-    [ -f "$adapter" ] || continue
-    candidate="$(
-      # shellcheck disable=SC1090
-      . "$adapter" 2>/dev/null
-      declare -F adapter_config_dir_default >/dev/null 2>&1 && adapter_config_dir_default
-    )" || continue
-    [ -n "$candidate" ] || continue
-    [ -f "$candidate/$slug.conf" ] && { printf '%s/%s.conf' "$candidate" "$slug"; return 0; }
-  done
-  return 1
 }
 
 # Logs, state keys and lock files for every agent this core runs.
@@ -198,7 +227,7 @@ core_guard_token_wrappers() {
   confs="$(mktemp)"
   while IFS= read -r dir; do
     [ -d "$dir" ] || continue
-    for conf in "$dir"/*.conf; do
+    for conf in "$dir"/*/*.conf "$dir"/*.conf; do
       [ -f "$conf" ] || continue
       (
         # shellcheck disable=SC1090
