@@ -174,12 +174,10 @@ for conf in "${CONF_FILES[@]}"; do
     reconcile_qa_target() {
       local task_id="$1" board="$2" verdict
       verdict="$(adapter_latest_qa_verdict "$TOKEN_FILE" "$task_id" "$board" "$(adapter_qa_agent_ids "$board")" 2>>"$log")" || return 1
-      if [ "${VERDICT_FINAL:-no}" = yes ] && [ "$verdict" = fail ]; then
-        printf '%s' "$QA_SECTION"
-      elif [ "${REQUIRE_QA_VERDICT:-no}" = yes ] && [ "$verdict" != pass ]; then
-        printf '%s' "$QA_SECTION"
-      else
+      if [ "$verdict" = pass ]; then
         printf '%s' "$DONE_SECTION"
+      else
+        printf '%s' "$QA_SECTION"
       fi
     }
 

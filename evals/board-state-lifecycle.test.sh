@@ -504,7 +504,7 @@ for freeze in off on; do
 import json, sys
 p=sys.argv[1]; d=json.load(open(p)); d['tasks'][0]['section']='Features'; json.dump(d,open(p,'w'))
 PYEOF
-      sed -i 's/WATCH_SECTIONS="\*"/WATCH_SECTIONS="Backlog,Features"/' "$TMP/config/dev.conf"
+      sed -i 's/WATCH_SECTIONS="Backlog"/WATCH_SECTIONS="Backlog,Features"/' "$TMP/config/dev.conf"
     else
       python3 - "$TMP/tasks.json" <<'PYEOF'
 import json, sys
@@ -579,12 +579,9 @@ row['agent']={'id':'agent-qa' if os.environ['ACTOR']=='qa' else 'agent-dev'}
 json.dump({'comments':[row]},open(sys.argv[1],'w'))
 PYEOF
     fi
-    expected=Done
-    if [ "$setting" = require ] || [ "$setting" = both ]; then
-      case "$verdict" in pass|runner-pass) ;; *) expected=QA ;; esac
-    fi
-    if [ "$setting" = final ] || [ "$setting" = both ]; then
-      case "$verdict" in fail|runner-fail) expected=QA ;; esac
+    expected=QA
+    if [ "$setting" != default ]; then
+      case "$verdict" in pass|runner-pass) expected=Done ;; esac
     fi
     env "${run_env[@]}" MOCK_MERGED_PR_TITLE='TEST-1: shipped' "$ROOT/scripts/agent-board-reconcile"
     actual="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")"
@@ -611,8 +608,7 @@ JSON
     MOCK_MODEL_MOVE="$( [ "$setting" = final ] && printf Done || true )" \
     MOCK_PR_TITLE='AGTE-168: keep merged runs successful' \
     "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/dev-verdict.out" 2>&1
-  expected=Done
-  case "$setting" in require|final|both) expected=QA ;; esac
+  expected=QA
   actual="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")"
   if [ "$actual" != "$expected" ]; then
     echo "FAIL developer-$setting expected=$expected actual=$actual output=$(cat "$TMP/dev-verdict.out")"; exit 1
