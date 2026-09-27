@@ -171,18 +171,13 @@ for conf in "${CONF_FILES[@]}"; do
     SLUG="$slug"
     export STATE_DIR SLUG
     core_load_adapter "$BOARD_ADAPTER"
-    qa_ids=""
-    if [ "${REQUIRE_QA_VERDICT:-no}" = yes ] || [ "${VERDICT_FINAL:-no}" = yes ]; then
-      qa_ids="$(adapter_qa_agent_ids)"
-    fi
-
     reconcile_qa_target() {
-      local task_id="$1" board="$2" current="$3" verdict
-      verdict="$(adapter_latest_qa_verdict "$TOKEN_FILE" "$task_id" "$board" "$qa_ids" 2>>"$log")" || return 1
+      local task_id="$1" board="$2" verdict
+      verdict="$(adapter_latest_qa_verdict "$TOKEN_FILE" "$task_id" "$board" "$(adapter_qa_agent_ids "$board")" 2>>"$log")" || return 1
       if [ "${VERDICT_FINAL:-no}" = yes ] && [ "$verdict" = fail ]; then
-        printf '%s' "$current"
+        printf '%s' "$QA_SECTION"
       elif [ "${REQUIRE_QA_VERDICT:-no}" = yes ] && [ "$verdict" != pass ]; then
-        printf 'QA'
+        printf '%s' "$QA_SECTION"
       else
         printf '%s' "$DONE_SECTION"
       fi

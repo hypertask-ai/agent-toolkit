@@ -525,6 +525,31 @@ PYEOF
   done
 done
 
+# A QA marker from a developer, a human, or another board is never a verdict.
+printf 'AGENT_ID="agent-other-qa"\nAGENT_KIND="qa"\nBOARD_ADAPTER="hypertask"\nBOARD_ID="16"\n' > "$TMP/config/other-qa.conf"
+for actor in agent-dev agent-other-qa human agent-qa; do
+  reset_case
+  ACTOR="$actor" python3 - "$TMP/comments.json" <<'PYEOF'
+import json, os, sys
+actor = os.environ['ACTOR']
+rows = [{'id': 1, 'createdAt': '2026-01-01T00:00:00Z', 'agent': {'id': 'agent-qa'}, 'text': 'QA FAIL: retry'},
+        {'id': 2, 'createdAt': '2026-01-02T00:00:00Z', 'text': 'QA PASS: fixed'}]
+if actor != 'human':
+    rows[1]['agent'] = {'id': actor}
+json.dump({'comments': rows}, open(sys.argv[1], 'w'))
+PYEOF
+  verdict="$(env "${run_env[@]}" AGENT_CONFIG_DIR="$TMP/config" ROOT="$ROOT" TOKEN_FILE="$TMP/token" bash -c '
+    . "$ROOT/scripts/lib/core.sh"
+    . "$ROOT/adapters/hypertask/adapter.sh"
+    adapter_latest_qa_verdict "$TOKEN_FILE" task-1 15 "$(adapter_qa_agent_ids 15)"
+  ' )"
+  expected=fail
+  [ "$actor" != agent-qa ] || expected=pass
+  if [ "$verdict" != "$expected" ]; then echo "FAIL verdict-actor-$actor expected=$expected actual=$verdict"; exit 1; fi
+  echo "PASS verdict-actor-$actor"
+done
+rm -f "$TMP/config/other-qa.conf"
+
 for setting in default require final both; do
   for verdict in none pass fail blocked runner-pass runner-fail; do
     reset_case
@@ -540,9 +565,9 @@ p=sys.argv[1]; d=json.load(open(p)); d['tasks'][0]['section']='Bugs'; json.dump(
 PYEOF
     case "$verdict" in
       none) printf '{"comments":[]}\n' > "$TMP/comments.json" ;;
-      pass) text='QA PASS verified'; actor=human ;;
-      fail) text='QA FAIL broken'; actor=human ;;
-      blocked) text="Can't verify deployment"; actor=human ;;
+      pass) text='QA PASS verified'; actor=qa ;;
+      fail) text='QA FAIL broken'; actor=qa ;;
+      blocked) text="Can't verify deployment"; actor=qa ;;
       runner-pass) text='Done: verified'; actor=qa ;;
       runner-fail) text='Handoff: fix this'; actor=qa ;;
     esac
@@ -559,7 +584,7 @@ PYEOF
       case "$verdict" in pass|runner-pass) ;; *) expected=QA ;; esac
     fi
     if [ "$setting" = final ] || [ "$setting" = both ]; then
-      case "$verdict" in fail|runner-fail) expected=Bugs ;; esac
+      case "$verdict" in fail|runner-fail) expected=QA ;; esac
     fi
     env "${run_env[@]}" MOCK_MERGED_PR_TITLE='TEST-1: shipped' "$ROOT/scripts/agent-board-reconcile"
     actual="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")"
@@ -587,13 +612,43 @@ JSON
     MOCK_PR_TITLE='AGTE-168: keep merged runs successful' \
     "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/dev-verdict.out" 2>&1
   expected=Done
-  case "$setting" in require) expected=QA ;; final|both) expected='In Progress' ;; esac
+  case "$setting" in require|final|both) expected=QA ;; esac
   actual="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")"
   if [ "$actual" != "$expected" ]; then
     echo "FAIL developer-$setting expected=$expected actual=$actual output=$(cat "$TMP/dev-verdict.out")"; exit 1
   fi
   echo "PASS developer-$setting"
 done
+
+reset_case
+printf 'REQUIRE_QA_VERDICT="yes"\nVERDICT_FINAL="yes"\n' >> "$TMP/config/dev.conf"
+cat > "$TMP/tasks.json" <<'JSON'
+{"tasks":[{"id":"task-168","ticketNumber":"AGTE-168","projectId":15,"section":"Backlog","title":"Dev cannot approve QA","description":"Check the verdict","assignees":[],"labels":[],"commentCount":1,"updatedAt":"2026-01-01T00:00:00Z"}]}
+JSON
+printf '{"comments":[{"id":7,"createdAt":"2026-01-01T00:00:00Z","agent":{"id":"agent-dev"},"text":"QA PASS: self-approved"}]}\n' > "$TMP/comments.json"
+env "${run_env[@]}" MOCK_MODEL_MODE=merged-comment-failure MOCK_PR_TITLE='AGTE-168: keep merged runs successful' \
+  "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/dev-self-verdict.out" 2>&1
+if grep -qxF 'move AGTE-168 QA' "$TMP/board.log" && ! grep -qxF 'move AGTE-168 Done' "$TMP/board.log"; then
+  echo 'PASS developer-cannot-self-approve'
+else
+  echo "FAIL developer-cannot-self-approve log=$(cat "$TMP/board.log") output=$(cat "$TMP/dev-self-verdict.out")"; exit 1
+fi
+sed -i '/^REQUIRE_QA_VERDICT=/d; /^VERDICT_FINAL=/d' "$TMP/config/dev.conf"
+
+reset_case
+printf 'REQUIRE_QA_VERDICT="yes"\nVERDICT_FINAL="yes"\nQA_SECTION="Verification"\n' >> "$TMP/config/dev.conf"
+cat > "$TMP/tasks.json" <<'JSON'
+{"tasks":[{"id":"task-168","ticketNumber":"AGTE-168","projectId":15,"section":"Backlog","title":"Verify merged change","description":"QA must recheck","assignees":[],"labels":[],"commentCount":1,"updatedAt":"2026-01-01T00:00:00Z"}]}
+JSON
+printf '{"comments":[{"id":7,"createdAt":"2026-01-01T00:00:00Z","agent":{"id":"agent-qa"},"text":"QA FAIL: fix checkout"}]}\n' > "$TMP/comments.json"
+env "${run_env[@]}" MOCK_MODEL_MODE=merged-comment-failure MOCK_PR_TITLE='AGTE-168: keep merged runs successful' \
+  "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/custom-qa.out" 2>&1
+if grep -qxF 'move AGTE-168 Verification' "$TMP/board.log"; then
+  echo 'PASS configured-qa-merged-fail'
+else
+  echo "FAIL configured-qa-merged-fail log=$(cat "$TMP/board.log") output=$(cat "$TMP/custom-qa.out")"; exit 1
+fi
+sed -i '/^REQUIRE_QA_VERDICT=/d; /^VERDICT_FINAL=/d; /^QA_SECTION=/d' "$TMP/config/dev.conf"
 
 for verdicts in fail-then-pass pass-then-fail dev-done; do
   reset_case
@@ -609,12 +664,12 @@ kind=os.environ['VERDICTS']; comments=[]
 for i,word in enumerate(kind.split('-then-') if kind!='dev-done' else ['dev-done']):
     text={'fail':'QA FAIL: broken','pass':'QA PASS: fixed','dev-done':'Done: developer shipped'}[word]
     comments.append({'id':i+1,'createdAt':f'2026-01-0{i+1}T00:00:00Z',
-                     'agent':{'id':'agent-dev'},'text':'<p>'+text+'</p>'})
+                     'agent':{'id':'agent-qa' if kind!='dev-done' else 'agent-dev'},'text':'<p>'+text+'</p>'})
 json.dump({'comments':comments},open(sys.argv[1],'w'))
 PYEOF
   env "${run_env[@]}" MOCK_MERGED_PR_TITLE='TEST-1: shipped' "$ROOT/scripts/agent-board-reconcile"
   expected=QA
-  case "$verdicts" in fail-then-pass) expected=Done ;; pass-then-fail) expected=Bugs ;; esac
+  case "$verdicts" in fail-then-pass) expected=Done ;; esac
   actual="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")"
   if [ "$actual" != "$expected" ]; then echo "FAIL latest-$verdicts expected=$expected actual=$actual"; exit 1; fi
   echo "PASS latest-$verdicts"
@@ -632,7 +687,7 @@ JSON
   fi
   env "${run_env[@]}" MOCK_GIT_COMMIT=yes MOCK_GIT_TITLE='HTPR-6591 Show the shipped change' "$ROOT/scripts/agent-board-reconcile"
   expected=QA
-  case "$verdict" in fail) expected=Bugs ;; pass) expected=Done ;; esac
+  case "$verdict" in pass) expected=Done ;; esac
   actual="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")"
   if [ "$actual" != "$expected" ]; then echo "FAIL direct-verdict-$verdict expected=$expected actual=$actual"; exit 1; fi
   echo "PASS direct-verdict-$verdict"

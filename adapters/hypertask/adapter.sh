@@ -1285,13 +1285,16 @@ print(json.dumps(rows))
 '
 }
 
+# adapter_qa_agent_ids <board-id>
 adapter_qa_agent_ids() {
-  local conf
+  local board="$1" conf
   while IFS= read -r conf; do
     ( unset AGENT_ID AGENT_KIND BOARD_ID
       . "$conf"
       [ "${AGENT_KIND:-}" = qa ] || exit 0
-      printf '%s\n' "${AGENT_ID:-}"
+      case ",${BOARD_ID:-}," in
+        *",$board,"*) [ -n "${AGENT_ID:-}" ] && printf '%s\n' "$AGENT_ID" ;;
+      esac
     )
   done < <(core_conf_files)
 }
@@ -1306,6 +1309,8 @@ import html, json, os, re
 rows = sorted(json.loads(os.environ["COMMENTS"]),
               key=lambda c: (c.get("createdAt") or "", int(c.get("id") or 0) if str(c.get("id") or "").isdigit() else 0), reverse=True)
 for row in rows:
+    if not row.get("agent_id") or " " + str(row["agent_id"]) + " " not in os.environ["QA_IDS"]:
+        continue
     plain = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", row.get("html") or "")).split())
     if re.match(r"QA PASS\b", plain, re.I):
         print("pass"); break
@@ -1313,11 +1318,10 @@ for row in rows:
         print("fail"); break
     if re.match(r"Can.t verify\b", plain, re.I):
         print("blocked"); break
-    if " " + str(row.get("agent_id") or "") + " " in os.environ["QA_IDS"] and row.get("agent_id"):
-        if re.match(r"Done:", plain, re.I):
-            print("pass"); break
-        if re.match(r"Handoff:", plain, re.I):
-            print("fail"); break
+    if re.match(r"Done:", plain, re.I):
+        print("pass"); break
+    if re.match(r"Handoff:", plain, re.I):
+        print("fail"); break
 '
 }
 
@@ -2920,7 +2924,8 @@ adapter_pick_rank() {
   local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4" ref="$5"
   local task_id="$6" section="$7" reason="$8"
   local comments pr_json="" repo="${PR_REPO:-}" pr_known="no" linked_merged_pr="" linked_rc
-  if [ "${FEATURE_FREEZE:-no}" = yes ] && { [ "${section,,}" = features ] \
+  if [ "${FEATURE_FREEZE:-no}" = yes ] && [[ "+$reason+" != *+reply_only+* ]] \
+     && { [ "${section,,}" = features ] \
      || { [ -n "${9:-}" ] && ROW="${9}" python3 -c 'import json,os,sys; r=json.loads(os.environ["ROW"]); sys.exit(0 if "feature" in [str(x).casefold() for x in r.get("labels") or []] else 1)'; }; }; then
     printf '0 feature freeze\n'
     return 0
