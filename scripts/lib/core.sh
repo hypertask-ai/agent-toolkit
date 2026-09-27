@@ -96,22 +96,31 @@ core_config_dir() {
 # already keeps its identities. Core does not know those places by name: it
 # asks every installed adapter, in a subshell, and takes the first hit.
 core_find_conf() {
-  local slug="$1" dir candidate adapter
-  for dir in "${AGENT_CONFIG_DIR:-}" "$HOME/.config/agents"; do
-    [ -n "$dir" ] || continue
-    [ -f "$dir/$slug.conf" ] && { printf '%s/%s.conf' "$dir" "$slug"; return 0; }
-  done
-  for adapter in "$CORE_ROOT"/adapters/*/adapter.sh; do
-    [ -f "$adapter" ] || continue
-    candidate="$(
-      # shellcheck disable=SC1090
-      . "$adapter" 2>/dev/null
-      declare -F adapter_config_dir_default >/dev/null 2>&1 && adapter_config_dir_default
-    )" || continue
-    [ -n "$candidate" ] || continue
-    [ -f "$candidate/$slug.conf" ] && { printf '%s/%s.conf' "$candidate" "$slug"; return 0; }
-  done
-  return 1
+  local slug="$1" conf found=""
+  while IFS= read -r conf; do
+    [ "$(basename "$conf")" = "$slug.conf" ] || continue
+    [ -n "$found" ] || found="$conf"
+  done < <(core_conf_files)
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+# List board folders first, then flat legacy files. Folder names are never
+# inferred from an agent's board id or title during lookup.
+core_conf_files() {
+  local dir folder conf
+  while IFS= read -r dir; do
+    for folder in "$dir"/*/; do
+      [ -d "$folder" ] || continue
+      [ "$(basename "$folder")" = retired ] && continue
+      for conf in "$folder"*.conf; do
+        [ -f "$conf" ] && printf '%s\n' "$conf"
+      done
+    done
+    for conf in "$dir"/*.conf; do
+      [ -f "$conf" ] && printf '%s\n' "$conf"
+    done
+  done < <(core_conf_dirs)
 }
 
 # Logs, state keys and lock files for every agent this core runs.
@@ -191,23 +200,19 @@ core_enable_agent_identity() {
 # loud warning instead of a silent skip; dry-run reports the same findings and
 # changes nothing.
 core_guard_token_wrappers() {
-  local bin_dir="$1" dry_run="${2:-no}" dir conf found_confs
+  local bin_dir="$1" dry_run="${2:-no}" conf found_confs
   [ -d "$bin_dir" ] || return 0
 
   local confs
   confs="$(mktemp)"
-  while IFS= read -r dir; do
-    [ -d "$dir" ] || continue
-    for conf in "$dir"/*.conf; do
-      [ -f "$conf" ] || continue
-      (
-        # shellcheck disable=SC1090
-        . "$conf" 2>/dev/null
-        [ -n "${AGENT_SLUG:-}" ] && [ -n "${TOKEN_FILE:-}" ] || exit 0
-        printf '%s\t%s\t%s\n' "$AGENT_SLUG" "$TOKEN_FILE" "${BOARD_CLI:-}"
-      ) >> "$confs"
-    done
-  done < <(core_conf_dirs)
+  while IFS= read -r conf; do
+    (
+      # shellcheck disable=SC1090
+      . "$conf" 2>/dev/null
+      [ -n "${AGENT_SLUG:-}" ] && [ -n "${TOKEN_FILE:-}" ] || exit 0
+      printf '%s\t%s\t%s\n' "$AGENT_SLUG" "$TOKEN_FILE" "${BOARD_CLI:-}"
+    ) >> "$confs"
+  done < <(core_conf_files)
 
   found_confs="no"
   [ -s "$confs" ] && found_confs="yes"

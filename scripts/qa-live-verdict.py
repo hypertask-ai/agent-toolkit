@@ -88,24 +88,36 @@ def plain_text(comment: dict[str, Any]) -> str:
     return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", str(value))).split())
 
 
-def has_live_evidence(verdict: str, criterion_count: int) -> bool:
+def evidence_from_live(observation: str) -> bool:
+    live_location = re.search(r"\b(?:live|production)\b", observation, re.IGNORECASE)
+    live_url = re.search(r"https?://(?!github\.com/|www\.github\.com/)\S+", observation, re.IGNORECASE)
+    observed_result = re.search(r"[A-Za-z]{3}", re.sub(r"https?://\S+", "", observation))
+    return bool((live_location or live_url) and observed_result)
+
+
+def has_live_evidence(verdict: str, criteria: list[str]) -> bool:
     if not re.match(r"Done:", verdict, re.IGNORECASE):
         return False
-    if criterion_count == 0:
-        return bool(re.search(r"\blive evidence\s*:\s*\S", verdict, re.IGNORECASE))
     markers = list(
         re.finditer(r"\b(?:AC|acceptance criterion)\s*#?\s*(\d+)\b", verdict, re.IGNORECASE)
     )
+    if not criteria:
+        evidence = re.search(r"\blive evidence\s*:\s*(\S.*)", verdict, re.IGNORECASE)
+        return bool(evidence and evidence_from_live(evidence.group(1)))
     found: set[int] = set()
     for index, marker in enumerate(markers):
         number = int(marker.group(1))
+        if number < 1 or number > len(criteria):
+            continue
         end = markers[index + 1].start() if index + 1 < len(markers) else len(verdict)
         block = verdict[marker.end() : end]
         evidence = re.search(r"\blive evidence\s*:\s*(\S.*)", block, re.IGNORECASE)
         name = block[: evidence.start()] if evidence else ""
-        if evidence and re.search(r"[A-Za-z0-9]", name):
+        expected = " ".join(re.findall(r"\w+", criteria[number - 1].casefold()))
+        actual = " ".join(re.findall(r"\w+", name.casefold()))
+        if evidence and expected and expected in actual and evidence_from_live(evidence.group(1)):
             found.add(number)
-    return found == set(range(1, criterion_count + 1))
+    return found == set(range(1, len(criteria) + 1))
 
 
 def main() -> int:
@@ -126,18 +138,18 @@ def main() -> int:
     comments = comments_doc.get("comments") if isinstance(comments_doc, dict) else None
     if not isinstance(comments, list):
         comments = []
-    count = len(acceptance_criteria(task))
+    criteria = acceptance_criteria(task)
     qa_ids = set(args.qa_agent_id)
     candidates = [
         comment
         for comment in comments
         if isinstance(comment, dict)
         and author_is_qa(comment, qa_ids)
-        and has_live_evidence(plain_text(comment), count)
+        and has_live_evidence(plain_text(comment), criteria)
     ]
     if not candidates:
         print(
-            f"no QA Done verdict has live evidence for all {count} acceptance criteria",
+            f"no QA Done verdict has live evidence for all {len(criteria)} acceptance criteria",
             file=sys.stderr,
         )
         return 1

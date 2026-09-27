@@ -13,7 +13,11 @@ import re
 import shlex
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config_files import config_files
 from typing import Any
 
 STALE_SECTIONS = {"ai review", "qa", "ht manager review", "inbox"}
@@ -392,7 +396,7 @@ class Health:
             fingerprint = hashlib.sha256((stamp + str(row.get("detail") or "")).encode()).hexdigest()[:12]
             active[f"runner:{slug}:error:{fingerprint}"] = f"Runner {html.escape(slug)} error at {html.escape(stamp)}."
         config_dir = Path(self.args.config_dir)
-        for conf in config_dir.glob("*.conf"):
+        for conf in config_files(config_dir):
             if self.conf_value(conf, "BOARD_ADAPTER") == "":
                 continue
             slug = self.conf_value(conf, "AGENT_SLUG") or conf.stem

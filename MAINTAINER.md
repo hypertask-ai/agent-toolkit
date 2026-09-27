@@ -355,8 +355,9 @@ is held, the runner keeps its draft until the worker exits. If that run merged
 its pull request, the runner refreshes GitHub, links the draft's ticket and pull
 request references, checks it again, and posts it. A rewrite failure leaves the
 comment held. In either case, the merged pull request makes the development run
-successful and moves the ticket to QA. Only QA moves it to Done, after its verdict
-names every acceptance criterion and gives evidence from the live product.
+successful and moves the ticket to QA. Only QA moves it to Done, after its verdict names every acceptance criterion
+and gives an observed result with a live URL or production location for each.
+A merged pull request alone is not live evidence.
 
 Direct human questions use the fixed high-effort Codex Sol reply route instead
 of the conf provider. The five-minute process uses `hax --raw`, which provides
@@ -582,19 +583,23 @@ acknowledgement stays visible either way.
 
 `agent-status.timer` runs every 60 seconds and publishes the owner-facing
 Agents page independently of any retired factory loop. It reads every valid
-conf under `~/.config/hypertask-agents`, the runner locks and logs under
+conf in board folders under `~/.config/hypertask-agents` and legacy flat confs, the runner locks and logs under
 `~/.local/state/agent-board-poll`, and supervisor violations from
 `~/.local/state/ht-supervisor/health.json`. It never calls a model or writes to
 the board.
 
-Each collection atomically writes `factory-status.json`, `agent-feed.json`, and
-`agent-status-metrics.json` beside the runner state. The factory document uses
-schema version 1 and is uploaded through `/api/factory-status?project=hypertask`,
-which stores `ops/factory-status/hypertask.json`. The page KPI document goes to
-`/api/agent-feed`. Both uploads load the Cloudflare Access headers from the
-mode-0600 `~/.config/hypertask-app/credentials.env` and the route's dedicated
-bearer from `~/.config/hypertask-agent-runtime.env`; errors never print a
-credential or response body.
+Each collection atomically writes `factory-status.json`, `agent-feed.json`,
+`agent-activity.json`, and `agent-status-metrics.json` beside the runner state.
+The factory document uses schema version 1 and is uploaded through
+`/api/factory-status?project=hypertask`, which stores
+`ops/factory-status/hypertask.json`. The page KPI document goes to
+`/api/agent-feed`; `/api/agent-activity` receives current work, QA, and PR-fix
+rounds with elapsed minutes. The activity also identifies a live red-PR repair
+so the page's pile-up bar can mark it as being fixed. All uploads load the
+Cloudflare Access headers from the mode-0600
+`~/.config/hypertask-app/credentials.env` and the route's dedicated bearer from
+`~/.config/hypertask-agent-runtime.env`; errors never print a credential or
+response body.
 
 Current work comes from `<slug>.lock`, including the numeric ticket identity
 written by new runner versions. Execution falls back to structured run lines in

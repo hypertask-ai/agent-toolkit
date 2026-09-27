@@ -2593,8 +2593,7 @@ fi
 MENTION="$(adapter_mention_token "$AGENT_ID")"
 answerer_agent_rows() {
   local current_adapter="$BOARD_ADAPTER" dir agent_conf token
-  while IFS= read -r dir; do
-    for agent_conf in "$dir"/*.conf; do
+  while IFS= read -r agent_conf; do
       [ -f "$agent_conf" ] || continue
       (
         unset AGENT_ID AGENT_SLUG BOARD_ADAPTER BOARD_ID
@@ -2607,8 +2606,7 @@ answerer_agent_rows() {
           ID_VALUE="$AGENT_ID" TOKEN_VALUE="$token" BOARDS_VALUE="${BOARD_ID:-}" \
           python3 -c 'import json,os; print(json.dumps({"slug":os.environ["SLUG_VALUE"], "id":os.environ["ID_VALUE"], "token":os.environ["TOKEN_VALUE"], "boards":os.environ["BOARDS_VALUE"]}))'
       )
-    done
-  done < <(core_conf_dirs)
+  done < <(core_conf_files)
 }
 ANSWERER_AGENTS="$(answerer_agent_rows)"
 # Which skills this tick will read, by version, logged before any ticket is

@@ -2942,10 +2942,10 @@ adapter_pick_rank() {
   fi
 
   printf '%s' "$comments" | \
-  AGENT_ID="$agent_id" AGENT_NAME="$agent_name" REF="$ref" SECTION="$section" \
+  AGENT_ID="$agent_id" AGENT_NAME="$agent_name" AGENT_KIND="${AGENT_KIND:-dev}" REF="$ref" SECTION="$section" \
   REASON="$reason" PR_JSON="${pr_json:-[]}" HAVE_PR_VIEW="$pr_known" \
   LINKED_MERGED_PR="$linked_merged_pr" python3 -c '
-import json, os, re, sys
+import datetime, json, os, re, sys
 
 def text_of(comment):
     raw = comment.get("text") or comment.get("comment") or comment.get("html") or ""
@@ -2992,6 +2992,25 @@ prs = [p for p in prs if ref.casefold() in
        (str(p.get("title") or "") + " " + str(p.get("headRefName") or "")).casefold()]
 merged = bool(os.environ["LINKED_MERGED_PR"]) or any(
     str(p.get("state") or "").upper() == "MERGED" for p in prs)
+
+def timestamp(value):
+    try:
+        stamp = datetime.datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+        return stamp.replace(tzinfo=stamp.tzinfo or datetime.timezone.utc)
+    except ValueError:
+        return None
+
+merged_at = max((stamp for p in json.loads(os.environ["PR_JSON"]) or []
+                 if str(p.get("state") or "").upper() == "MERGED"
+                 and (p.get("url") == os.environ["LINKED_MERGED_PR"] or p in prs)
+                 if (stamp := timestamp(p.get("mergedAt"))) is not None), default=None)
+verdict_after_merge = merged_at is not None and any(
+    (stamp := timestamp(c.get("createdAt"))) is not None and stamp > merged_at
+    and (re.search(r"\bqa\s*(?:verdict|result)?\s*[:\-]?\s*(?:pass(?:ed)?|fail(?:ed|s|ing)?)\b",
+                   text_of(c), re.I)
+         or (str((c.get("agent") or {}).get("id") or "") == os.environ["AGENT_ID"]
+             and re.match(r"\s*(?:Done|Handoff):", text_of(c), re.I)))
+    for c in comments)
 open_pr = [p for p in prs if str(p.get("state") or "").upper() == "OPEN"]
 pr_known = os.environ["HAVE_PR_VIEW"] == "yes"
 
@@ -3000,7 +3019,8 @@ if reply_only and done:
           % (ref, section))
 elif done:
     print("0 %s is %s, nothing left to do" % (ref, section))
-elif merged:
+elif merged and not (os.environ["AGENT_KIND"].strip().casefold() == "qa" and section == "qa"
+                     and merged_at is not None and not verdict_after_merge):
     print("0 %s has a merged pull request, so it cannot start another run" % ref)
 elif reply_only:
     print("-3 %s has a human direct mention or question, so it is a reply-only candidate in %s"

@@ -62,12 +62,14 @@ record_preserves_ticket() {
 
 CONF_FILES=()
 if [ -n "$CONFIG_DIR" ]; then
-  for conf in "$CONFIG_DIR"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
-else
-  while IFS= read -r dir; do
-    for conf in "$dir"/*.conf; do [ ! -f "$conf" ] || CONF_FILES+=("$conf"); done
-  done < <(core_conf_dirs)
+  AGENT_CONFIG_DIR="$CONFIG_DIR"
 fi
+while IFS= read -r conf; do
+  if [ -n "$CONFIG_DIR" ]; then
+    case "$conf" in "$CONFIG_DIR"/*) ;; *) continue ;; esac
+  fi
+  CONF_FILES+=("$conf")
+done < <(core_conf_files)
 
 for conf in "${CONF_FILES[@]}"; do
   (
@@ -87,7 +89,11 @@ done
 
 ALLOW_FILES=()
 for conf in "${CONF_FILES[@]}"; do
-  allow_file="$(dirname "$conf")/repos.allow"
+  allow_dir="$(dirname "$conf")"
+  if ! core_conf_dirs | grep -qxF "$allow_dir"; then
+    allow_dir="$(dirname "$allow_dir")"
+  fi
+  allow_file="$allow_dir/repos.allow"
   [ ! -f "$allow_file" ] || ALLOW_FILES+=("$allow_file")
 done
 if [ "${#ALLOW_FILES[@]}" -gt 0 ]; then

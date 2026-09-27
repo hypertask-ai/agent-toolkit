@@ -157,7 +157,7 @@ if [ "$KIND" = "cli" ]; then DISPLAY_NAME="$NAME CLI"; fi
 # answer/Q&A kind with no code to work in, like Product Bot) does not force
 # a --repo it never needed, and resuming one that already has a skills
 # index does not force --skills-index/--skills-repo again either.
-EXISTING_CONF="$(core_config_dir)/$SLUG.conf"
+EXISTING_CONF="$(core_find_conf "$SLUG" || true)"
 if [ "$RESUME" = "yes" ] && [ -f "$EXISTING_CONF" ]; then
   [ -n "$REPO" ] || REPO="$(sed -n 's/^AGENT_REPO="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
   [ -n "$PR_REPO" ] || PR_REPO="$(sed -n 's/^PR_REPO="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
@@ -228,7 +228,25 @@ fi
 
 # ---------- paths ----------
 CONFIG_DIR="$(core_config_dir)"
-CONF_FILE="$CONFIG_DIR/$SLUG.conf"
+CONF_FILE="${EXISTING_CONF:-}"
+if [ -n "$CONF_FILE" ] && [ "$RESUME" != "yes" ]; then
+  die "slug $SLUG already has settings at $CONF_FILE" "choose another name or use --resume"
+fi
+if [ -z "$CONF_FILE" ]; then
+  if [ "$BOARD" = "hypertask" ]; then
+    first_board="${BOARD_ID%%,*}"
+    [[ "$first_board" =~ ^[0-9]+$ ]] || die "invalid first board id $first_board" "pass numeric board ids"
+    board_json="$(hypertask --json project show "$first_board")" \
+      || die "could not read board $first_board" "check board access and retry"
+    board_title="$(printf '%s' "$board_json" | python3 -c 'import json,sys; p=json.load(sys.stdin); print((p.get("project") or p).get("title") or (p.get("project") or p).get("name") or "")')"
+    [ -n "$board_title" ] && [ "$board_title" != . ] && [ "$board_title" != .. ] \
+      && [[ "$board_title" != */* ]] && [[ "$board_title" != *$'\n'* ]] \
+      || die "board $first_board has no safe title" "rename the board or check project access"
+    CONF_FILE="$CONFIG_DIR/$board_title/$SLUG.conf"
+  else
+    CONF_FILE="$CONFIG_DIR/$SLUG.conf"
+  fi
+fi
 TOKEN_FILE="$CONFIG_DIR/credentials/$SLUG-agent-token"
 BOARD_CLI="$BIN_DIR/$SLUG-board"
 if [ -z "$SECTIONS" ]; then
@@ -461,7 +479,7 @@ EOF
 CONF_CONTENT="$CONF_CONTENT
 PR_REPO=\"$PR_REPO\""
 if [ "$DRY_RUN" != "yes" ]; then
-  mkdir -p "$CONFIG_DIR"
+  mkdir -p "$(dirname "$CONF_FILE")"
   core_write_missing_keys "$CONF_FILE" "$CONF_CONTENT"
   # One shared copy next to every bot's conf in this config dir: whoever
   # looks after any of them starts from the same page.

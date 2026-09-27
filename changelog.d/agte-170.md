@@ -1,0 +1,1 @@
+- AGTE-170 publishes current fix rounds and QA runs with elapsed minutes so the Agents page shows live work and marks CI-red tickets being repaired.

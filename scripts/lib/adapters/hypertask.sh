@@ -25,7 +25,8 @@ adapter_run_prompt() {
 
 Before a passing QA verdict, test every acceptance criterion on the live product.
 In the one `Done:` comment, include `AC 1, <criterion name>. Live evidence:
-<observed live result>` for every criterion, in ticket order. A PR, merge, staging
+<observed live result and live URL or production location>` for every criterion,
+in ticket order. Name the actual criterion, not just its number. A PR, merge, staging
 result, or developer report is not live evidence. Do not move the ticket to Done
 unless every acceptance criterion has that evidence.
 EOF

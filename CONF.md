@@ -52,6 +52,10 @@ CHAT_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast
 
 A file at `~/.local/state/agent-board-poll/model-override/<REF>` may contain one full command for that ticket. It wins over hard triage and `LADDER`; delete it to return to the conf.
 
+## Agent settings by board
+
+New Hypertask agents keep their settings at `~/.config/hypertask-agents/<Board title>/<slug>.conf`. The folder uses the first board for agents on several boards. Agent lookup uses the slug across folders, never a board title. Flat confs still load during migration. Installation moves only the three Hypertask Product agents, dev-1, dev-2 and qa-1, into that board folder. Other boards stay flat until their owner approves moving them. Tokens stay in the shared credentials folder.
+
 ## Other keys
 
 | Key | Meaning |

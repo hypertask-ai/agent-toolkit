@@ -217,6 +217,26 @@ done
 # shellcheck disable=SC1091
 . "$SRC/scripts/lib/instructions.sh"
 
+migrate_product_confs() {
+  local slug source target board
+  for slug in dev-1 dev-2 qa-1; do
+    source="$AGENT_CONF_DIR/$slug.conf"
+    [ -f "$source" ] || continue
+    board="$(sed -n 's/^BOARD_ID="\([^"]*\)"$/\1/p' "$source" | head -1)"
+    [ "${board%%,*}" = 15 ] || continue
+    target="$AGENT_CONF_DIR/Hypertask Product/$slug.conf"
+    [ ! -e "$target" ] || fail "both flat and board-folder settings exist for $slug" \
+      "compare them and keep only the intended settings before retrying"
+    if [ "$DRY_RUN" = yes ]; then
+      echo "would move $slug into Hypertask Product"
+    else
+      mkdir -p "$(dirname "$target")"
+      mv "$source" "$target"
+      echo "moved $slug into Hypertask Product"
+    fi
+  done
+}
+
 migrate_queued_instructions() {
   local state_root queue queue_status parent slug conf candidate
   state_root="${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll"
@@ -234,9 +254,10 @@ migrate_queued_instructions() {
     parent="$(basename "$(dirname "$queue")")"
     slug="${parent%-instructions}"
     conf=""
-    for candidate in "$AGENT_CONF_DIR/$slug.conf" \
-      "$HOME/.config/agents/$slug.conf" "$HOME/.config/hypertask-agents/$slug.conf"; do
+    for candidate in "$AGENT_CONF_DIR"/*/"$slug.conf" \
+      "$AGENT_CONF_DIR/$slug.conf" "$HOME/.config/agents/$slug.conf"; do
       [ -f "$candidate" ] || continue
+      case "$candidate" in "$AGENT_CONF_DIR/retired/"*) continue ;; esac
       conf="$candidate"
       break
     done
@@ -286,6 +307,7 @@ if [ "$DRY_RUN" = "yes" ]; then
   # shellcheck disable=SC1091
   . "$SRC/scripts/lib/core.sh"
   core_guard_token_wrappers "$BIN" yes
+  migrate_product_confs
   feedback_print_discovery
   exit 0
 fi
@@ -441,6 +463,7 @@ printf '{"title":"x","description":"y","comments":[]}' \
   || fail "the installed triage scorer does not run" \
           "run $DEST/scripts/triage.sh --help and check python3 is present"
 
+migrate_product_confs
 migrate_queued_instructions
 
 # AGTE-13: a hand-made board wrapper that calls hypertask directly (like the
@@ -643,7 +666,8 @@ EOF
           "$SYSTEMD_USER_DIR/agent-template-feedback.timer"
   fi
 
-  for conf in "$AGENT_CONF_DIR"/*.conf; do
+  while IFS= read -r conf; do
+    case "$conf" in "$AGENT_CONF_DIR"/*) ;; *) continue ;; esac
     [ -f "$conf" ] || continue
     slug="$(basename "$conf" .conf)"
     if grep -qE '^WIRING="?events"?$' "$conf"; then
@@ -651,7 +675,7 @@ EOF
     else
       core_remove_event_timer_dropin "$SYSTEMD_USER_DIR" "$slug"
     fi
-  done
+  done < <(core_conf_files)
   systemctl --user daemon-reload
   systemctl --user enable --now agent-fleet-watch.timer
   systemctl --user enable --now agent-status.timer
