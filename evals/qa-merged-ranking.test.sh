@@ -16,3 +16,12 @@ COMMENTS='{"comments":[{"createdAt":"2026-09-18T21:00:00Z","text":"QA verdict: p
 COMMENTS='{"comments":[{"createdAt":"2026-09-18T21:00:00Z","agent":{"id":"agent-qa"},"text":"<p>Done: verified checkout</p>"}]}'
 [[ "$(rank qa QA)" == '0 '* ]] || { echo 'FAIL an agent Done verdict must stop repeated QA'; exit 1; }
 echo 'PASS merged ticket enters QA once, only in QA without a later verdict'
+for flag in no yes; do
+  verdict="$(FEATURE_FREEZE="$flag" rank dev Features)"
+  if [ "$flag" = yes ]; then
+    [[ "$verdict" == '0 feature freeze' ]] || { echo 'FAIL frozen Features rank'; exit 1; }
+  else
+    [[ "$verdict" == '0 '* ]] || { echo 'FAIL unfrozen Features rank'; exit 1; }
+  fi
+  echo "PASS feature-freeze-rank-$flag"
+done

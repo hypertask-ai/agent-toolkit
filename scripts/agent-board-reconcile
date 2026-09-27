@@ -171,6 +171,15 @@ for conf in "${CONF_FILES[@]}"; do
     SLUG="$slug"
     export STATE_DIR SLUG
     core_load_adapter "$BOARD_ADAPTER"
+    reconcile_qa_target() {
+      local task_id="$1" board="$2" verdict
+      verdict="$(adapter_latest_qa_verdict "$TOKEN_FILE" "$task_id" "$board" "$(adapter_qa_agent_ids "$board")" 2>>"$log")" || return 1
+      if [ "$verdict" = pass ]; then
+        printf '%s' "$DONE_SECTION"
+      else
+        printf '%s' "$QA_SECTION"
+      fi
+    }
 
     ticket_has_live_qa_verdict() {
       local ref="$1" board="$2" task comments qa_id
@@ -296,8 +305,9 @@ import json, os
 row = json.loads(os.environ["ROW"])
 print(row.get("board") or "")
 print(row.get("section") or "")
+print(row.get("id") or "")
 ')"
-        { IFS= read -r board; IFS= read -r section; } <<< "$fields"
+        { IFS= read -r board; IFS= read -r section; IFS= read -r task_id; } <<< "$fields"
         current="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$log" || true)"
         [ -n "$current" ] || current="$section"
         current_lower="${current,,}"
@@ -306,9 +316,15 @@ print(row.get("section") or "")
           continue
         fi
         destination="$QA_SECTION"
-        if ticket_has_live_qa_verdict "$ref" "$board"; then
+        if [ "${REQUIRE_QA_VERDICT:-no}" = yes ] || [ "${VERDICT_FINAL:-no}" = yes ]; then
+          if ! destination="$(reconcile_qa_target "$task_id" "$board" "$current")"; then
+            health_log "$board" "Reconciler could not read QA verdict for $ref; left it in $current."
+            continue
+          fi
+        elif ticket_has_live_qa_verdict "$ref" "$board"; then
           destination="$DONE_SECTION"
         fi
+        [ "${destination,,}" != "${current,,}" ] || continue
         if ! adapter_move_task "$BOARD_CLI" "$ref" "$destination" >>"$log" 2>&1; then
           health_log "$board" "Reconciler could not move $ref to $destination after direct commit ${commit_sha:0:7} shipped."
           continue
@@ -394,9 +410,15 @@ if str(pull.get("state") or "").upper() == "MERGED":
         fi
         [ "$merged_rc" -eq 0 ] || continue
         destination="$QA_SECTION"
-        if ticket_has_live_qa_verdict "$ref" "$board"; then
+        if [ "${REQUIRE_QA_VERDICT:-no}" = yes ] || [ "${VERDICT_FINAL:-no}" = yes ]; then
+          if ! destination="$(reconcile_qa_target "$task_id" "$board" "$current")"; then
+            health_log "$board" "Reconciler could not read QA verdict for $ref; left it in $current."
+            continue
+          fi
+        elif ticket_has_live_qa_verdict "$ref" "$board"; then
           destination="$DONE_SECTION"
         fi
+        [ "${destination,,}" != "${current,,}" ] || continue
         if ! adapter_move_task "$BOARD_CLI" "$ref" "$destination" >>"$log" 2>&1; then
           health_log "$board" "Reconciler could not move $ref to $destination after $merged_url merged."
           continue

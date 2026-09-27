@@ -173,6 +173,7 @@ IN_PROGRESS_SECTION="${IN_PROGRESS_SECTION:-In Progress}"
 REVIEW_SECTION="${REVIEW_SECTION:-AI Review}"
 OWNER_REVIEW_SECTION="${OWNER_REVIEW_SECTION:-Review}"
 DONE_SECTION="${DONE_SECTION:-Done}"
+QA_SECTION="${QA_SECTION:-QA}"
 QA_FAIL_SECTION="${QA_FAIL_SECTION:-}"
 QA_BLOCKED_SECTION="${QA_BLOCKED_SECTION:-Agent Blocked (Infra)}"
 QA_TURNAROUND_HOURS="${QA_TURNAROUND_HOURS:-4}"
@@ -1159,6 +1160,8 @@ for line in sys.stdin:
         break
 ')"
     [ -n "$row" ] || { log "dead run $ref could not be reconciled: ticket state is unavailable"; continue; }
+    [ -n "$task_id" ] || task_id="$(row_field "$row" id)"
+    [ -n "$origin" ] || origin="$(row_field "$row" section)"
     protection="$(qa_protection_reason "$row" "$board")"
     owner_state="$(owner_classification_state "$board" "$ref")"
     read -r _ owner_state_classification <<< "$owner_state"
@@ -1183,7 +1186,7 @@ for line in sys.stdin:
       report_board_health "$board" "Dead run reconciliation could not unassign $ref from $SLUG."
       continue
     fi
-    move_ticket_or_report "$ref" "$intake" "$board" "dead run reconciliation" || continue
+    move_ticket_or_report "$ref" "$intake" "$board" "dead run reconciliation" "$task_id" "$origin" || continue
     comment_file="$(mktemp "$STATE_DIR/.dead-run-comment.XXXXXX")"
     STARTED_AT="$started_at" REASON="$reason" python3 - "$comment_file" <<'PYEOF'
 import html, os, sys
@@ -1297,7 +1300,22 @@ PYEOF
 }
 
 move_ticket_or_report() {
-  local ref="$1" section="$2" board="$3" context="$4"
+  local ref="$1" section="$2" board="$3" context="$4" task_id="$5" origin_section="$6" qa_verdict
+  if [ "$AGENT_KIND" = dev ] && [ "${VERDICT_FINAL:-no}" = yes ] \
+     && { [ "${section,,}" = "${DONE_SECTION,,}" ] || [ "${section,,}" = archived ] || [ "${section,,}" = archive ]; }; then
+    qa_verdict="$(adapter_latest_qa_verdict "$TOKEN_FILE" "$task_id" "$board" "$(adapter_qa_agent_ids "$board")" 2>>"$LOG")" || return 1
+    if [ "$qa_verdict" = fail ]; then
+      local current
+      current="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$LOG")" || return 1
+      if [ "${current,,}" = "${DONE_SECTION,,}" ] \
+         || [ "${current,,}" = archived ] || [ "${current,,}" = archive ]; then
+        adapter_move_task "$BOARD_CLI" "$ref" "$origin_section" >>"$LOG" 2>&1 || return 1
+        current="$origin_section"
+      fi
+      log "$context left $ref in ${current:-$origin_section}: QA FAIL is final until a new verdict"
+      return 0
+    fi
+  fi
   if adapter_move_task "$BOARD_CLI" "$ref" "$section" >>"$LOG" 2>&1; then
     log "$context moved $ref to $section"
     return 0
@@ -2058,7 +2076,7 @@ qa_apply_verdict() {
 qa_backfill() {
   local rows row task_id board ref latest info marker comment_id age
   [ "$AGENT_KIND" = "qa" ] || return 0
-  rows="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "QA")" || return 1
+  rows="$(adapter_list_candidates "$TOKEN_FILE" "$BOARD_ID" "$QA_SECTION")" || return 1
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     task_id="$(row_field "$row" id)"
@@ -3011,16 +3029,19 @@ for value in dict.fromkeys(re.findall(r"/actions/runs/([0-9]+)", text)):
 }
 
 release_owned_pr() {
-  local gate="$1" diagnosis="$2" number ref board checks body destination
+  local gate="$1" diagnosis="$2" number ref board checks body destination task_id origin_section
   number="$(row_field "$gate" number)"
   ref="$(row_field "$gate" ticket)"
   board="$(row_field "$gate" board)"; [ -n "$board" ] || board="${BOARD_ID%%,*}"
+  task_id="$(row_field "$gate" task_id)"
+  origin_section="$(row_field "$gate" ticket_section)"
+  [ -n "$origin_section" ] || origin_section="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$LOG")" || return 1
   destination="${PR_RELEASE_SECTIONS[$board]:-$OWNER_REVIEW_SECTION}"
   checks="$(printf '%s' "$gate" | python3 -c 'import json,sys; print(", ".join(json.load(sys.stdin).get("failed_checks") or ["QA fail"]))')"
   body="Closing after the structured repair rounds. Failing checks: $checks. Second-opinion diagnosis: $diagnosis"
   gh pr comment "$number" --repo "$PR_REPO" --body "$body" >>"$LOG" 2>&1 || return 1
   adapter_add_label "$BOARD_CLI" "$TOKEN_FILE" "$board" "$ref" needs-human >>"$LOG" 2>&1 || return 1
-  if ! move_ticket_or_report "$ref" "$destination" "$board" "PR release"; then
+  if ! move_ticket_or_report "$ref" "$destination" "$board" "PR release" "$task_id" "$origin_section"; then
     if ! adapter_unassign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
       log "PR release could not move $ref to $destination, and agent unbind failed"
       return 1
@@ -3528,7 +3549,7 @@ for item in sorted(comments, key=key, reverse=True):
        || ! adapter_unassign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; }; then
       report_board_health "$board" "Owner hold could not unassign $ref from $SLUG."
     fi
-    move_ticket_or_report "$ref" "$REVIEW_SECTION" "$board" "owner hold" || true
+    move_ticket_or_report "$ref" "$REVIEW_SECTION" "$board" "owner hold" "$task_id" "$section" || true
     if [ "$owner_ack_needed" = "yes" ]; then
       if post_ticket_comment "$ref" text "$(owner_classification_ack hold)"; then
         record_owner_classification "$board" "$ref" "$owner_comment_id" hold
@@ -3720,6 +3741,12 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     fi
   fi
 
+  if [ "${FEATURE_FREEZE:-no}" = yes ] && [ "$is_reply_only" = no ] && [ "$is_pr_fix" = no ] \
+     && ROW="$row" python3 -c 'import json,os,sys; r=json.loads(os.environ["ROW"]); sys.exit(0 if str(r.get("section") or "").casefold() == "features" or "feature" in [str(x).casefold() for x in r.get("labels") or []] else 1)'; then
+    log "skip $ref: feature freeze"
+    continue
+  fi
+
   if [ "$GITHUB_PAUSED" = "yes" ] && [ "$is_reply_only" = "no" ]; then
     explain "skip  $ref: GitHub is paused, so only board-only work can run"
     continue
@@ -3812,7 +3839,7 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     why="$ref owns PR #$PR_GATE_NUMBER and its current feedback requires a fix"
   elif declare -F adapter_pick_rank >/dev/null 2>&1; then
     verdict="$(adapter_pick_rank "$TOKEN_FILE" "$board" "$AGENT_ID" "$AGENT_NAME" \
-                 "$ref" "$task_id" "$section" "$reason" 2>>"$LOG")" || verdict=""
+                 "$ref" "$task_id" "$section" "$reason" "$row" 2>>"$LOG")" || verdict=""
     if [ -n "$verdict" ]; then
       rank="${verdict%% *}"
       why="${verdict#* }"
@@ -4459,7 +4486,7 @@ Second-opinion verdict: $REVERT_GUARD_DIAGNOSIS"
       post_run_cleanup
       continue
     fi
-    if ! move_ticket_or_report "$ref" "$IN_PROGRESS_SECTION" "$board" "run start"; then
+    if ! move_ticket_or_report "$ref" "$IN_PROGRESS_SECTION" "$board" "run start" "$task_id" "$origin_section"; then
       write_run_record "$run_record" prepare-failed "$origin_section" "$ref" "$task_id" "$board" "$run_started_at" "$RUN_OUTPUT"
       write_failure_status "$ref" move "could not move the ticket to $IN_PROGRESS_SECTION before model invocation"
       post_run_cleanup
@@ -4845,7 +4872,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
     if ! adapter_unassign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
       report_board_health "$board" "Watchdog could not unassign $ref from $SLUG."
     fi
-    move_ticket_or_report "$ref" "$origin_section" "$board" "watchdog" || true
+    move_ticket_or_report "$ref" "$origin_section" "$board" "watchdog" "$task_id" "$origin_section" || true
     watchdog_comment="<p><strong>Decision: $WATCHDOG_REASON.</strong></p><p>Next: The ticket is back in $origin_section and unassigned.</p>"
     post_ticket_comment "$ref" text "$watchdog_comment" \
       || report_board_health "$board" "Watchdog stopped $ref, but its failure comment could not be posted."
@@ -5002,25 +5029,39 @@ ${qa_comment:-No ticket comment was posted.}"
         quota_wait_comment="<p><strong>Decision: Every available provider is out of quota, so this run is waiting for the earliest reset.</strong></p><p>No provider reported a reset time.</p><p>Next: The runner can continue when a subscription resets.</p>"
       fi
       post_ticket_comment "$ref" text "$quota_wait_comment" || log "provider reset wait comment failed for $ref"
-      move_ticket_or_report "$ref" "$origin_section" "$board" "provider reset wait" || true
+      move_ticket_or_report "$ref" "$origin_section" "$board" "provider reset wait" "$task_id" "$origin_section" || true
     elif [ "$merged_pr_outcome" = "yes" ]; then
+      merged_target="$DONE_SECTION"
+      qa_verdict=""
+      if [ "$AGENT_KIND" = dev ] && { [ "${REQUIRE_QA_VERDICT:-no}" = yes ] || [ "${VERDICT_FINAL:-no}" = yes ]; }; then
+        qa_verdict="$(adapter_latest_qa_verdict "$TOKEN_FILE" "$task_id" "$board" "$(adapter_qa_agent_ids "$board")" 2>>"$LOG")" || qa_verdict="unknown"
+        if [ "${VERDICT_FINAL:-no}" = yes ] && [ "$qa_verdict" = fail ]; then
+          merged_target="$QA_SECTION"
+        elif [ "${REQUIRE_QA_VERDICT:-no}" = yes ] && [ "$qa_verdict" != pass ]; then
+          merged_target="$QA_SECTION"
+        fi
+      fi
       run_record_status="done"
-      if ! move_ticket_or_report "$ref" "$DONE_SECTION" "$board" "merged PR outcome"; then
+      [ "$merged_target" = "$DONE_SECTION" ] || run_record_status="review"
+      if [ "$qa_verdict" = unknown ]; then
+        rc=74
+        run_record_status="move-failed"
+      elif ! move_ticket_or_report "$ref" "$merged_target" "$board" "merged PR outcome" "$task_id" "$origin_section"; then
         rc=74
         run_record_status="move-failed"
       fi
     elif [ "$qa_missing_verdict" = "yes" ]; then
       run_record_status="qa-missing-verdict"
-      if ! move_ticket_or_report "$ref" "$origin_section" "$board" "missing QA verdict marker"; then
+      if ! move_ticket_or_report "$ref" "$origin_section" "$board" "missing QA verdict marker" "$task_id" "$origin_section"; then
         rc=74
         run_record_status="move-failed"
       fi
     elif [ "$rc" -ne 0 ]; then
       run_record_status="blocked"
-      move_ticket_or_report "$ref" "$QA_BLOCKED_SECTION" "$board" "blocked run" || true
+      move_ticket_or_report "$ref" "$QA_BLOCKED_SECTION" "$board" "blocked run" "$task_id" "$origin_section" || true
     elif [ "$opened_this_run" = "yes" ] || [ "$is_pr_fix" = "yes" ]; then
       run_record_status="review"
-      if ! move_ticket_or_report "$ref" "$REVIEW_SECTION" "$board" "PR outcome"; then
+      if ! move_ticket_or_report "$ref" "$REVIEW_SECTION" "$board" "PR outcome" "$task_id" "$origin_section"; then
         rc=74
         run_record_status="move-failed"
       fi
@@ -5028,12 +5069,12 @@ ${qa_comment:-No ticket comment was posted.}"
       run_record_status="qa-${run_verdict,,}"
     elif [ "$run_verdict" = "Question" ] || [ "$run_verdict" = "Handoff" ]; then
       run_record_status="blocked"
-      if ! move_ticket_or_report "$ref" "$QA_BLOCKED_SECTION" "$board" "blocked verdict"; then
+      if ! move_ticket_or_report "$ref" "$QA_BLOCKED_SECTION" "$board" "blocked verdict" "$task_id" "$origin_section"; then
         rc=74
         run_record_status="move-failed"
       fi
     else
-      if ! move_ticket_or_report "$ref" "$origin_section" "$board" "no-change outcome"; then
+      if ! move_ticket_or_report "$ref" "$origin_section" "$board" "no-change outcome" "$task_id" "$origin_section"; then
         rc=74
         run_record_status="move-failed"
       elif [ -z "$run_verdict" ]; then

@@ -171,6 +171,25 @@ else
   bad done-mention-reply-only "output=$output"
 fi
 
+printf 'FEATURE_FREEZE="yes"\n' >> "$TMP/home/.config/agents/test.conf"
+python3 - "$TMP/tasks.json" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+row = json.load(open(path))
+row['tasks'][0]['labels'] = [{'name': 'Feature'}]
+json.dump(row, open(path, 'w'))
+PYEOF
+output="$(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
+  TASKS_JSON="$TMP/tasks.json" COMMENTS_JSON="$TMP/comments.json" \
+  PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once --dry-run --explain test)"
+if printf '%s\n' "$output" | grep -qF 'would pick up TEST-1' ; then
+  ok feature-freeze-owner-reply 'feature freeze keeps owner questions answerable'
+else
+  bad feature-freeze-owner-reply "output=$output"
+fi
+sed -i '/^FEATURE_FREEZE=/d' "$TMP/home/.config/agents/test.conf"
+
 printf 'TEST-1\t%s\n' "$(date +%s)" > "$TMP/state/agent-board-poll/test.owner-mentions"
 PROMPT_CAPTURE="$TMP/prompt" TIMEOUT_CAPTURE="$TMP/timeout" HAX_CAPTURE="$TMP/hax" \
   REPLY_CWD_CAPTURE="$TMP/reply-cwd" REPLY_MODE_CAPTURE="$TMP/reply-mode" \

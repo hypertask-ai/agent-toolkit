@@ -1292,6 +1292,46 @@ print(json.dumps(rows))
 '
 }
 
+# adapter_qa_agent_ids <board-id>
+adapter_qa_agent_ids() {
+  local board="$1" conf
+  while IFS= read -r conf; do
+    ( unset AGENT_ID AGENT_KIND BOARD_ID
+      . "$conf"
+      [ "${AGENT_KIND:-}" = qa ] || exit 0
+      case ",${BOARD_ID:-}," in
+        *",$board,"*) [ -n "${AGENT_ID:-}" ] && printf '%s\n' "$AGENT_ID" ;;
+      esac
+    )
+  done < <(core_conf_files)
+}
+
+# adapter_latest_qa_verdict <token-file> <task-id> <board-id> <qa-agent-ids>
+# Explicit QA verdicts and the runner's QA-agent Done:/Handoff: markers.
+adapter_latest_qa_verdict() {
+  local comments
+  comments="$(adapter_ticket_comments "$1" "$2" "$3")" || return 1
+  COMMENTS="$comments" QA_IDS=" $4 " python3 -c '
+import html, json, os, re
+rows = sorted(json.loads(os.environ["COMMENTS"]),
+              key=lambda c: (c.get("createdAt") or "", int(c.get("id") or 0) if str(c.get("id") or "").isdigit() else 0), reverse=True)
+for row in rows:
+    if not row.get("agent_id") or " " + str(row["agent_id"]) + " " not in os.environ["QA_IDS"]:
+        continue
+    plain = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", row.get("html") or "")).split())
+    if re.match(r"QA PASS\b", plain, re.I):
+        print("pass"); break
+    if re.match(r"QA FAIL\b", plain, re.I):
+        print("fail"); break
+    if re.match(r"Can.t verify\b", plain, re.I):
+        print("blocked"); break
+    if re.match(r"Done:", plain, re.I):
+        print("pass"); break
+    if re.match(r"Handoff:", plain, re.I):
+        print("fail"); break
+'
+}
+
 # adapter_latest_comment <token-file> <task-id> <board-id>
 # JSON {"id":..., "createdAt":..., "html":..., "author":..., "author_id":..., "agent_id":...}
 # or an empty line when there is none.
@@ -2903,6 +2943,12 @@ adapter_pick_rank() {
   local token_file="$1" board_id="$2" agent_id="$3" agent_name="$4" ref="$5"
   local task_id="$6" section="$7" reason="$8"
   local comments pr_json="" repo="${PR_REPO:-}" pr_known="no" linked_merged_pr="" linked_rc
+  if [ "${FEATURE_FREEZE:-no}" = yes ] && [[ "+$reason+" != *+reply_only+* ]] \
+     && { [ "${section,,}" = features ] \
+     || { [ -n "${9:-}" ] && ROW="${9}" python3 -c 'import json,os,sys; r=json.loads(os.environ["ROW"]); sys.exit(0 if "feature" in [str(x).casefold() for x in r.get("labels") or []] else 1)'; }; }; then
+    printf '0 feature freeze\n'
+    return 0
+  fi
 
   comments="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")"
   case "+$reason+" in
