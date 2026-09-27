@@ -451,6 +451,11 @@ if [ -z "$ONLY" ] && [ -f "$HERE/comment-writer-real-cli.test.py" ]; then
   echo "-- real CLI comment writer dry-run check --"
   run_test "$HERE/comment-writer-real-cli.test.py" python3 "$HERE/comment-writer-real-cli.test.py" || :
 fi
+if [ -z "$ONLY" ] && [ -f "$HERE/session-agent-log.test.py" ]; then
+  echo ""
+  echo "-- session comments in the agent log --"
+  run_test "$HERE/session-agent-log.test.py" python3 "$HERE/session-agent-log.test.py" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/reply-contract.test.sh" ]; then
   echo ""
   echo "-- reply contract behavioural checks --"
