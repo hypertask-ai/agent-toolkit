@@ -183,8 +183,18 @@ def age(row):
         return 0
 
 
+# A PR can spend days in human review. Give it one turn when its ticket leaves
+# the lane before applying the usual two-hour stale rule.
+try:
+    previous = {str(row.get("number")): row for row in json.load(open(os.environ["MONITOR"], encoding="utf-8"))}
+except (OSError, ValueError):
+    previous = {}
+human_review = {"valentin review", "ht manager review"}
 for row in rows:
-    stale = row.get("state") in {"red", "pending"} and age(row) >= 2 * 60 * 60
+    prior = previous.get(str(row.get("number")), {})
+    resumed = (str(prior.get("ticket_section") or "").strip().casefold() in human_review
+               and str(row.get("ticket_section") or "").strip().casefold() not in human_review)
+    stale = row.get("state") in {"red", "pending"} and age(row) >= 2 * 60 * 60 and not resumed
     if stale:
         row["action"] = "observe"
         row["pickup_slot"] = False

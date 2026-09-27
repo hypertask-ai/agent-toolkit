@@ -2675,10 +2675,10 @@ PYEOF
 import json, os
 row = json.loads(os.environ["ROW"])
 section = str(row.get("ticket_section") or "").strip().casefold()
-if "valentin-review" in row.get("prLabels", []):
-    print("label valentin-review")
-elif section in {"valentin review", "ht manager review"}:
+if section in {"valentin review", "ht manager review"}:
     print("ticket is in %s" % row.get("ticket_section"))
+elif "valentin-review" in row.get("prLabels", []):
+    print("label valentin-review")
 ')"
     if _ht_reconcile_auto_merge_hold "$repo" "$number" "$hold_reason" "$cache_dir"; then
       rc=0
@@ -2699,7 +2699,8 @@ print(json.dumps({"action":"wait", "state":"protected", "wait_reason":reason,
                   "task_id":pr.get("task_id") or "", "board":pr.get("board") or "",
                   "ticket_section":pr.get("ticket_section") or "", "labels":pr.get("labels") or [],
                   "human_assignee_ids":pr.get("human_assignee_ids") or [],
-                  "pickup_slot":True, "unfixable":False}))
+                  "pickup_slot":reason.startswith("label "),
+                  "blocks_pickup":reason.startswith("label "), "unfixable":False}))
 '
       continue
     fi
