@@ -640,13 +640,17 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "update" ] && [ -n "\${3:-}" ]; th
   if [ -n "\$TEXT" ]; then
     ORIGINAL_TEXT="\$TEXT"
     OWNER_IDS="\$(_board_owner_ids)"
-    if [ "\$QUIET" = "on" ]; then
+    if [ "\$QUIET" = "on" ] && [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
       TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
       if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
         _comment_cap_note "quiet mode: stripped board-owner mention from comment update"
       fi
     fi
     _outbound_text_gate "\$TEXT" || exit 0
+    if [[ "\$(_plain_comment "\$TEXT")" == Question:* ]] && [ "\$TEXT" != "\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")" ]; then
+      _run_activity action "owner-mention budget: Question: update refused; use ticket-addressed comment add"
+      exit 0
+    fi
     if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
       exec "\$HYPERTASK_NATIVE" --token "\$TOKEN" comment update "\$3" --text "\$TEXT"
     fi
@@ -683,7 +687,8 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
   if [ -n "\$TEXT" ]; then
     ORIGINAL_TEXT="\$TEXT"
     OWNER_IDS="\$(_board_owner_ids)"
-    if [ "\$QUIET" = "on" ] && [ "\$VERBATIM" != "yes" ] && [ "\$OWNER_MENTION_REPLY" != "yes" ]; then
+    if [ "\$QUIET" = "on" ] && [ "\$VERBATIM" != "yes" ] && [ "\$OWNER_MENTION_REPLY" != "yes" ] \
+       && [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
       TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
       if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
         _comment_cap_note "quiet mode: stripped board-owner mention from comment on \$REF"
@@ -773,9 +778,9 @@ except (OSError, ValueError):
     pass
 
 if new_mentions and not owner_ids:
-    print("OWNER_UNKNOWN")
+    print("CAP" if new_signature.startswith("question:") and today_count >= 3 else "OWNER_UNKNOWN")
 elif new_owner_mention and recent_owner_mention and not owner_mention_reply:
-    print("OWNER")
+    print("CAP" if new_signature.startswith("question:") and today_count >= 3 else "OWNER")
 elif recent_duplicate:
     print("UPDATE:" + recent_duplicate[1])
 elif today_count >= 3:
@@ -789,12 +794,14 @@ else:
       VERDICT="OK"
     fi
     case "\$VERDICT" in
-      OWNER)
-        _comment_cap_note "owner-mention budget: comment add refused on \$REF because this agent already @mentioned the board owner in the last 24 hours"
-        exit 0 ;;
-      OWNER_UNKNOWN)
-        _comment_cap_note "owner-mention budget: comment add refused on \$REF because the board owner could not be verified"
-        exit 0 ;;
+      OWNER|OWNER_UNKNOWN)
+        if [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
+          _comment_cap_note "owner-mention budget: comment add refused on \$REF (\$VERDICT)"
+          exit 0
+        fi
+        _run_activity action "owner-mention budget: throttled Question: on \$REF (\$VERDICT); posting without mention"
+        TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
+        VERDICT=OK ;;
       UPDATE:*)
         UPDATE_ID="\${VERDICT#UPDATE:}"
         if OUT="\$(hypertask --token "\$TOKEN" comment update "\$UPDATE_ID" --text "\$TEXT")"; then
@@ -809,6 +816,7 @@ else:
           exit "\$RC"
         fi ;;
       CAP)
+        _run_activity action "comment add refused on \$REF: daily cap reached (3 agent comments on this ticket today UTC)"
         _comment_cap_note "comment add refused on \$REF: daily cap reached (3 agent comments on this ticket today UTC)"
         exit 0 ;;
     esac
@@ -2382,46 +2390,11 @@ print(",".join(ids))')" || {
 
 # ---------- one ticket until live ----------
 _ht_reconcile_auto_merge_hold() {
-  local repo="$1" number="$2" hold_reason="$3" cache_dir="$4"
-  local marker_dir marker details state enabled rc
-  marker_dir="$cache_dir/auto-merge-holds"
-  marker="$marker_dir/${repo//\//__}-$number"
-
-  if [ -z "$hold_reason" ] && [ ! -f "$marker" ]; then
-    return 0
-  fi
-  if details="$(_ht_gh "$repo" pr view "$number" --repo "$repo" --json state,autoMergeRequest)"; then
-    rc=0
-  else
-    rc=$?
-  fi
-  [ "$rc" -eq 0 ] || return "$rc"
+  local details state
+  details="$(_ht_gh "$1" pr view "$2" --repo "$1" --json state,autoMergeRequest)" || return $?
   state="$(printf '%s' "$details" | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("state") or "").upper())')"
-  [ "$state" = "OPEN" ] || { rm -f "$marker"; return 3; }
-  enabled="$(printf '%s' "$details" | python3 -c 'import json,sys; print("yes" if json.load(sys.stdin).get("autoMergeRequest") else "no")')"
-
-  if [ -n "$hold_reason" ]; then
-    if [ "$enabled" = "yes" ]; then
-      _ht_gh "$repo" pr merge --repo "$repo" --disable-auto "$number" >/dev/null || return $?
-    fi
-    mkdir -p "$marker_dir"
-    printf '%s\n' "$hold_reason" > "$marker"
-    return 0
-  fi
-
-  if [ "$enabled" = "yes" ]; then
-    rm -f "$marker"
-    return 0
-  fi
-  if _ht_gh "$repo" pr merge --repo "$repo" --auto --squash "$number" >/dev/null; then
-    rm -f "$marker"
-    return 0
-  else
-    rc=$?
-  fi
-  [ "$rc" -ne 75 ] || return 75
-  printf 'could not re-enable auto-merge for %s#%s after its human-review hold cleared\n' "$repo" "$number" >&2
-  return 0
+  [ "$state" = "OPEN" ] || return 3
+  printf 'run-activity: auto-merge disabled by policy for %s#%s\n' "$1" "$2" >&2
 }
 
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
@@ -2693,7 +2666,7 @@ import json, os
 pr = json.loads(os.environ["PR"])
 reason = os.environ["HOLD_REASON"]
 print(json.dumps({"action":"wait", "state":"protected", "wait_reason":reason,
-                  "definition":"human-held pull request has native auto-merge disabled",
+                  "definition":"auto-merge disabled by policy",
                   "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
                   "title":pr["title"], "branch":pr["headRefName"], "since":pr["createdAt"],
                   "task_id":pr.get("task_id") or "", "board":pr.get("board") or "",
@@ -3190,23 +3163,16 @@ adapter_run_prompt() {
 FINISH IT AS THE SETUP MAINTAINER. A ticket asking for an allowlisted update or build is direct maintainer work:
 - Start a requested code change with `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]`.
 - Deploy a merged toolkit release with `agent-template update --keep-timers`.
-Never merge a pull request by hand. Auto-merge or the supervisor handles merges. Never modify, review, close, or merge an open pull request labelled `valentin-review`.
+Never merge or enable auto-merge. Leave every pull request open for the merge gate or an operator session. Never modify, review, close, or merge an open pull request labelled `valentin-review`.
 Run the relevant command in this run. This replaces the ordinary developer pull request workflow. Do not create an implementation branch for a direct operation, delegate it, hand it to a developer, or say that a developer must release it. A background build is not done when it starts; its completion checker posts the final result.
 EOF
   else
     IFS= read -r -d '' finish_contract <<'EOF' || true
-FINISH IT. The run counts for something only when the work is in a pull
-request that can merge on its own: branch off the production branch, commit,
-push, open the PR, and turn auto-merge on with
-`gh pr merge --auto --squash <number>` in the same breath as opening it. A
-PR sitting green with auto-merge off is work nobody gets. GitHub refuses that
-command on a private repo whose plan does not carry auto-merge; when it is
-refused, do not retry it and do not fail the run over it: leave the PR open,
-say so in your result comment, and move the ticket to the review lane anyway.
-Checks turning green on a PR that could not get auto-merge is what the
-supervisor's pr-hygiene check looks for; it merges those by hand. Then move
-the ticket to the review lane the lifecycle skill names. Do not leave commits
-unpushed: this working directory is thrown away when the process exits.
+FINISH IT. Branch off the production branch, commit, push, and open the PR.
+Leave auto-merge off and do not merge; the merge gate or an operator session
+handles merging. Move the ticket to the review lane the lifecycle skill names.
+Do not leave commits unpushed: this working directory is thrown away when the
+process exits.
 EOF
   fi
   # $skills_index is now a readable phrase naming every pack, so the lifecycle
@@ -3273,10 +3239,11 @@ is mechanical; do not post another. Plans, progress, checks, retries, blockers,
 costs, and gate ledgers are run activity, not comments. The board wrapper
 redirects any unmarked comment to activity.
 
-When QUIET is on, do not @mention the board owner unless replying to a comment
-where the owner directly mentioned you. That direct reply keeps the owner mention
-even when the daily owner-mention allowance was already used. Otherwise move the
-ticket to the review lane for attention. The existing maximum of three comments
+When QUIET is on, keep the board owner mention in a Question: comment and move
+the ticket to Valentin Review. A direct reply to the owner also keeps the
+mention even when the daily owner-mention allowance was already used. If a
+Question: mention is throttled, the wrapper posts the question without the
+mention and logs the throttle to run activity. The existing maximum of three comments
 per ticket per day and one reminder per day remains. Write as $agent_name, in HTML block tags, with
 \`$board_cli comment add $ref --text '<p>Done: https://github.com/org/repo/pull/1</p>'\`.
 

@@ -73,18 +73,16 @@ that repo, and another agent's work disappears.
 
 ## Finish your pull request
 
-After opening your pull request, request squash auto-merge. Never merge it by
-hand. When GitHub cannot enable auto-merge, leave the pull request open for the
-reconciler, which merges it only after its checks are green and GitHub reports
-it as mergeable.
+After opening your pull request, leave auto-merge off. Never merge it;
+the merge gate or an operator session handles merging.
 
 ## What a PR description looks like
 
 Start with `## Summary for non-engineers`, written for someone who does not
 read code:
 
-1. The first line is the one action the reader takes. Merge this. Say go. Look
-   at X.
+1. The first line says where the result can be checked. Never ask the reader
+   to merge.
 2. **What went wrong** — what people were experiencing, in everyday words.
 3. **What changes** — a numbered list, one idea per sentence.
 4. **What you will see** — what is visibly different after it ships.

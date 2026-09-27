@@ -58,18 +58,10 @@ HOME="$TMP/home" PATH="$TMP/bin:$PATH" GH_LOG="$TMP/gh.log" \
   AGENT_CONFIG_DIR="$TMP/config" AGENT_BOARD_STATE_DIR="$TMP/state" \
   RECONCILE_NOW="2026-09-18T22:00:00Z" \
   "$ROOT/scripts/agent-board-reconcile"
-merge_calls="$(grep -c '^pr merge ' "$TMP/gh.log" || true)"
-list_calls="$(grep -c '^pr list ' "$TMP/gh.log" || true)"
-if [ "$merge_calls" -eq 1 ] && [ "$list_calls" -eq 1 ] \
-   && grep -qxF 'pr list --repo example/repo --state open --limit 100 --json url,isDraft,createdAt,headRefOid,mergeable,autoMergeRequest,statusCheckRollup,labels' "$TMP/gh.log" \
-   && grep -qxF 'pr merge --repo example/repo --squash --match-head-commit 1111111111111111111111111111111111111111 https://github.com/example/repo/pull/1' "$TMP/gh.log"; then
-  echo 'PASS reconciler-direct-merge            one scan merges only the old green mergeable PR without auto-merge'
+if ! grep -q '^pr merge ' "$TMP/gh.log" \
+   && ! grep -q '^pr list ' "$TMP/gh.log" \
+   && grep -qF 'run-activity: auto-merge disabled by policy for example/repo' "$TMP/state/dev-one.log"; then
+  echo 'PASS reconciler-no-merge                no direct or auto-merge on any board'
 else
-  echo "FAIL reconciler-direct-merge            list=$list_calls merge=$merge_calls gh=$(cat "$TMP/gh.log")"; exit 1
-fi
-
-if ! grep -qF 'https://github.com/example/repo/pull/8' "$TMP/gh.log"; then
-  echo 'PASS reconciler-protected-pr            valentin-review PRs remain untouched'
-else
-  echo "FAIL reconciler-protected-pr            gh=$(cat "$TMP/gh.log")"; exit 1
+  echo "FAIL reconciler-no-merge                gh=$(cat "$TMP/gh.log")"; exit 1
 fi

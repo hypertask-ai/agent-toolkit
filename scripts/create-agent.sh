@@ -358,12 +358,8 @@ fi
 
 # ---------- 2b. this agent's own memory repo ----------
 # Every agent needs PR_REPO now (agent-board-poll refuses to tick without
-# it). This step is idempotent: an existing repo is left exactly as it is,
-# and enabling auto-merge is best-effort, because GitHub refuses
-# allow_auto_merge on a private repo under a plan that does not carry it
-# (true for the private repos this creates). That refusal must never fail
-# the run: the five-minute reconciler merges a green, mergeable PR that
-# remains open without auto-merge.
+# it). This step is idempotent: an existing repo is left exactly as it is.
+# Auto-merge stays disabled on every board.
 if [ -n "$PR_REPO" ]; then
   step 2b "this agent's own memory repo: $PR_REPO (its output, reports and scripts land here as PRs)"
   if [ "$DRY_RUN" != "yes" ]; then
@@ -411,19 +407,7 @@ PYEOF
       rm -rf "$STAGE"
       echo "    created $PR_REPO (private) from the skeleton"
     fi
-    # gh repo edit --enable-auto-merge exits 0 even when GitHub silently
-    # refuses the setting (a private repo on a plan that does not carry
-    # auto-merge, true for hypertask-ai's private repos). Read the setting
-    # back instead of trusting the edit call's exit code.
-    gh repo edit "$PR_REPO" --enable-auto-merge >/dev/null 2>&1 || true
-    if [ "$(gh api "repos/$PR_REPO" --jq '.allow_auto_merge' 2>/dev/null)" = "true" ]; then
-      echo "    auto-merge enabled on $PR_REPO"
-    else
-      echo "    auto-merge unavailable on $PR_REPO; reconciler merges green, mergeable PRs"
-    fi
-  else
-    echo "    + create $PR_REPO (private, from repo-skeleton/) if it does not already exist"
-    echo "    + gh repo edit $PR_REPO --enable-auto-merge (best effort, may be refused on a private repo)"
+    echo "    run-activity: auto-merge disabled by policy on $PR_REPO"
   fi
 fi
 

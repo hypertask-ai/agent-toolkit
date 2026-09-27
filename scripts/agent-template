@@ -1079,8 +1079,7 @@ Do not overwrite, discard, or revert changes you did not make.
 Right before opening the pull request, pull $base_branch, rebase your branch, and resolve concurrent changes.
 For the agent toolkit, never edit VERSION or CHANGELOG.md in a pull request; add one changelog.d/<name>.md fragment instead.
 Run the repository's tests and checks before opening the pull request.
-Open a pull request against $base_branch and immediately run \`gh pr merge --auto --squash <pr>\` so it can merge itself when checks pass.
-Never merge a pull request by hand. If auto-merge is unavailable, leave the pull request open for the supervisor.
+Open a pull request against $base_branch and leave auto-merge off. Never merge; the merge gate or an operator session handles merging.
 Never modify, review, close, or merge an open pull request labelled \`valentin-review\`.
 Never run \`gh run watch\` or \`gh pr checks --watch\`.
 GitHub polling tighter than 90 seconds is forbidden.
@@ -1091,7 +1090,7 @@ Remove the worktree when finished and report the result in fewer than 10 lines.
 PULL REQUEST BODY CONTRACT
 
 Start with \`## Summary for non-engineers\`.
-The next sentence is one action line telling the reader to merge.
+The next sentence says where the result can be checked, without asking anyone to merge.
 Then use \`### What went wrong\`, \`### What changes\` as a numbered list, \`### What you will see\`, and \`### Watch out for\`.
 Use one idea per sentence and no em dashes.
 End the body with exactly:

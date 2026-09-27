@@ -41,6 +41,13 @@ _outbound_text_gate() {
   plain="$(_plain_comment "$TEXT")"
   case "$plain" in
     Question:*|Answer:*|Decision:*|Handoff:*|Done:*) kind="${plain%%:*}" ;;
+    Claimed:*) kind="Claimed" ;;
+    Claimed.*)
+      [[ "$TEXT" == *"<strong>Claimed.</strong>"* ]] && kind="Claimed" || {
+        _outbound_gate_activity action "${plain:-empty comment}"
+        _outbound_gate_note "quiet mode: redirected unmarked ticket comment to run activity"
+        return 1
+      } ;;
     *)
       if [ "${AGENT_REPLY_ONLY:-no}" != "yes" ]; then
         _outbound_gate_activity action "${plain:-empty comment}"

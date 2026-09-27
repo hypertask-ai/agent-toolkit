@@ -309,12 +309,8 @@ writes `PR_REPO` into the conf either way. Re-run with `--resume --pr-repo
 <org/name>` against an existing identity to add a repo it did not have
 before; nothing else about that identity changes.
 
-GitHub refuses `allow_auto_merge` on a private repo whose plan does not carry
-it, which is true for these repos. That refusal is expected, not an error:
-`create-agent.sh` reads the setting back and logs that auto-merge is unavailable.
-The run leaves its pull request open after requesting auto-merge. The five-minute
-reconciler squash merges it only when it is still open without auto-merge and
-has been green and mergeable for 30 minutes.
+Auto-merge stays off on every board. `create-agent.sh` does not enable it;
+runs leave pull requests open for the merge gate or an operator session.
 
 ## Shape of the code
 
@@ -394,13 +390,11 @@ GitHub authorship do not transfer ownership. PR discovery uses one locked,
 host-wide REST cache per repository. It refreshes no more than once a minute and
 stores every open PR plus merges from the last 48 hours without PR bodies. The
 binding gate filters this cache to open PRs before ownership or labels can bind
-an agent. A `valentin-review` label makes an open PR manager-only. The runner
-disables GitHub native auto-merge and starts no fix. Moving the linked ticket to
-`Valentin Review` or `HT Manager Review` also disables auto-merge. Its PR
-remains bound, but uses no pickup slot while the ticket waits there. Leaving
-either lane resumes the PR ahead of new work when it needs attention. The runner
-restores auto-merge only after the label and review-lane hold are gone. Its
-command shim rejects manual merges and checks the label before any other allowed
+an agent. A `valentin-review` label makes an open PR manager-only. The runner leaves auto-merge off and starts no fix. Its PR remains bound,
+but uses no pickup slot while the ticket waits in `Valentin Review` or
+`HT Manager Review`. Leaving either lane resumes the PR ahead of new work when
+it needs attention. The runner never enables auto-merge. Its command shim
+no-ops merge requests and checks the label before any other allowed
 PR mutation. When GitHub reports a rate limit, all runners use its
 `X-RateLimit-Reset` header to pause repository calls. A paused tick logs `GitHub
 paused until HH:MM`, completes board reconciliation and comment replies, skips
@@ -523,7 +517,7 @@ It lands in the Agent Template Backlog on project 5500
 identity, never the owner's. `agent-template-feedback` reads urgent tickets
 first and checks the Backlog every four hours on the maintainer host. It replies
 to every ticket with accepted, need info plus one question, or declined.
-Accepted work gets one auto-merge fix pull request and moves to In Progress. When
+Accepted work gets one fix pull request and moves to In Progress. When
 a merged release changelog names the AGTE ticket, the same bot replies
 `Shipped in <version>: <one line>` and moves it to Done. Daily updates on the
 filing host print `feedback waiting: AGTE-n` until that ticket closes. Filing reuses
@@ -542,7 +536,7 @@ case file can be appended to by the automated feedback run and executed in CI.
 `agent-template-feedback` checks every four hours and handles urgent tickets
 first. The model returns an accept, need-info, or decline verdict. Accepted
 work is implemented and evaluated in an isolated worktree, then opened as one
-auto-merge pull request per ticket. `agent-template-weekly` remains only as a
+pull request per ticket. `agent-template-weekly` remains only as a
 compatibility alias. Changelog reconciliation is independently idempotent, so
 a merged ticket receives one shipped comment even if its AGTE reference appears
 more than once.
@@ -621,10 +615,10 @@ See `CONF.md` for the complete schema.
 | `CHAT_CLI` | optional chat command; absent uses `MODEL_CLI` |
 | `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
 | `CHAT` | `on` to answer through the host chat daemon, default `on` for non-CLI board agents |
-| `QUIET` | `on` redirects unmarked comments to activity and strips board-owner mentions except in an `Answer:` to the owner's direct mention; default `on` |
+| `QUIET` | `on` redirects unmarked comments to activity and strips board-owner mentions except in a `Question:` or an `Answer:` to the owner's direct mention; default `on` |
 | `ANSWERER_FALLBACK` | fallback answerer slug when no mention, agent assignee, or prior `Answer:`, `Done:`, or `Decision:` author exists; default empty |
 | `MANAGER` | `on` to allow runner control and ticket delegation, default `off` |
-| `MAINTAINER` | `on` to add allowlisted setup builds, merges, and advisor instructions, default `off` |
+| `MAINTAINER` | `on` to add allowlisted setup builds and advisor instructions, default `off` |
 | `CLAIM_UNASSIGNED` | `yes` to also take tickets nobody is assigned to, default `no` |
 | `EXCLUDE_LABELS` | labels that make a ticket off limits, comma separated |
 | `WORKDIR_MODE` | `repo` (default) runs in `AGENT_REPO`; `per-run` gives each ticket its own checkout and removes it after the run unless it has unpushed work |
@@ -694,7 +688,7 @@ change to the toolkit, supervisor rules, analytics site, app, CLI, or Slack bot,
 and forbid launching a model harness directly. An allowlisted update or build
 instruction runs the matching maintainer command in the current run instead of
 entering the developer pull request workflow or being delegated. Runners never
-merge a pull request by hand. Auto-merge or the supervisor handles merges, and
+merge or enable auto-merge. The merge gate or an operator session handles merges, and
 the existing completion checker reports background build results.
 
 ```sh
@@ -713,7 +707,7 @@ default branch from each checkout's `origin`; an update adds shipped label
 defaults only to rows without labels. The runner applies configured labels
 through GitHub's REST labels endpoint before pull request creation returns. A
 build outside the file or whose checkout origin differs is refused. An accepted build writes the
-standard worktree, pull request, auto-merge, deployment, cleanup, and reporting
+standard worktree, pull request, no-merge, deployment, cleanup, and reporting
 guardrails into a prompt, starts the capped systemd user job, and
 records its paths and status in `<slug>-builds.json`. Status prints the exit
 marker and twelve output lines; list is the source for answering what the
@@ -726,8 +720,7 @@ memory` in that tick. The runner posts exactly one `Done:` line with the pull
 request URL on success or one checked `Decision: build failed:` comment on other
 failures, then closes the record. Ticket URLs are resolved through the
 board adapter before posting. Comment failures stop after two attempts and log
-the command, exit code, and stderr. `merge` accepts only an allowlisted,
-non-draft pull request whose checks are all green and always uses squash merge.
+the command, exit code, and stderr. `merge` is refused; runners never merge.
 
 `instruct` is the advisor session's only setup entry point. It first writes JSON
 under `<slug>-instructions/`, then uses that agent's board CLI to create an HTML

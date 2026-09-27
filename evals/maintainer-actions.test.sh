@@ -255,8 +255,8 @@ prompt="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["pr
 if [ "$build" = "build started: $build_id" ] \
    && grep -q 'STANDARD BUILD GUARDRAILS' "$prompt" \
    && grep -q 'Summary for non-engineers' "$prompt" \
-   && grep -q 'gh pr merge --auto --squash' "$prompt" \
-   && grep -q 'Never merge a pull request by hand' "$prompt" \
+   && grep -q 'leave auto-merge off' "$prompt" \
+   && grep -q 'Never merge; the merge gate' "$prompt" \
    && grep -q 'labelled `valentin-review`' "$prompt" \
    && grep -qF 'Never run `gh run watch` or `gh pr checks --watch`.' "$prompt" \
    && grep -qF 'GitHub polling tighter than 90 seconds is forbidden.' "$prompt" \

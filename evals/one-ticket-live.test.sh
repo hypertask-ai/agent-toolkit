@@ -496,10 +496,9 @@ echo 'PASS pending PR remains bound without inventing work'
 protected="$(GH_CALL_LOG="$TMP/gh-calls" PR_AUTO_MERGE_ENABLED=yes run_gate valentin-review)"
 [[ "$protected" == *'"action": "wait"'* && "$protected" == *'"state": "protected"'* ]]
 [[ "$protected" == *'label valentin-review'* && "$protected" == *'"blocks_pickup": true'* ]]
-grep -qF 'pr view 14 --repo example/repo --json state,autoMergeRequest' "$TMP/gh-calls"
-grep -qF 'pr merge --repo example/repo --disable-auto 14' "$TMP/gh-calls"
+! grep -qF 'pr merge ' "$TMP/gh-calls"
 ! grep -qE '/comments|/compare|/deployments' "$TMP/gh-calls"
-echo 'PASS valentin-review protection disables native auto-merge while the PR is open'
+echo 'PASS valentin-review leaves auto-merge untouched by policy'
 
 for review_section in 'Valentin Review' 'HT Manager Review'; do
   : > "$TMP/gh-calls"
@@ -507,14 +506,14 @@ for review_section in 'Valentin Review' 'HT Manager Review'; do
     API_TASK_SECTION="$review_section" run_gate "section-${review_section// /-}")"
   [[ "$section_hold" == *'"state": "protected"'* && "$section_hold" == *"ticket is in $review_section"* ]]
   [[ "$section_hold" == *'"pickup_slot": false'* && "$section_hold" == *'"blocks_pickup": false'* ]]
-  grep -qF 'pr merge --repo example/repo --disable-auto 1' "$TMP/gh-calls"
+  ! grep -qF 'pr merge ' "$TMP/gh-calls"
   : > "$TMP/gh-calls"
   rm -rf "$TMP/cache-section-${review_section// /-}-dev-1/pr-cache"
   resumed="$(GH_CALL_LOG="$TMP/gh-calls" API_TASK_SECTION=Bugs run_gate "section-${review_section// /-}")"
   [[ "$resumed" == *'"state": "pending"'* && "$resumed" == *'"blocks_pickup": true'* ]]
-  grep -qF 'pr merge --repo example/repo --auto --squash 1' "$TMP/gh-calls"
+  ! grep -qF 'pr merge ' "$TMP/gh-calls"
 done
-echo 'PASS both human-review lanes retain PR ownership without a pickup slot and restore the gate on exit'
+echo 'PASS both human-review lanes retain PR ownership without merging on exit'
 
 labelled_lane="$(PR_LABEL_OVERRIDE=valentin-review API_TASK_SECTION='Valentin Review' run_gate labelled-lane)"
 [[ "$labelled_lane" == *'"pickup_slot": false'* && "$labelled_lane" == *'"blocks_pickup": false'* ]]
@@ -526,9 +525,8 @@ GH_CALL_LOG="$TMP/gh-calls" PR_LABEL_OVERRIDE=valentin-review PR_AUTO_MERGE_ENAB
 rm -f "$TMP/cache-label-release-dev-1/pr-cache/example__repo.json"
 released="$(GH_CALL_LOG="$TMP/gh-calls" run_gate label-release)"
 [[ "$released" == *'"state": "pending"'* ]]
-grep -qF 'pr merge --repo example/repo --disable-auto 1' "$TMP/gh-calls"
-grep -qF 'pr merge --repo example/repo --auto --squash 1' "$TMP/gh-calls"
-echo 'PASS removing valentin-review re-enables native auto-merge after the hold clears'
+! grep -qF 'pr merge ' "$TMP/gh-calls"
+echo 'PASS removing valentin-review leaves auto-merge disabled'
 
 : > "$TMP/gh-calls"
 merged_protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate merged-protected dev-2 'Dev Two')"
@@ -539,7 +537,7 @@ echo 'PASS merged PR 702 never binds dev-2 despite valentin-review protection'
 : > "$TMP/gh-calls"
 closed_protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate closed-protected)"
 [[ -z "$closed_protected" ]]
-grep -qF 'pr view 703 --repo example/repo --json state,autoMergeRequest' "$TMP/gh-calls"
+! grep -qF 'pr merge ' "$TMP/gh-calls"
 ! grep -qE '/comments|/compare|/deployments' "$TMP/gh-calls"
 echo 'PASS a newly closed PR never binds despite valentin-review protection'
 

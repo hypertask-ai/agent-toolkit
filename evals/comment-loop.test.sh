@@ -218,7 +218,7 @@ if grep -qF 'run-activity: action run finished for TEST-1' "$TMP/state/agent-boa
 else
   bad run-finished-is-action "log=$(cat "$TMP/state/agent-board-poll/test.log")"
 fi
-if grep -qF 'When it is on, do not @mention the board owner' "$TMP/prompt"; then
+if grep -qF 'Question: comments keep the board owner mention' "$TMP/prompt"; then
   ok owner-mention-prompt-contract 'quiet runs forbid owner mentions'
 else
   bad owner-mention-prompt-contract 'the model prompt omitted quiet owner handling'
@@ -304,6 +304,24 @@ else
   bad owner-mention-answer-exception "posts=$(cat "$TMP/mechanical-posts") error=$(cat "$TMP/owner-answer.err")"
 fi
 
+
+question='<p><strong>Question: Can <span data-type="mention" data-label="name-6">Owner</span> approve the release?</strong></p>'
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/mention-board" comment add TEST-2 --text "$question" >"$TMP/question.out" 2>"$TMP/question.err"
+if [ "$(wc -l < "$TMP/mechanical-posts")" -eq 4 ] \
+   && tail -1 "$TMP/mechanical-posts" | grep -qF 'name-6'; then
+  ok question-owner-mention 'Question: reaches the ticket with owner mention intact'
+else
+  bad question-owner-mention "posts=$(cat "$TMP/mechanical-posts") error=$(cat "$TMP/question.err")"
+fi
+printf 'TEST-3\t%s\n' "$(date +%s)" >> "$TMP/state/agent-board-poll/mention-test.owner-mentions"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/mention-board" comment add TEST-3 --text "$question" >"$TMP/throttled.out" 2>"$TMP/throttled.err"
+if [ "$(wc -l < "$TMP/mechanical-posts")" -eq 5 ] \
+   && ! tail -1 "$TMP/mechanical-posts" | grep -qF 'name-6' \
+   && grep -qF 'run-activity: action owner-mention budget: throttled Question:' "$TMP/state/agent-board-poll/mention-test.log"; then
+  ok throttled-question-still-posted 'a throttled mention logs activity and posts the question without the mention'
+else
+  bad throttled-question-still-posted "posts=$(cat "$TMP/mechanical-posts") error=$(cat "$TMP/throttled.err")"
+fi
 MECH_POSTS="$TMP/kind-posts"
 MECH_UPDATES="$TMP/kind-updates"
 export MECH_POSTS MECH_UPDATES
@@ -328,10 +346,12 @@ for allowed in \
 do
   HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/kind-board" comment add TEST-1 --text "$allowed" >/dev/null
 done
-if [ "$(wc -l < "$MECH_POSTS")" -eq 5 ]; then
-  ok five-comment-markers-pass 'all five marked comment kinds reach the board CLI'
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/kind-board" comment add TEST-2 --text '<p><strong>Claimed.</strong> A session is working this ticket now.</p>' >/dev/null
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" "$TMP/kind-board" comment add TEST-3 --text '<p><strong>Claimed: A session is working this ticket now.</strong></p>' >/dev/null
+if [ "$(wc -l < "$MECH_POSTS")" -eq 7 ]; then
+  ok claim-comment-markers-pass 'five outcome kinds plus Claimed: and legacy Claimed. reach the board CLI'
 else
-  bad five-comment-markers-pass "posts=$(cat "$MECH_POSTS")"
+  bad claim-comment-markers-pass "posts=$(cat "$MECH_POSTS")"
 fi
 
 MECH_POSTS="$TMP/plain-posts"

@@ -138,7 +138,7 @@ def check(raw):
 
     if roots:
         last = " ".join(visible(roots[-1]).split())
-        if not (last.endswith("?") or last.startswith("Next:")):
+        if not (text.startswith(("Claimed.", "Claimed:")) or last.endswith("?") or last.startswith("Next:")):
             reasons.append('last block must end with a question mark or start with "Next:"')
 
     return list(dict.fromkeys(reasons))

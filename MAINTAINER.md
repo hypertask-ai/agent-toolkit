@@ -40,7 +40,7 @@ until you do it.
 - **Feedback timer** — `agent-template-feedback.timer`, runs every four hours
   on the writable agent-toolkit maintainer host only. It judges Backlog
   tickets, opens
-  one auto-merge fix pull request per accepted ticket, and closes shipped work.
+  one fix pull request per accepted ticket, and closes shipped work.
   `agent-template-weekly` is a compatibility alias. `agent-template report`
   prints the local filing scorecard.
 
@@ -99,8 +99,7 @@ visible text is its full id plus authoritative title.
 Set `MAINTAINER="on"` only for the one agent that owns setup changes. It must
 use a build job for every change to the toolkit, supervisor rules, analytics
 site, app, CLI, or Slack bot. Update and build requests run in the current
-maintainer session and are never delegated. Runners never merge a pull request
-by hand. Auto-merge or the supervisor handles merges. The advisor session queues
+maintainer session and are never delegated. Runners never merge or enable auto-merge. The merge gate or an operator session handles merges. The advisor session queues
 instructions and does not edit those repositories itself.
 
 ```sh
@@ -127,9 +126,8 @@ A build writes its guarded prompt and output under
 `~/.local/state/agent-board-poll/<slug>-builds/`, launches a memory-capped
 systemd user unit, and records durable state in `<slug>-builds.json`. The prompt
 requires a scratch worktree, the non-engineer pull request body, green checks,
-auto-merge, timer-preserving toolkit update, cleanup, and a report under ten
-lines. It leaves the pull request open for the supervisor when auto-merge is
-unavailable. `build status` returns the exit marker and the last twelve output lines.
+no merging, timer-preserving toolkit update, cleanup, and a report under ten
+lines. It leaves the pull request open for the merge gate or an operator session. `build status` returns the exit marker and the last twelve output lines.
 
 Before each tick, the service checks completed build units and records any
 non-success result as failed even when no exit marker was written. An OOM kill
@@ -431,12 +429,8 @@ identity. It creates the repository privately from `repo-skeleton/` in this
 template. `agent-board-poll` still rejects legacy configurations without
 `PR_REPO`.
 
-Auto-merge does not turn on for these repos: GitHub refuses
-`allow_auto_merge` on a private repo whose plan does not carry it. Expected,
-not broken. `create-agent.sh` reads the setting back and logs the refusal. A
-run leaves its pull request open after requesting auto-merge. The five-minute
-reconciler squash merges it only after it has remained green, mergeable, and
-without auto-merge for 30 minutes.
+Auto-merge stays off on every board. `create-agent.sh` does not enable it;
+runs leave pull requests open for the merge gate or an operator session.
 
 ## One ticket until live
 
@@ -446,14 +440,12 @@ lock and paginates every open PR plus merges from the last 48 hours. Each row
 stores the PR number, title, branch, author, and labels, with no body. The binding
 gate filters those rows to open PRs before ownership and labels are evaluated. A
 pull request labelled `valentin-review` becomes a protected wait only while it is
-open. The runner disables GitHub native auto-merge and does not review, modify,
-close, or merge it. Moving its ticket to `Valentin Review` or `HT Manager Review`
-disables auto-merge too. The PR stays bound but does not use a pickup slot or
-block a new claim while its ticket waits in either lane. When the ticket leaves
-the lane, its PR gets the first turn ahead of new tickets, even if it spent
-more than two hours in review. The runner restores auto-merge only after the
-label and review-lane hold are gone.
-The runner command shim refuses manual merges and checks the label before any
+open. The runner never enables auto-merge and does not review, modify,
+close, or merge it. The PR stays bound but does not use a pickup slot or
+block a new claim while its ticket waits in `Valentin Review` or
+`HT Manager Review`. When the ticket leaves the lane, its PR gets the first
+turn ahead of new tickets, even if it spent more than two hours in review.
+The runner command shim no-ops merge requests and checks the label before any
 other pull request mutation. A GitHub rate-limit response records its
 `X-RateLimit-Reset` time for the repository. Until then, each tick logs
 `GitHub paused until HH:MM`, runs board reconciliation and comment replies,
@@ -681,7 +673,7 @@ It posts as that bot's own identity to the Agent Template Backlog, project 5500
 (https://app.hypertask.ai/detail/project-5500, prefix AGTE), and prints the
 filed URL. The maintainer host reads urgent first every four hours. Every
 ticket gets an accepted, need-info, or declined reply; need-info contains one
-question. Accepted tickets get one auto-merge fix pull request and move to
+question. Accepted tickets get one fix pull request and move to
 In Progress. A merged changelog line naming the ticket triggers one `Shipped in
 <version>: <one line>` reply and moves it to QA for live verification. The filing host's daily
 update prints `feedback waiting: AGTE-n` while the ticket remains open. The
