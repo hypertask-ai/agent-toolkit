@@ -23,6 +23,9 @@ from datetime import datetime, timezone
 from html import unescape as html_unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config_files import config_files
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1076,7 +1079,7 @@ class ChatDaemon:
 
     def agents(self) -> list[Agent]:
         agents: list[Agent] = []
-        for path in sorted(self.config_dir.glob("*.conf")):
+        for path in config_files(self.config_dir):
             try:
                 agent = Agent.from_conf(path)
                 if agent:
@@ -1090,7 +1093,7 @@ class ChatDaemon:
 
     def runtime_agents(self) -> list[RuntimeAgent]:
         agents: list[RuntimeAgent] = []
-        for path in sorted(self.config_dir.glob("*.conf")):
+        for path in config_files(self.config_dir):
             try:
                 agent = RuntimeAgent.from_conf(path)
                 if agent:
@@ -1494,7 +1497,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 def show_status(config_dir: Path, state_dir: Path) -> int:
     status = read_json(state_dir / "runtime-status.json")
     shown = 0
-    for path in sorted(config_dir.glob("*.conf")):
+    for path in config_files(config_dir):
         agent = RuntimeAgent.from_conf(path)
         if not agent:
             continue

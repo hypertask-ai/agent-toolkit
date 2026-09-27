@@ -6,7 +6,11 @@ import argparse
 import re
 import shlex
 import shutil
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config_files import config_files
 
 POLICY_KEYS = ("LADDER", "RESEARCH_CLI", "TRIAGE_HARD_CLI")
 FALLBACK_KEYS = ("PROVIDER_ORDER", "PROVIDER_CODEX_CLI", "PROVIDER_CURSOR_CLI")
@@ -118,7 +122,7 @@ def main() -> int:
     for directory in dict.fromkeys(Path(item).expanduser() for item in args.directories):
         if not directory.is_dir():
             continue
-        for path in sorted(directory.glob("*.conf")):
+        for path in config_files(directory):
             changed += int(migrate(path, args.version, args.dry_run))
     action = "would rewrite" if args.dry_run else "rewrote"
     print(f"  {action} {changed} conf(s) with provider policy updates")

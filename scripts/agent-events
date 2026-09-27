@@ -19,6 +19,9 @@ import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config_files import config_files
 from typing import Any
 
 MAX_BODY = 1024 * 1024
@@ -68,7 +71,7 @@ def state_dir() -> Path:
 
 
 def agent_rows(events_only: bool = False) -> list[tuple[Path, dict[str, str]]]:
-    rows = [(path, parse_config(path)) for path in sorted(config_dir().glob("*.conf"))]
+    rows = [(path, parse_config(path)) for path in config_files(config_dir())]
     if events_only:
         rows = [(path, values) for path, values in rows if values.get("WIRING") == "events"]
     return rows

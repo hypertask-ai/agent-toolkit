@@ -241,7 +241,15 @@ manager_current_conf() {
     ''|*[!a-z0-9-]*) return 1 ;;
   esac
   if [ -n "${MANAGER_CONFIG_DIR:-}" ]; then
-    conf="$MANAGER_CONFIG_DIR/$slug.conf"
+    conf=""
+    for candidate in "$MANAGER_CONFIG_DIR"/*/"$slug.conf" "$MANAGER_CONFIG_DIR/$slug.conf"; do
+      [ -f "$candidate" ] || continue
+      [ "$(basename "$(dirname "$candidate")")" = retired ] && continue
+      [ "$(readlink -f "$(dirname "$candidate")")" = "$(dirname "$candidate")" ] || continue
+      conf="$candidate"
+      break
+    done
+    [ -n "$conf" ] || return 1
   else
     conf="$(core_find_conf "$slug")" || return 1
   fi
@@ -353,6 +361,9 @@ manager_authorize() {
     || manager_refuse "$SUBCOMMAND refused: caller $MANAGER_CALLER is not a manager"
   MANAGER_CONF="$conf"
   MANAGER_CONFIG_DIR="$(dirname "$conf")"
+  while IFS= read -r root; do
+    case "$conf" in "$root"/*.conf|"$root"/*/*.conf) MANAGER_CONFIG_DIR="$root"; break ;; esac
+  done < <(core_conf_dirs)
   MANAGER_NAME="$(manager_conf_value "$conf" AGENT_NAME)"
   MANAGER_BOARD_CLI="$(manager_conf_value "$conf" BOARD_CLI)"
 }
@@ -494,6 +505,9 @@ maintainer_authorize() {
     || manager_refuse "$SUBCOMMAND refused: caller $MANAGER_CALLER is not a maintainer"
   MANAGER_CONF="$conf"
   MANAGER_CONFIG_DIR="$(dirname "$conf")"
+  while IFS= read -r root; do
+    case "$conf" in "$root"/*.conf|"$root"/*/*.conf) MANAGER_CONFIG_DIR="$root"; break ;; esac
+  done < <(core_conf_dirs)
   MANAGER_NAME="$(manager_conf_value "$conf" AGENT_NAME)"
   MANAGER_BOARD_CLI="$(manager_conf_value "$conf" BOARD_CLI)"
 }
@@ -732,7 +746,7 @@ if [ "${SUBCOMMAND:-feedback}" = "mode" ]; then
   fi
   config_dir="$(readlink -f "$MANAGER_CONFIG_DIR")"
   shopt -s nullglob
-  for candidate in "$config_dir"/*.conf; do
+  while IFS= read -r candidate; do
     slug="$(basename "$candidate" .conf)"
     conf="$(manager_current_conf "$slug" 2>/dev/null)" || continue
     kind="$(manager_conf_value "$conf" AGENT_KIND)"
@@ -741,7 +755,7 @@ if [ "${SUBCOMMAND:-feedback}" = "mode" ]; then
     if manager_set_conf_value "$conf" CLAIM_UNASSIGNED "$claim"; then
       changed+=("$(basename "$conf")")
     fi
-  done
+  done < <(AGENT_CONFIG_DIR="$config_dir" core_conf_files)
   shopt -u nullglob
   if [ "$mode" = "manual" ] && [ "${#changed[@]}" -gt 0 ]; then
     manager_report_approved_change "set board $board to manual mode for $(printf '%s' "${changed[*]}")"
@@ -810,13 +824,13 @@ if [ "${SUBCOMMAND:-feedback}" = "quiet" ]; then
   if [ "$target" = "all" ]; then
     config_dir="$(readlink -f "$MANAGER_CONFIG_DIR")"
     shopt -s nullglob
-    for candidate in "$config_dir"/*.conf; do
+    while IFS= read -r candidate; do
       slug="$(basename "$candidate" .conf)"
       conf="$(manager_current_conf "$slug" 2>/dev/null)" || continue
       if manager_set_conf_value "$conf" QUIET "$setting"; then
         changed+=("$(basename "$conf")")
       fi
-    done
+    done < <(AGENT_CONFIG_DIR="$config_dir" core_conf_files)
     shopt -u nullglob
   else
     conf="$(manager_current_conf "$target")" \
@@ -1335,7 +1349,7 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
   AUTO_UPDATE="$(host_config_value AUTO_UPDATE on)"
 
   if [ -z "$UPDATE_BOARD_CLI" ]; then
-    for update_conf in "$CONFIG_DIR"/*.conf; do
+    while IFS= read -r update_conf; do
       [ -f "$update_conf" ] || continue
       [ "$(manager_conf_value "$update_conf" MAINTAINER 2>/dev/null || true)" = "on" ] || continue
       candidate_cli="$(manager_conf_value "$update_conf" BOARD_CLI 2>/dev/null || true)"
@@ -1344,10 +1358,10 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
       UPDATE_HEALTH_BOARD="${UPDATE_HEALTH_BOARD:-$(manager_conf_value "$update_conf" BOARD_ID 2>/dev/null || true)}"
       UPDATE_HEALTH_BOARD="${UPDATE_HEALTH_BOARD%%,*}"
       break
-    done
+    done < <(AGENT_CONFIG_DIR="$CONFIG_DIR" core_conf_files)
   fi
   if [ -z "$UPDATE_BOARD_CLI" ]; then
-    for update_conf in "$CONFIG_DIR"/*.conf; do
+    while IFS= read -r update_conf; do
       [ -f "$update_conf" ] || continue
       candidate_cli="$(manager_conf_value "$update_conf" BOARD_CLI 2>/dev/null || true)"
       [ -x "$candidate_cli" ] || continue
@@ -1355,7 +1369,7 @@ if [ "${SUBCOMMAND:-feedback}" = "update" ]; then
       UPDATE_HEALTH_BOARD="${UPDATE_HEALTH_BOARD:-$(manager_conf_value "$update_conf" BOARD_ID 2>/dev/null || true)}"
       UPDATE_HEALTH_BOARD="${UPDATE_HEALTH_BOARD%%,*}"
       break
-    done
+    done < <(AGENT_CONFIG_DIR="$CONFIG_DIR" core_conf_files)
   fi
 
   update_health_ref() {
@@ -1849,7 +1863,7 @@ PYEOF
   else
     synced_any=no
     synced_repos=""
-    for conf in $(core_conf_dirs | while IFS= read -r d; do ls -1 "$d"/*.conf 2>/dev/null; done); do
+    while IFS= read -r conf; do
       [ -f "$conf" ] || continue
       repo="$(sed -n 's/^AGENT_REPO="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$conf" | tail -n1)"
       [ -n "$repo" ] || continue
@@ -1862,7 +1876,7 @@ PYEOF
       else
         bash "$SYNC_SH" "$repo" 2>&1 | sed 's/^/  /' || true
       fi
-    done
+    done < <(core_conf_files)
     [ "$synced_any" = "yes" ] || echo "  no conf names a checkout that exists on this host"
   fi
 
@@ -1893,7 +1907,7 @@ PYEOF
   CONVERTED=0
   SKIPPED=0
   if [ -d "$CONFIG_DIR" ]; then
-    for f in "$CONFIG_DIR"/*.conf; do
+    while IFS= read -r f; do
       [ -f "$f" ] || continue
       base="$(basename "$f" .conf)"
       grep -qE '^HT_(AGENT_ID|MODEL|MISSION|START_SECTIONS)=' "$f" || continue
@@ -2007,7 +2021,7 @@ PYEOF
           SKIPPED=$((SKIPPED + 1))
           ;;
       esac
-    done
+    done < <(AGENT_CONFIG_DIR="$CONFIG_DIR" core_conf_files)
   else
     echo "  no config dir at $CONFIG_DIR, nothing to scan"
   fi
@@ -2026,7 +2040,7 @@ PYEOF
   echo "== 3c. chat lane for template-wired agents =="
   CHAT_ENABLED=0
   if [ -d "$CONFIG_DIR" ]; then
-    for f in "$CONFIG_DIR"/*.conf; do
+    while IFS= read -r f; do
       [ -f "$f" ] || continue
       grep -qE '^WIRING="?(poll|fleet)"?$' "$f" || continue
       grep -q '^CHAT=' "$f" && continue
@@ -2039,7 +2053,7 @@ PYEOF
         echo "  enabled $base: CHAT=on"
       fi
       CHAT_ENABLED=$((CHAT_ENABLED + 1))
-    done
+    done < <(AGENT_CONFIG_DIR="$CONFIG_DIR" core_conf_files)
   fi
   [ "$CHAT_ENABLED" -gt 0 ] || echo "  every template-wired agent already declares CHAT"
 
@@ -2053,7 +2067,7 @@ PYEOF
   GRAFT_DEFAULTED=0
   for dir in "${CONF_DIRS[@]}"; do
     [ -d "$dir" ] || continue
-    for f in "$dir"/*.conf; do
+    while IFS= read -r f; do
       [ -f "$f" ] || continue
       grep -q '^BOARD_ADAPTER=' "$f" || continue
       grep -q '^GRAFT=' "$f" && continue
@@ -2066,7 +2080,7 @@ PYEOF
         echo "  defaulted $base: GRAFT=off"
       fi
       GRAFT_DEFAULTED=$((GRAFT_DEFAULTED + 1))
-    done
+    done < <(AGENT_CONFIG_DIR="$dir" core_conf_files)
   done
   [ "$GRAFT_DEFAULTED" -gt 0 ] || echo "  every current-schema agent already declares GRAFT"
 

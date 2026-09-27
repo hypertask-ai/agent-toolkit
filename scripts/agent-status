@@ -17,6 +17,9 @@ import urllib.parse
 import urllib.request
 from collections import defaultdict
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config_files import config_files
 from typing import Any
 
 MAX_BYTES = 256 * 1024
@@ -370,7 +373,7 @@ def collect(config_dir: Path, state_dir: Path, health_path: Path, now: float) ->
     activity_agents = {}
     all_runs: list[dict[str, Any]] = []
     all_outcomes: list[dict[str, Any]] = []
-    for conf_path in sorted(config_dir.glob("*.conf")):
+    for conf_path in config_files(config_dir):
         config = parse_env(conf_path)
         slug = config.get("AGENT_SLUG") or conf_path.stem
         role = role_of(config, slug)

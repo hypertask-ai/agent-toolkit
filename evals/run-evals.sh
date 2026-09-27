@@ -300,6 +300,9 @@ if [ -z "$ONLY" ] && [ -x "$HERE/queue-ranking.test.sh" ]; then
   echo "-- queue ranking behavioural checks --"
   run_test "$HERE/queue-ranking.test.sh" bash "$HERE/queue-ranking.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/qa-merged-ranking.test.sh" ]; then
+  run_test "$HERE/qa-merged-ranking.test.sh" bash "$HERE/qa-merged-ranking.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/fast-tick.test.sh" ]; then
   echo ""
   echo "-- fast tick API budget checks --"

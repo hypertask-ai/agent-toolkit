@@ -1,0 +1,1 @@
+- AGTE-180 stores new Hypertask agent settings in folders named for their first board, discovers agents by slug across folders, and keeps flat settings as a fallback. Installation moves only dev-1, dev-2 and qa-1 to Hypertask Product; other boards await approval. QA can verify a merged PR in QA when no post-merge verdict exists.
