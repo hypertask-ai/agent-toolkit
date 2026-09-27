@@ -128,6 +128,7 @@ FLEET_PROGRESS_SUPERVISOR="off"
 EOF
 done
 
+printf 'app,%s,example/repo,main,,test=test "${AGENT_CHECK_PHASE:-}" = post\n' "$TMP/repo" > "$TMP/config/repos.allow"
 export HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state"
 export COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH"
 export MOCK_TASKS="$TMP/tasks.json" MOCK_BOARD_LOG="$TMP/board.log"

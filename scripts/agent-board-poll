@@ -366,9 +366,9 @@ if [ "$GRAFT" = "on" ]; then
   GRAFT_MCP_CONFIG="$STATE_DIR/$SLUG-graft-mcp.json"
 fi
 export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
+AGENT_REPOS_ALLOW="$(dirname "$CONF")/repos.allow"
+export AGENT_REPOS_ALLOW
 if [ "$BOARD_ADAPTER" = "hypertask" ]; then
-  AGENT_REPOS_ALLOW="$(dirname "$CONF")/repos.allow"
-  export AGENT_REPOS_ALLOW
   core_enable_agent_identity "$SLUG" "$TOKEN_FILE" "$BOARD_CLI" \
     2> >(tee -a "$LOG" >&2) || exit 1
 fi
@@ -4376,6 +4376,52 @@ Second-opinion verdict: $REVERT_GUARD_DIAGNOSIS"
     origin_section="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$LOG" || true)"
   fi
   [ -n "$origin_section" ] || origin_section="$IN_PROGRESS_SECTION"
+  ticket_check_file=""
+  if [ "$AGENT_KIND" = "dev" ] && [ "$is_pr_fix" = "no" ] && [ "$is_reply_only" = "no" ]; then
+    ticket_check_file="$STATE_DIR/$SLUG-$ref.check"
+    register_run_temp "$ticket_check_file"
+    rm -f "$ticket_check_file"
+    if ! "$CORE_ROOT/scripts/ticket-check" resolve --description "$description" \
+        --allow "$AGENT_REPOS_ALLOW" --repo "$PR_REPO" \
+        --command-file "$ticket_check_file" >>"$LOG" 2>&1; then
+      log "run refused $ref: no valid ticket check or repository default"
+      post_run_cleanup
+      continue
+    fi
+    if "$CORE_ROOT/scripts/ticket-check" run --command-file "$ticket_check_file" \
+        --cwd "$RUN_DIR" --phase pre >>"$RUN_OUTPUT" 2>&1; then
+      queue_section="$origin_section"
+      if [ "${queue_section,,}" = "${IN_PROGRESS_SECTION,,}" ]; then
+        queue_section="$(qa_config_field "$board" fail_section)"
+        [ -n "$queue_section" ] || queue_section="${WATCH_SECTIONS%%,*}"
+      fi
+      log "pre-check passed for $ref; no worker will start"
+      if declare -F adapter_claimed_by_other >/dev/null 2>&1; then
+        set +e
+        claimant="$(adapter_claimed_by_other "$TOKEN_FILE" "$board" "$ref" "$AGENT_ID" 2>>"$LOG")"
+        claim_rc=$?
+        set -e
+        if [ "$claim_rc" -ne 0 ] || [ -n "$claimant" ]; then
+          log "pre-check requeue skipped for $ref: could not confirm this agent still owns the ticket"
+          post_run_cleanup
+          continue
+        fi
+      fi
+      record_ticket_run "$ref" "$run_started_epoch" "$comment_id"
+      if ! adapter_unassign_task "$BOARD_CLI" "$ref" "$AGENT_ID" >>"$LOG" 2>&1; then
+        report_board_health "$board" "Could not unassign $ref after its pre-check passed."
+      fi
+      if [ "$queue_section" = "*" ] || ! move_ticket_or_report "$ref" "$queue_section" "$board" "passing pre-check"; then
+        report_board_health "$board" "Could not return $ref to the queue after its pre-check passed."
+      fi
+      if ! post_ticket_comment "$ref" text '<p><strong>Decision: The check already passes before work starts.</strong></p><p>Next: Review the ticket check before trying this work again.</p>'; then
+        report_board_health "$board" "Could not comment on $ref after its pre-check passed."
+      fi
+      post_run_cleanup
+      continue
+    fi
+    log "pre-check failed for $ref as required"
+  fi
   claim_check_gate=""
   atomic_claim="no"
   if [ "$AGENT_KIND" != "dev" ]; then
@@ -4734,6 +4780,7 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
         export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
         export AGENT_OPENED_PRS="$OPENED_PRS"
+        export AGENT_TICKET_CHECK_FILE="$ticket_check_file" AGENT_TICKET_WORKTREE="$RUN_DIR"
         export AGENT_HELD_COMMENT_FILE="$MODEL_ACTIVITY_DIR/held-comment.html"
         export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
         export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"
@@ -4788,6 +4835,64 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "provider $route_provider quota exhausted"
       fi
     done < <(provider_routes "$RUN_MODEL_CLI")
+    if [ -n "$ticket_check_file" ] && [ "$worker_exited" = "yes" ] \
+       && { [ "$rc" -eq 0 ] || [ "$quota_count" -eq 0 ]; } \
+       && [ -z "$WATCHDOG_REASON" ]; then
+      if ! "$CORE_ROOT/scripts/ticket-check" run --command-file "$ticket_check_file" \
+          --cwd "$RUN_DIR" >>"$RUN_OUTPUT" 2>&1; then
+        log "post-check failed for $ref; opening a pull request is blocked; starting one repair round"
+        PROMPT="$PROMPT
+
+The required post-check failed. No pull request may open until it passes. Fix the change in this same worktree, run the check again, and only then open the pull request. This is your one repair round."
+        repair_output="$RUN_OUTPUT_DIR/$SLUG-$ref-check-repair.log"
+        repair_err="$RUN_OUTPUT_DIR/$SLUG-$ref-check-repair.err"
+        repair_pid_file="$RUN_OUTPUT_DIR/$SLUG-$ref-check-repair.pid"
+        register_run_temp "$repair_output"
+        register_run_temp "$repair_err"
+        register_run_temp "$repair_pid_file"
+        repair_activity_dir="$(mktemp -d "$RUN_OUTPUT_DIR/$SLUG-$ref-check-repair.activity.XXXXXX")"
+        register_run_temp "$repair_activity_dir"
+        : > "$repair_output"
+        : > "$repair_err"
+        (
+          cd "$RUN_DIR"
+          export PATH="$GRAFT_PATH${AGENT_IDENTITY_PATH:-$PATH}"
+          export TMPDIR="$repair_activity_dir"
+          export AGENT_NAME AGENT_ID AGENT_BOARD_CLI="$BOARD_CLI"
+          export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
+          export AGENT_OPENED_PRS="$OPENED_PRS"
+          export AGENT_TICKET_CHECK_FILE="$ticket_check_file" AGENT_TICKET_WORKTREE="$RUN_DIR"
+          export AGENT_HELD_COMMENT_FILE="$repair_activity_dir/held-comment.html"
+          exec setsid --wait bash -c 'printf "%s\n" "$$" > "$1"; shift; exec "$@"' \
+            bash "$repair_pid_file" "${MODEL_ARGV[@]}" "$PROMPT"
+        ) >>"$repair_output" 2>"$repair_err" &
+        repair_wait_pid=$!
+        ACTIVE_MODEL_WAIT_PID="$repair_wait_pid"
+        ACTIVE_MODEL_PROCESS_GROUP="$repair_wait_pid"
+        for _ in $(seq 1 100); do
+          [ ! -s "$repair_pid_file" ] || break
+          kill -0 "$repair_wait_pid" 2>/dev/null || break
+          sleep 0.05
+        done
+        repair_group="$(cat "$repair_pid_file" 2>/dev/null || printf '%s' "$repair_wait_pid")"
+        ACTIVE_MODEL_PROCESS_GROUP="$repair_group"
+        if watch_model_process "$repair_wait_pid" "$repair_group" "$run_record" \
+            "$repair_output" "$repair_err" "$ref" "$repair_activity_dir"; then
+          rc=0
+        else
+          rc=$?
+        fi
+        ACTIVE_MODEL_WAIT_PID=""
+        ACTIVE_MODEL_PROCESS_GROUP=""
+        cat "$repair_output" >> "$RUN_OUTPUT"
+        cat "$repair_err" >> "$ERRFILE"
+        if ! "$CORE_ROOT/scripts/ticket-check" run --command-file "$ticket_check_file" \
+            --cwd "$RUN_DIR" >>"$RUN_OUTPUT" 2>&1; then
+          log "post-check still fails for $ref after one repair round; no pull request"
+          rc=74
+        fi
+      fi
+    fi
     if [ "$is_pr_fix" = "no" ] && [ "$worker_exited" = "yes" ] \
        && declare -F adapter_ticket_merged_pr >/dev/null 2>&1; then
       if merged_pr_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" \
@@ -4886,6 +4991,7 @@ ${qa_comment:-No ticket comment was posted.}"
         export GRAFT GRAFT_MCP_COMMAND GRAFT_MCP_CONFIG
         export AGENT_RUN_ID="$runtime_run_id" AGENT_RUN_REF="$ref" AGENT_RUN_API_BASE="$run_api_base"
         export AGENT_OPENED_PRS="$OPENED_PRS"
+        export AGENT_TICKET_CHECK_FILE="$ticket_check_file" AGENT_TICKET_WORKTREE="$RUN_DIR"
         export AGENT_HELD_COMMENT_FILE="$QA_RETRY_ACTIVITY_DIR/held-comment.html"
         export AGENT_COMMENT_REWRITE_CLI="$COMMENT_REWRITE_CLI" AGENT_POSPEAK_SKILL="$POSPEAK_SKILL"
         export AGENT_TICKET_FORMAT_RULE="$TICKET_FORMAT_RULE" AGENT_UNSLOP_SKILL="$UNSLOP_SKILL" AGENT_ADHD_SKILL="$ADHD_SKILL"

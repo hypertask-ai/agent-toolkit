@@ -169,6 +169,7 @@ WORKDIR_BASE_BRANCH="main"
 FLEET_PROGRESS_SUPERVISOR="off"
 EOF
 
+printf 'app,%s,example/repo,main,,test=test "${AGENT_CHECK_PHASE:-}" = post\n' "$TMP/repo" > "$TMP/config/repos.allow"
 set_task() {
   cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"Backlog","title":"Change it","description":"Open a PR","assignees":[],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}

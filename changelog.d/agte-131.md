@@ -1,0 +1,1 @@
+- AGTE-131 runs the ticket's Check command, or the repository default test command, before work and at pull request creation. It requeues tickets whose check already passes, blocks pull requests on failing checks, and gives workers one repair round.

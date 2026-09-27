@@ -114,6 +114,7 @@ GRAFT="off"
 FLEET_PROGRESS_SUPERVISOR="off"
 EOF
 
+printf 'app,%s,example/repo,main,,test=test "${AGENT_CHECK_PHASE:-}" = post\n' "$TMP/repo" > "$TMP/home/.config/agents/repos.allow"
 run_tick() {
   HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
     XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \

@@ -147,6 +147,7 @@ TRIAGE="no"
 RETRY_LIMIT="6"
 MODEL_OVERRIDE_DIR="$state/overrides"
 EOF
+printf 'app,%s,example/repo,main,,test=test "${AGENT_CHECK_PHASE:-}" = post\n' "$TMP/repo" > "$TMP/home/.config/agents/repos.allow"
 }
 
 enable_provider_fallback() {

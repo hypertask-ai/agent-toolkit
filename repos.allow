@@ -1,7 +1,7 @@
-# key,path,github slug,base branch,memory cap,pull request labels... (install.sh discovers columns 3-4)
-agent-toolkit,/home/valentin/projects/agent-toolkit
-company-skills,/home/valentin/projects/company-skills
-analytics,/home/valentin/projects/hypertask-analytics
-hypertask,/home/valentin/projects/hypertasks,,,,full-ci
-hypertask-mcp,/home/valentin/projects/hypertask-mcp
-ht-slack,/home/valentin/projects/ht-slack
+# key,path,github slug,base branch,memory cap,labels and test=<shell command> (install.sh discovers columns 3-4)
+agent-toolkit,/home/valentin/projects/agent-toolkit,,,,test=bash evals/run-evals.sh
+company-skills,/home/valentin/projects/company-skills,,,,test=bash evals/run-evals.sh
+analytics,/home/valentin/projects/hypertask-analytics,,,,test=npm run build
+hypertask,/home/valentin/projects/hypertasks,,,,full-ci,test=npm test
+hypertask-mcp,/home/valentin/projects/hypertask-mcp,,,,test=npm run test:src
+ht-slack,/home/valentin/projects/ht-slack,,,,test=npm test

@@ -102,7 +102,7 @@ source = Path(os.environ["SOURCE_REPOS_ALLOW"])
 destination = Path(os.environ["INSTALLED_REPOS_ALLOW"])
 with source.open(encoding="utf-8", newline="") as handle:
     defaults = {
-        row[0].strip(): [label.strip() for label in row[5:] if label.strip()]
+        row[0].strip(): [value.strip() for value in row[5:] if value.strip()]
         for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#"))
         if len(row) >= 6
     }
@@ -110,12 +110,15 @@ with destination.open(encoding="utf-8", newline="") as handle:
     rows = list(csv.reader(handle))
 changed = False
 for row in rows:
-    if not row or row[0].lstrip().startswith("#") or any(label.strip() for label in row[5:]):
+    if not row or row[0].lstrip().startswith("#"):
         continue
-    labels = defaults.get(row[0].strip(), [])
-    if labels:
+    configured = [value.strip() for value in row[5:] if value.strip()]
+    additions = [value for value in defaults.get(row[0].strip(), [])
+                 if (value.startswith("test=") and not any(item.startswith("test=") for item in configured))
+                 or (not value.startswith("test=") and not any(not item.startswith("test=") for item in configured))]
+    if additions:
         row.extend([""] * max(0, 5 - len(row)))
-        row.extend(labels)
+        row.extend(additions)
         changed = True
 if changed:
     temporary = destination.with_name(f".{destination.name}.new")

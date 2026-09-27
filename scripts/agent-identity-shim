@@ -85,7 +85,7 @@ if path.is_file():
         for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#")):
             row = [value.strip() for value in row]
             if len(row) >= 6 and row[2].casefold() == os.environ["REPO"].casefold():
-                labels = [label for label in row[5:] if label]
+                labels = [label for label in row[5:] if label and not label.startswith("test=")]
                 break
 print(json.dumps({"labels": labels}, separators=(",", ":")))
 PYEOF
@@ -115,6 +115,12 @@ for ((i = 0; i < ${#args[@]}; i++)); do
   fi
 done
 if [ "${1:-}" = "pr" ] && [ "${2:-}" = "create" ]; then
+  if [ -n "${AGENT_TICKET_CHECK_FILE:-}" ]; then
+    if ! __CHECK__ run --command-file "$AGENT_TICKET_CHECK_FILE" --cwd "${AGENT_TICKET_WORKTREE:?missing check worktree}"; then
+      printf 'post-check failed; pull request not opened\n' >&2
+      exit 2
+    fi
+  fi
   output="$("$REAL_GH" "$@")"
   created="$(OUTPUT="$output" python3 - <<'PYEOF'
 import os
@@ -216,6 +222,10 @@ if [ "${1:-}" = "api" ]; then
   done
   if [ "$explicit_method" = no ] && [ "$has_fields" = yes ]; then method=POST; fi
   if [ "${method^^}" != GET ]; then
+    if [[ "$endpoint" =~ ^/?repos/[^/]+/[^/]+/pulls/?$ ]] && [ "${method^^}" = POST ]; then
+      echo "pull request creation refused: use guarded gh pr create" >&2
+      exit 2
+    fi
     if [[ "$endpoint" =~ /pulls/[0-9]+/merge ]] \
        || printf '%s\n' "$*" | grep -qF 'mergePullRequest'; then
       echo "merge refused: runners never merge pull requests by hand" >&2
@@ -247,7 +257,7 @@ case "${1:-} ${2:-}" in
     ;;
 esac
 exec "$REAL_GH" "$@"
-""".replace("__GH__", shlex.quote(gh)).replace("__REPOS_ALLOW__", shlex.quote(str(repo_config)))
+""".replace("__GH__", shlex.quote(gh)).replace("__REPOS_ALLOW__", shlex.quote(str(repo_config))).replace("__CHECK__", shlex.quote(str(Path(__file__).resolve().parent / "ticket-check")))
         target = shim_dir / "gh"
         temporary = shim_dir / ".gh.new"
         temporary.write_text(gh_script, encoding="utf-8")

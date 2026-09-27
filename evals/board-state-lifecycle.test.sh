@@ -96,6 +96,7 @@ if [ "${MOCK_MODEL_MODE:-pr}" = sleep ]; then
   printf '%s\n' "$$" > "$MOCK_MODEL_PID"
   exec sleep 60
 fi
+touch "$MOCK_CHECK_READY"
 if [ "${MOCK_MODEL_MODE:-pr}" = merged-comment-failure ]; then
   printf 'yes\n' > "$MOCK_PR_MERGED"
   "$AGENT_BOARD_CLI" comment add AGTE-168 --text '<p><strong>Done: AGTE-168 now keeps merged runs successful.</strong></p><p>PR #9 merged.</p><p>Next: No action is needed.</p>'
@@ -205,17 +206,18 @@ TRIAGE="no"
 CLAIM_UNASSIGNED="yes"
 FLEET_PROGRESS_SUPERVISOR="off"
 EOF
-printf 'app,%s,example/repo,master\n' "$TMP/repo" > "$TMP/config/repos.allow"
+printf 'app,%s,example/repo,master,,test=test -f %s/ready\n' "$TMP/repo" "$TMP/repo" > "$TMP/config/repos.allow"
 
 reset_case() {
   rm -rf "$TMP/state"; mkdir -p "$TMP/state"
+  rm -f "$TMP/repo/ready"
   : > "$TMP/board.log"; : > "$TMP/pr-open"; : > "$TMP/pr-merged"; : > "$TMP/git.log"
   printf '{"comments":[]}\n' > "$TMP/comments.json"
   cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","projectId":15,"section":"Backlog","title":"Change it","description":"Open a PR","assignees":[],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
 EOF
 }
-run_env=(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" AGENT_PR_CACHE_DIR="$TMP/state/pr-cache" COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" TICKET_LINK_FORMATTER="$TMP/bin/ticket-links" ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" MOCK_BOARD_LOG="$TMP/board.log" MOCK_PR_OPEN="$TMP/pr-open" MOCK_PR_MERGED="$TMP/pr-merged" MOCK_MODEL_PID="$TMP/model.pid" MOCK_GIT_LOG="$TMP/git.log")
+run_env=(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" AGENT_PR_CACHE_DIR="$TMP/state/pr-cache" COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" TICKET_LINK_FORMATTER="$TMP/bin/ticket-links" ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" MOCK_BOARD_LOG="$TMP/board.log" MOCK_PR_OPEN="$TMP/pr-open" MOCK_PR_MERGED="$TMP/pr-merged" MOCK_MODEL_PID="$TMP/model.pid" MOCK_CHECK_READY="$TMP/repo/ready" MOCK_GIT_LOG="$TMP/git.log")
 
 reset_case
 env "${run_env[@]}" MOCK_MODEL_MODE=sleep "$ROOT/scripts/agent-board-poll" --once dev >"$TMP/run.out" 2>&1 &
@@ -271,7 +273,7 @@ if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]
    && grep -qF 'run done AGTE-168 exit=0' "$TMP/state/agent-board-poll/dev.log"; then
   echo 'PASS merged-pr-comment-rewrite          a refused closing comment is linked and the merged PR finishes the run'
 else
-  echo "FAIL merged-pr-comment-rewrite          task=$(cat "$TMP/tasks.json") record=$(cat "$merged_record" 2>/dev/null) board=$(cat "$TMP/board.log") output=$(cat "$TMP/merged-comment.out")"; exit 1
+  echo "FAIL merged-pr-comment-rewrite          task=$(cat "$TMP/tasks.json") record=$(cat "$merged_record" 2>/dev/null) board=$(cat "$TMP/board.log") log=$(tail -n 30 "$TMP/state/agent-board-poll/dev.log") output=$(cat "$TMP/merged-comment.out")"; exit 1
 fi
 
 reset_case
