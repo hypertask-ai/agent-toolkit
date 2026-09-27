@@ -20,6 +20,8 @@ if [ "${1:-}" = "--token" ] && [ "$#" -ge 2 ]; then shift 2; fi
 if [ "${1:-} ${2:-} ${3:-}" = "--json section list" ]; then
   if [ "${SECTION_SCENARIO:-manager}" = "invalid" ]; then
     printf '%s\n' '[{"name":"Bugs"},{"name":"In Progress"}]'
+  elif [ "${SECTION_SCENARIO:-manager}" = "both" ]; then
+    printf '%s\n' '[{"name":"HT Manager Review"},{"name":"Supervisor Review"}]'
   else
     printf '%s\n' '[{"name":"Bugs"},{"name":"In Progress"},{"name":"HT Manager Review"}]'
   fi
@@ -417,6 +419,9 @@ export PR_GATE_NOW="2026-09-18T22:00:00Z"
 # shellcheck source=/dev/null
 . "$ROOT/adapters/hypertask/adapter.sh"
 . "$ROOT/scripts/lib/adapters/hypertask.sh"
+[[ "$(SECTION_SCENARIO=both adapter_resolve_release_section "$TMP/bin/hypertask" 15 Review)" = 'Supervisor Review' ]]
+[[ "$(adapter_resolve_release_section "$TMP/bin/hypertask" 15 Review)" = 'HT Manager Review' ]]
+echo 'PASS review handoffs prefer Supervisor Review but retain the legacy fallback'
 die() { printf 'die: %s %s\n' "$*" >&2; return 1; }
 
 cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<'EOF'
@@ -515,6 +520,19 @@ for review_section in 'Valentin Review' 'HT Manager Review'; do
   ! grep -qF 'pr merge ' "$TMP/gh-calls"
 done
 echo 'PASS both human-review lanes retain PR ownership without merging on exit'
+
+legacy_hold="$(API_TASK_SECTION='HT Manager Review' run_gate legacy-human-review)"
+supervisor_hold="$(API_TASK_SECTION='Supervisor Review' run_gate supervisor-human-review)"
+LEGACY_HOLD="$legacy_hold" SUPERVISOR_HOLD="$supervisor_hold" python3 <<'PYEOF'
+import json, os
+legacy = json.loads(os.environ["LEGACY_HOLD"])
+supervisor = json.loads(os.environ["SUPERVISOR_HOLD"])
+for key in ("action", "state", "pickup_slot", "blocks_pickup", "unfixable"):
+    assert legacy[key] == supervisor[key], (key, legacy[key], supervisor[key])
+assert legacy["wait_reason"] == "ticket is in HT Manager Review"
+assert supervisor["wait_reason"] == "ticket is in Supervisor Review"
+PYEOF
+echo 'PASS Supervisor Review gets the same human-review hold as HT Manager Review'
 
 labelled_lane="$(PR_LABEL_OVERRIDE=valentin-review API_TASK_SECTION='Valentin Review' run_gate labelled-lane)"
 [[ "$labelled_lane" == *'"pickup_slot": false'* && "$labelled_lane" == *'"blocks_pickup": false'* ]]

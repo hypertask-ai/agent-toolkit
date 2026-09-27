@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config_files import config_files
 from typing import Any
 
-STALE_SECTIONS = {"ai review", "qa", "ht manager review", "inbox"}
+STALE_SECTIONS = {"ai review", "qa", "ht manager review", "supervisor review", "inbox"}
 COLUMN_LIMIT = 8
 STALE_SECONDS = 24 * 60 * 60
 PR_SECONDS = 2 * 60 * 60

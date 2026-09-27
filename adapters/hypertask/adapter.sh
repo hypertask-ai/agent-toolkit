@@ -2667,7 +2667,7 @@ PYEOF
 import json, os
 row = json.loads(os.environ["ROW"])
 section = str(row.get("ticket_section") or "").strip().casefold()
-if section in {"valentin review", "ht manager review"}:
+if section in {"valentin review", "ht manager review", "supervisor review"}:
     print("ticket is in %s" % row.get("ticket_section"))
 elif "valentin-review" in row.get("prLabels", []):
     print("label valentin-review")
