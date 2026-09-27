@@ -389,28 +389,63 @@ _run_activity() {
     "\${AGENT_RUN_AGENT:-unknown}" "\${AGENT_RUN_PROVIDER:-unknown}" "\${AGENT_RUN_MODEL:-unknown}" \
     "\${AGENT_RUN_STARTED_AT:-unknown}" "\$duration" "\${AGENT_RUN_OUTCOME:-running}" \
     "\${AGENT_RUN_LOG_LINK:-unavailable}" >> "\$RUN_LOG" 2>/dev/null || true
-  [ -n "\${AGENT_RUN_ID:-}" ] && [ "\$AGENT_RUN_ID" != "local" ] && [ -n "\${AGENT_RUN_API_BASE:-}" ] || return 0
-  payload="\$(ACTIVITY_TYPE="\$type" MESSAGE="\$message" NOW="\$(date +%s)" python3 -c '
+  [ -n "\${AGENT_RUN_ID:-}" ] && [ "\$AGENT_RUN_ID" != "local" ] || return 0
+  payload="\$(ACTIVITY_TYPE="\$type" MESSAGE="\$message" python3 -c '
 import json, os
-try:
-    duration = max(0, int(os.environ["NOW"]) - int(os.environ.get("AGENT_RUN_STARTED_EPOCH") or os.environ["NOW"]))
-except ValueError:
-    duration = 0
-print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"],
-                  "agent": os.environ.get("AGENT_RUN_AGENT", "unknown"),
-                  "provider": os.environ.get("AGENT_RUN_PROVIDER", "unknown"),
-                  "model": os.environ.get("AGENT_RUN_MODEL", "unknown"),
-                  "startedAt": os.environ.get("AGENT_RUN_STARTED_AT", ""),
-                  "durationSeconds": duration,
-                  "outcome": os.environ.get("AGENT_RUN_OUTCOME", "running"),
-                  "logUrl": os.environ.get("AGENT_RUN_LOG_LINK", "")}))')"
+print(json.dumps({"type": os.environ["ACTIVITY_TYPE"], "text": os.environ["MESSAGE"]}))')"
   status="\$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
     -H "Authorization: Bearer \$TOKEN" -H 'Content-Type: application/json' \
-    --data "\$payload" "\$AGENT_RUN_API_BASE/mcp/agents/runs/\$AGENT_RUN_ID/activities" 2>/dev/null || printf 000)"
+    --data "\$payload" "\${AGENT_RUN_API_BASE:-\$BOARD_API_URL}/mcp/agents/runs/\$AGENT_RUN_ID/activities" 2>/dev/null)" || status=000
   case "\$status" in 2*) : ;; *) _comment_cap_note "run activity delivery failed (HTTP \$status), kept locally" ;; esac
 }
 
-_outbound_gate_activity() { _run_activity "\$@"; }
+_outbound_gate_activity() {
+  local type="\$1" message="\$2" task_id payload reply status run_id
+  if [ -z "\${AGENT_RUN_ID:-}" ] || [ "\$AGENT_RUN_ID" = local ]; then
+    task_id="\$(TASK="\${TASK:-}" REF="\${REF:-}" python3 -c '
+import json, os
+try:
+    doc = json.loads(os.environ["TASK"])
+    rows = doc.get("tasks")
+    task = next((row for row in rows if str(row.get("ticketNumber") or "").casefold() == os.environ["REF"].casefold()), None) if isinstance(rows, list) else doc.get("task") or doc
+    if task is None and isinstance(rows, list) and len(rows) == 1 and not rows[0].get("ticketNumber"):
+        task = rows[0]
+    value = task.get("id") if isinstance(task, dict) else None
+    if str(value).isdigit() and (not task.get("ticketNumber") or str(task["ticketNumber"]).casefold() == os.environ["REF"].casefold()):
+        print(value)
+except (ValueError, TypeError, AttributeError):
+    pass
+')"
+    if [ -z "\$task_id" ]; then
+      _comment_cap_note "run registration failed on \$REF (no numeric task id), kept locally"
+    else
+      payload="\$(TASK_ID="\$task_id" TITLE="Session activity on \$REF" python3 -c '
+import json, os
+print(json.dumps({"taskId": int(os.environ["TASK_ID"]), "source": "runtime", "title": os.environ["TITLE"]}))')"
+      reply="\$(curl -sS -w '\n%{http_code}' -X POST \
+        -H "Authorization: Bearer \$TOKEN" -H 'Content-Type: application/json' \
+        --data "\$payload" "\${BOARD_API_URL%/}/mcp/agents/runs" 2>/dev/null)" || reply=$'\n000'
+      status="\${reply##*\$'\n'}"
+      if [[ "\$status" = 2* ]]; then
+        run_id="\$(printf '%s' "\${reply%\$'\n'*}" | python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+    run = doc.get("run") if isinstance(doc.get("run"), dict) else doc
+    print(run.get("id") or run.get("runId") or "")
+except (ValueError, AttributeError):
+    pass
+' 2>/dev/null)"
+      fi
+      if [ -n "\${run_id:-}" ]; then
+        AGENT_RUN_ID="\$run_id"
+      else
+        _comment_cap_note "run registration failed on \$REF (HTTP \$status or missing run id), kept locally"
+      fi
+    fi
+  fi
+  _run_activity "\$type" "\$message"
+}
 _outbound_gate_note() { _comment_cap_note "\$@"; }
 # shellcheck source=/dev/null
 . "\$OUTBOUND_TEXT_GATE"

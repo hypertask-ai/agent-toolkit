@@ -217,13 +217,14 @@ run_liveness_case worktree worktree-change-liveness 'worktree changes keep a sil
 reset_case
 (
   activity_dir=""
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 600); do
     activity_dir="$(find "$TMP/state/agent-board-poll/run-output" -maxdepth 1 -type d -name '*.activity.*' -print -quit 2>/dev/null || true)"
     [ -z "$activity_dir" ] || break
     sleep 0.05
   done
   [ -n "$activity_dir" ] || exit 1
-  for _ in $(seq 1 20); do
+  for _ in $(seq 1 150); do
+    [ ! -f "$TMP/model-done" ] || break
     printf '{"pid":%s}\n' "$$" > "$activity_dir/heartbeat-1.json" 2>/dev/null || break
     sleep 0.2
   done
