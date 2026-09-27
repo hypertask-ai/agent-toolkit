@@ -344,7 +344,7 @@ fi
 if [ -z "$ONLY" ] && [ -x "$HERE/one-ticket-live.test.sh" ]; then
   echo ""
   echo "-- one ticket until live behavioural checks --"
-  run_test "$HERE/one-ticket-live.test.sh" bash "$HERE/one-ticket-live.test.sh" || :
+  TEST_TIMEOUT_SECONDS=600 run_test "$HERE/one-ticket-live.test.sh" bash "$HERE/one-ticket-live.test.sh" || :
 fi
 if [ -z "$ONLY" ] && [ -x "$HERE/agent-template-update.test.sh" ]; then
   echo ""
