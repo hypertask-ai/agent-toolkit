@@ -272,6 +272,10 @@ fi
 
 # shellcheck disable=SC1090
 . "$ROOT/adapters/hypertask/adapter.sh"
+cat > "$TMP/mechanical-tasks.json" <<'EOF'
+{"tasks":[{"id":"task-1","ticketNumber":"TEST-1","assignees":[{"agent":{"id":"agent-1"}}],"labels":[]},{"id":"task-2","ticketNumber":"TEST-2","assignees":[],"labels":[]},{"id":"task-3","ticketNumber":"TEST-3","assignees":[],"labels":[]}]}
+EOF
+export TASKS_JSON="$TMP/mechanical-tasks.json"
 printf '{"comments":[]}\n' > "$TMP/mechanical-comments.json"
 MECH_COMMENTS="$TMP/mechanical-comments.json"
 MECH_POSTS="$TMP/mechanical-posts"
