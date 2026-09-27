@@ -57,6 +57,7 @@ cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
 case " $* " in
   *' --json project show '*) printf '%s\n' '{"project":{"ownerId":6}}' ;;
+  *' --json task get TEST-1'*) printf '%s\n' '{"task":{"id":"task-1","ticketNumber":"TEST-1","assignees":[],"labels":[]}}' ;;
   *' --json comment list '*) printf '%s\n' '{"comments":[]}' ;;
   *' comment add '*)
     if [[ " $* " = *' --improve '* ]]; then

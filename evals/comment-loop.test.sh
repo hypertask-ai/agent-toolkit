@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Comment-loop checks use local command stubs and never call a board or model.
 set -euo pipefail
+unset AGENT_ORIGINAL_PATH AGENT_IDENTITY_PATH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -66,6 +67,7 @@ chmod +x "$TMP/bin/"*
 cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","section":"Review","title":"Loop guard","description":"Check activity","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":2,"updatedAt":"2026-01-01T00:01:00Z"}]}
 EOF
+export TASKS_JSON="$TMP/tasks.json"
 cat > "$TMP/home/.config/agents/test.conf" <<EOF
 AGENT_ID="agent-1"
 AGENT_NAME="Test Bot"

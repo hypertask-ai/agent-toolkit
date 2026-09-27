@@ -4,6 +4,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
 TMP="$(mktemp -d)"
+export AGENT_IDENTITY_SHIM_DIR="$TMP/identity-shims"
 trap '[ -n "${KEEP_TMP:-}" ] || rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/home/.config/hypertask-agents" "$TMP/company" "$TMP/repo"
 printf 'test\n' > "$TMP/company/INDEX.md"

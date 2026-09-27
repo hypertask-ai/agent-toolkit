@@ -359,6 +359,21 @@ else
   bad wrapper-human-owner-skip "board=$(cat "$TMP/board.log") output=$(cat "$TMP/wrapper.out")"
 fi
 
+python3 - "$TMP/tasks.json" "$TMP/multiple-tasks.json" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+doc["tasks"].insert(0, {"id": "free-1", "ticketNumber": "TEST-2", "assignees": [], "labels": []})
+json.dump(doc, open(sys.argv[2], "w"))
+PYEOF
+if ! env HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+     MOCK_TASKS="$TMP/multiple-tasks.json" MOCK_BOARD_LOG="$TMP/board.log" \
+     "$TMP/board" task move TEST-1 --section Done > "$TMP/multiple.out" 2>&1 \
+   && [ ! -s "$TMP/board.log" ] && grep -qF 'human owner' "$TMP/multiple.out"; then
+  ok wrapper-multiple-tickets 'a safe first row cannot hide a human owner later in the response'
+else
+  bad wrapper-multiple-tickets "board=$(cat "$TMP/board.log") output=$(cat "$TMP/multiple.out")"
+fi
+
 sed -i 's/AGENT_KIND="qa"/AGENT_KIND="dev"/' "$TMP/config/qa-runner.conf"
 run_case Done '[]' '{"comments":[]}' '[{"id":88},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
 sed -i 's/AGENT_KIND="dev"/AGENT_KIND="qa"/' "$TMP/config/qa-runner.conf"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset AGENT_ORIGINAL_PATH AGENT_IDENTITY_PATH
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

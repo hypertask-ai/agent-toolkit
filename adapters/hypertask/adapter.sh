@@ -513,12 +513,16 @@ case "\${1:-} \${2:-}" in
 esac
 if [ -n "\$REF" ]; then
   TASK="\$(hypertask --token "\$TOKEN" --json task get "\$REF" 2>/dev/null)" || TASK=""
+  CLI_TRUSTED=yes
   if ! TASK="\$TASK" REF="\$REF" python3 -c '
 import json, os, sys
 try:
     doc = json.loads(os.environ["TASK"])
-    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
-    sys.exit(0 if str(task.get("ticketNumber") or "").casefold() == os.environ["REF"].casefold() else 1)
+    rows = doc.get("tasks")
+    task = next((row for row in rows if str(row.get("ticketNumber") or "").casefold() == os.environ["REF"].casefold()), None) if isinstance(rows, list) else doc.get("task") or doc
+    if task is None and isinstance(rows, list) and len(rows) == 1 and not rows[0].get("ticketNumber"):
+        task = rows[0]
+    sys.exit(0 if isinstance(task, dict) and (task.get("ticketNumber") or task.get("id")) and (not task.get("ticketNumber") or str(task["ticketNumber"]).casefold() == os.environ["REF"].casefold()) else 1)
 except (IndexError, AttributeError, TypeError, ValueError):
     sys.exit(1)
 '; then
@@ -526,15 +530,19 @@ except (IndexError, AttributeError, TypeError, ValueError):
       "\${BOARD_API_URL%/}/mcp/tasks?ticket_number=\$REF" 2>/dev/null)" || exit 1
     [ "\${RESPONSE##*$'\n'}" = 200 ] || exit 1
     TASK="\${RESPONSE%$'\n'*}"
+    CLI_TRUSTED=no
   fi
-  PROTECTION="\$(TASK="\$TASK" REF="\$REF" python3 -c '
+  PROTECTION="\$(TASK="\$TASK" REF="\$REF" CLI_TRUSTED="\$CLI_TRUSTED" python3 -c '
 import json, os
 try:
     doc = json.loads(os.environ["TASK"])
-    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+    rows = doc.get("tasks")
+    task = next((row for row in rows if str(row.get("ticketNumber") or "").casefold() == os.environ["REF"].casefold()), None) if isinstance(rows, list) else doc.get("task") or doc
+    if task is None and os.environ["CLI_TRUSTED"] == "yes" and isinstance(rows, list) and len(rows) == 1 and not rows[0].get("ticketNumber"):
+        task = rows[0]
     if not isinstance(task, dict):
         raise ValueError
-    if str(task.get("ticketNumber") or "").casefold() != os.environ["REF"].casefold():
+    if task.get("ticketNumber") and str(task["ticketNumber"]).casefold() != os.environ["REF"].casefold():
         raise ValueError
 except (IndexError, ValueError, TypeError):
     print("unverified")
