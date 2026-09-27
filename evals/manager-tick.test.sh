@@ -22,7 +22,7 @@ BOARD_ID="5500"
 TOKEN_FILE="$TMP/token"
 BOARD_CLI="$TMP/bin/hypertask"
 WATCH_SECTIONS="*"
-MODEL_CLI="provider"
+MODEL_CLI="$TMP/bin/provider"
 PR_REPO="example/repo"
 SKILLS_INDEX=""
 TRIAGE="no"
@@ -34,7 +34,7 @@ cat > "$TMP/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 url="${!#}"
 case "$url" in
-  *'/mcp/tasks?'*) printf '{"tasks":[]}\n200' ;;
+  *'/mcp/tasks?'*) if [ -n "${MOCK_TASKS:-}" ]; then cat "$MOCK_TASKS"; printf '\n200'; else printf '{"tasks":[]}\n200'; fi ;;
   *) printf '{}\n200' ;;
 esac
 EOF
@@ -47,7 +47,15 @@ EOF
 # only passes on a host that happens to have the real one installed.
 cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+case " $* " in
+  *' project show '*) printf '{"project":{"id":5500,"ownerId":6,"sections":[{"name":"In Progress"}]}}\n' ;;
+  *' task get '*) cat "$MOCK_TASKS" ;;
+  *) printf '{}\n' ;;
+esac
+EOF
+cat > "$TMP/bin/provider" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${!#}" > "$MOCK_PROMPT"
 EOF
 chmod +x "$TMP/bin/"*
 
@@ -63,6 +71,29 @@ if [ "$rc" -ne 0 ] || printf '%s\n' "$output" | grep -qF 'command not found'; th
   exit 1
 fi
 printf 'PASS manager-maintainer-dry-run      exits zero without command-not-found\n'
+
+# A dry run with no tasks never builds the manager prompt that broke in AGTE-31.
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":181,"ticketNumber":"AGTE-181","projectId":5500,"section":"In Progress","title":"Exercise manager prompt","description":"Check quoted examples","assignees":[{"agent":{"id":"agent-product","displayName":"Product Bot"}}],"labels":[],"commentCount":0}]}
+EOF
+set +e
+HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
+  PATH="$TMP/bin:$PATH" MOCK_TASKS="$TMP/tasks.json" MOCK_PROMPT="$TMP/prompt" \
+  "$ROOT/scripts/agent-board-poll" --once product-bot > "$TMP/work.out" 2>&1
+rc=$?
+set -e
+if [ "$rc" -ne 0 ] || [ ! -s "$TMP/prompt" ] \
+   || ! grep -qF 'saying "stop dev 1" runs' "$TMP/prompt" \
+   || ! grep -qF 'Example: "give HTPR-6550 to dev 2" runs' "$TMP/prompt" \
+   || ! grep -qF 'Example: "put dev 2 on grok fast" runs' "$TMP/prompt" \
+   || ! grep -qF 'Example: "quiet off for qa-1" runs' "$TMP/prompt" \
+   || ! grep -qF 'Example: "file a toolkit ticket: add a setup report" runs' "$TMP/prompt" \
+   || grep -qF 'command not found' "$TMP/work.out"; then
+  printf 'FAIL manager-prompt-quoted-example rc=%s output=%s log=%s\n' "$rc" "$(cat "$TMP/work.out")" "$(cat "$TMP/state/agent-board-poll/product-bot.log" 2>/dev/null)"
+  exit 1
+fi
+printf 'PASS manager-prompt-quoted-example    work tick delivers the quoted command without executing it\n'
 
 cat > "$TMP/bin/failing-poll" <<'EOF'
 #!/usr/bin/env bash
