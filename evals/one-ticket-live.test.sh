@@ -356,7 +356,7 @@ elif [[ "$url" == *'/mcp/tasks?'* ]]; then
   task1_assignees='[{"agent":{"id":"agent-1"}}]'
   [ "${BOARD_TEST_SCENARIO:-}" != "human" ] || task1_assignees='[{"agent":{"id":"agent-1"}},{"id":"6","displayName":"Owner"}]'
   task1_labels='[]'
-  [ "${BOARD_TEST_SCENARIO:-}" != "owner-hold" ] || task1_labels='[{"name":"valentin"}]'
+  [ "${BOARD_TEST_SCENARIO:-}" != "owner-hold" ] || task1_labels='[{"name":"hold"}]'
   if [ -n "${UNASSIGNED_MARKER:-}" ] && [ -e "$UNASSIGNED_MARKER" ]; then
     ticket_section='Review'
     task1_assignees='[]'

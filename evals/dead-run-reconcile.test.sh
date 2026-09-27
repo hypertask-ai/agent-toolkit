@@ -240,7 +240,7 @@ else
 fi
 
 reset_case
-set_task '["valentin"]'
+set_task '["hold"]'
 write_record '2026-09-20T11:00:00+00:00'
 run_tick > "$TMP/owner-hold.out" 2>&1
 run_reconciler > "$TMP/owner-reconciler.out" 2>&1

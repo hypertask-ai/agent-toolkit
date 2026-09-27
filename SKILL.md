@@ -360,8 +360,9 @@ our own message rather than "command not found" three layers down.
    one acknowledgement before any claim. A hold unassigns this agent, moves the
    ticket to the configured review column, and blocks every work lane. A go
    resumes normal work, a question uses the reply-only lane, and feedback uses
-   the normal ticket run. The `valentin` and `manager-only` labels and an owner
-   assignment remain separate holds on every board and lane.
+   the normal ticket run. A human assignee blocks agent work on every board and
+   lane. The `Hold` and `manager-only` labels independently block work,
+   including human work on Hold.
 6. Keep the ones **assigned to this agent id**, or whose **newest comment
    @mentions it**.
 7. Drop anything already handled. The state key is `<task id>:<newest comment
@@ -775,8 +776,8 @@ Treat this formatting failure separately from infrastructure failures so generic
 blocked-run handling can never send it to a human review lane.
 
 On every tick the runner also backfills QA tickets whose newest comment is that
-agent's verdict and is at least ten minutes old. A ticket labelled `valentin`
-or directly assigned to the board owner is skipped and never moved.
+agent's verdict and is at least ten minutes old. A ticket with any human
+assignee or the `Hold` label is skipped and never moved.
 
 When `RESEARCH_CLI` exists, an agent stuck mid-run can use `agent-advisor
 "<one precise question>"`. It receives the ticket, last ten comments and current

@@ -226,8 +226,14 @@ claim, cooldown, pull request, identity, or comment rules.
 Event and poll pickups share the same claim handshake. The adapter waits a random
 one to five seconds, checks assignees again, assigns the runner, then checks again
 after two seconds. If two agents landed, the lower agent id keeps the ticket and
-the other unassigns itself without commenting. The runner posts `Claimed.` and
-moves to In Progress only after that handshake holds.
+the other unassigns itself without commenting. Any human assignee blocks
+the runner on every board and lane, even when the runner is also assigned or
+directly mentioned. Unassigned tickets remain
+available, and an agent assignment belongs to that agent. The Hold label or an
+owner hold comment blocks all work separately. The board wrapper refuses agent
+claims, comments, moves and label updates on human-owned or Hold tickets.
+The runner posts `Claimed.` and moves to In Progress only after that
+handshake holds.
 
 ## Fleet throughput watch
 

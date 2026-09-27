@@ -506,59 +506,59 @@ print(pattern.sub(replace, text), end="")
 '
 }
 
-# QA moves are fail-closed around the two tickets the product owner reserves:
-# a valentin label or a direct board-owner assignment. Agent-linked assignee
-# rows carry their creator at the top level, so only a row without an agent
-# counts as a direct human assignment.
+# Check every ticket mutation before the writer, including direct model calls.
+REF=""
+case "\${1:-} \${2:-}" in
+  "task assign"|"task move"|"task update"|"comment add") REF="\${3:-}" ;;
+esac
+if [ -n "\$REF" ]; then
+  TASK="\$(hypertask --token "\$TOKEN" --json task get "\$REF" 2>/dev/null)" || TASK=""
+  if ! TASK="\$TASK" REF="\$REF" python3 -c '
+import json, os, sys
+try:
+    doc = json.loads(os.environ["TASK"])
+    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+    sys.exit(0 if str(task.get("ticketNumber") or "").casefold() == os.environ["REF"].casefold() else 1)
+except (IndexError, AttributeError, TypeError, ValueError):
+    sys.exit(1)
+'; then
+    RESPONSE="\$(curl -sS -w '\n%{http_code}' -H "Authorization: Bearer \$TOKEN" \
+      "\${BOARD_API_URL%/}/mcp/tasks?ticket_number=\$REF" 2>/dev/null)" || exit 1
+    [ "\${RESPONSE##*$'\n'}" = 200 ] || exit 1
+    TASK="\${RESPONSE%$'\n'*}"
+  fi
+  PROTECTION="\$(TASK="\$TASK" REF="\$REF" python3 -c '
+import json, os
+try:
+    doc = json.loads(os.environ["TASK"])
+    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
+    if not isinstance(task, dict):
+        raise ValueError
+    if str(task.get("ticketNumber") or "").casefold() != os.environ["REF"].casefold():
+        raise ValueError
+except (IndexError, ValueError, TypeError):
+    print("unverified")
+    raise SystemExit
+labels = {(label.get("name") or label.get("title") or label.get("label") or "")
+          if isinstance(label, dict) else str(label) for label in task.get("labels") or []}
+if "hold" in {str(name).strip().casefold() for name in labels}:
+    print("label Hold")
+elif any(isinstance(who, dict) and not isinstance(who.get("agent"), dict)
+         for who in task.get("assignees") or []):
+    print("human owner")
+else:
+    print("ok")
+')"
+  if [ "\$PROTECTION" != "ok" ]; then
+    _comment_cap_note "ticket write skipped on \$REF: \$PROTECTION"
+    exit 1
+  fi
+fi
+
+# QA moves are fail-closed for human assignees and Hold.
 if [ "\${AGENT_QA_MOVE:-no}" = "yes" ] && [ "\${1:-}" = "task" ] \
    && [ "\${2:-}" = "move" ] && [ -n "\${3:-}" ]; then
   REF="\$3"
-  TASK="\$(hypertask --token "\$TOKEN" --json task get "\$REF" 2>/dev/null || true)"
-  PROJECT_ID="\$(TASK="\$TASK" python3 -c '
-import json, os
-try:
-    doc = json.loads(os.environ["TASK"])
-    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
-    print(task.get("projectId") or task.get("boardId") or "")
-except (IndexError, json.JSONDecodeError, TypeError):
-    pass
-')"
-  PROJECT=""
-  [ -z "\$PROJECT_ID" ] || PROJECT="\$(hypertask --token "\$TOKEN" --json project show "\$PROJECT_ID" 2>/dev/null || true)"
-  PROTECTION="\$(TASK="\$TASK" PROJECT="\$PROJECT" python3 -c '
-import json, os
-try:
-    doc = json.loads(os.environ["TASK"])
-    task = (doc.get("tasks") or [doc.get("task") or doc])[0]
-    project_doc = json.loads(os.environ["PROJECT"])
-    project = project_doc.get("project") if isinstance(project_doc.get("project"), dict) else project_doc
-except (IndexError, json.JSONDecodeError, TypeError):
-    print("unverified")
-    raise SystemExit
-owner = str(project.get("ownerId") or (project.get("owner") or {}).get("id") or "")
-if not owner:
-    print("unverified")
-    raise SystemExit
-labels = set()
-for label in task.get("labels") or []:
-    name = (label.get("name") or label.get("title") or label.get("label") or "") if isinstance(label, dict) else str(label)
-    if name:
-        labels.add(str(name).strip().casefold())
-if "valentin" in labels:
-    print("label valentin")
-    raise SystemExit
-for who in task.get("assignees") or []:
-    if not isinstance(who, dict) or isinstance(who.get("agent"), dict):
-        continue
-    if str(who.get("id") or who.get("userId") or "") == owner:
-        print("board owner assignment")
-        raise SystemExit
-print("ok")
-')"
-  if [ "\$PROTECTION" != "ok" ]; then
-    _comment_cap_note "QA move skipped on \$REF: \$PROTECTION"
-    exit 0
-  fi
   if OUT="\$(hypertask --token "\$TOKEN" "\$@")"; then RC=0; else RC=\$?; fi
   printf '%s\n' "\$OUT"
   if [ "\$RC" -eq 0 ]; then
@@ -999,9 +999,8 @@ for task in json.load(sys.stdin).get("tasks") or []:
             agent_ids.append(str(agent["id"]))
         elif isinstance(who, dict):
             human_id = who.get("id") or who.get("userId")
-            if human_id is not None:
-                human_assignee_ids.append(str(human_id))
-    # Labels decide whether a ticket is open season. A board carries them under
+            human_assignee_ids.append(str(human_id) if human_id is not None else "human")
+    # Labels also carry Hold. A board carries them under
     # several shapes depending on how the task was created, so take the name
     # off whichever one is present and lowercase it once, here.
     labels = []
@@ -1819,6 +1818,9 @@ if task is None:
     raise SystemExit(1)
 for who in task.get("assignees") or []:
     agent = who.get("agent") if isinstance(who, dict) else None
+    if isinstance(who, dict) and not isinstance(agent, dict):
+        print("human owner")
+        break
     if isinstance(agent, dict) and agent.get("id") and str(agent["id"]) != os.environ["AID"]:
         print(str(agent.get("displayName") or agent.get("name") or agent["id"]))
         break
@@ -1874,7 +1876,9 @@ if task is None:
     raise SystemExit(1)
 for who in task.get("assignees") or []:
     agent = who.get("agent") if isinstance(who, dict) else None
-    if isinstance(agent, dict) and agent.get("id"):
+    if isinstance(who, dict) and not isinstance(agent, dict):
+        print("human owner\thuman owner")
+    elif isinstance(agent, dict) and agent.get("id"):
         print("%s\t%s" % (agent["id"], agent.get("displayName") or agent.get("name") or agent["id"]))
 ')" || return 1
   other="$(printf '%s\n' "$assignees" | awk -F '\t' -v aid="$agent_id" '$1 != "" && $1 != aid { print $2; exit }')"
@@ -1896,9 +1900,16 @@ if task is None:
     raise SystemExit(1)
 for who in task.get("assignees") or []:
     agent = who.get("agent") if isinstance(who, dict) else None
-    if isinstance(agent, dict) and agent.get("id"):
+    if isinstance(who, dict) and not isinstance(agent, dict):
+        print("human owner\thuman owner")
+    elif isinstance(agent, dict) and agent.get("id"):
         print("%s\t%s" % (agent["id"], agent.get("displayName") or agent.get("name") or agent["id"]))
 ')" || return 1
+  if printf '%s\n' "$assignees" | awk -F '\t' '$1 == "human owner" { found=1 } END { exit !found }'; then
+    adapter_unassign_task "$board_cli" "$ref" "$agent_id" >/dev/null || return 1
+    printf 'backoff\thuman owner'
+    return 0
+  fi
   printf '%s\n' "$assignees" | awk -F '\t' -v aid="$agent_id" '$1 == aid { found=1 } END { exit !found }' \
     || return 1
   other="$(printf '%s\n' "$assignees" | awk -F '\t' -v aid="$agent_id" '$1 != "" && $1 != aid { print $1; exit }')"
