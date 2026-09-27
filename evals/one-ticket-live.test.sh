@@ -4,6 +4,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
 TMP="$(mktemp -d)"
+export AGENT_IDENTITY_SHIM_DIR="$TMP/identity-shims"
 trap '[ -n "${KEEP_TMP:-}" ] || rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/bin" "$TMP/home/.config/hypertask-agents" "$TMP/company" "$TMP/repo"
 printf 'test\n' > "$TMP/company/INDEX.md"
@@ -356,7 +357,7 @@ elif [[ "$url" == *'/mcp/tasks?'* ]]; then
   task1_assignees='[{"agent":{"id":"agent-1"}}]'
   [ "${BOARD_TEST_SCENARIO:-}" != "human" ] || task1_assignees='[{"agent":{"id":"agent-1"}},{"id":"6","displayName":"Owner"}]'
   task1_labels='[]'
-  [ "${BOARD_TEST_SCENARIO:-}" != "owner-hold" ] || task1_labels='[{"name":"valentin"}]'
+  [ "${BOARD_TEST_SCENARIO:-}" != "owner-hold" ] || task1_labels='[{"name":"hold"}]'
   if [ -n "${UNASSIGNED_MARKER:-}" ] && [ -e "$UNASSIGNED_MARKER" ]; then
     ticket_section='Review'
     task1_assignees='[]'

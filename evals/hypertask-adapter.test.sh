@@ -220,6 +220,26 @@ else
   bad claim-reread-before-assign "status=$claim_status result=$claim_result assigned=$([ -e "$CLAIM_ASSIGNED" ] && echo yes || echo no)"
 fi
 
+CLAIM_ASSIGNED="$TMP/human-claim-assigned"
+set +e
+claim_result="$(
+  sleep() { :; }
+  adapter_assign_task() { touch "$CLAIM_ASSIGNED"; }
+  _ht_get() {
+    printf '%s\n' '{"tasks":[{"ticketNumber":"TEST-1","projectId":15,"assignees":[{"id":88},{"agent":{"id":"agent-a"}}]}]}'
+  }
+  ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 \
+    adapter_claim "$TMP/token" unused 15 TEST-1 agent-a
+)"
+claim_status=$?
+set -e
+if [ "$claim_status" -eq 0 ] && [ "$claim_result" = $'backoff\talready claimed by human owner' ] \
+   && [ ! -e "$CLAIM_ASSIGNED" ]; then
+  ok claim-human-reread 'a human owner blocks claim even when the agent is assigned'
+else
+  bad claim-human-reread "status=$claim_status result=$claim_result assigned=$([ -e "$CLAIM_ASSIGNED" ] && echo yes || echo no)"
+fi
+
 STOP_PAYLOAD="$TMP/stop-payload"
 RUN_PAYLOAD="$STOP_PAYLOAD"
 AGENT_RUN_AGENT=dev-1 AGENT_RUN_PROVIDER=cursor AGENT_RUN_MODEL=gpt-test AGENT_RUN_STARTED_AT=2026-01-01T00:00:00Z \

@@ -61,6 +61,7 @@ case "$args" in
   *' project show '*)
     printf '%s\n' '{"project":{"id":15,"ownerId":6,"sections":[{"name":"Bugs","isIntake":true},{"name":"In Progress"},{"name":"QA"},{"name":"Done"},{"name":"Agent Blocked (Infra)"}]}}'
     ;;
+  *' task get BOARD-HEALTH'*) printf '%s\n' '{"tasks":[{"ticketNumber":"BOARD-HEALTH","projectId":15,"assignees":[],"labels":[]}]}' ;;
   *' task get '*) cat "$MOCK_TASKS" ;;
   *' comment list '*) cat "$MOCK_COMMENTS" ;;
   *' comment add '*)
@@ -271,11 +272,18 @@ else
 fi
 
 run_case Done '[{"name":"valentin"}]' '{"comments":[]}'
-if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
-   && grep -qF 'pickup skipped for TEST-1: label valentin' "$TMP/state/agent-board-poll/qa-runner.log"; then
-  ok qa-valentin-label-skip 'a valentin-labelled ticket is not run or moved'
+if grep -qxF 'move TEST-1 Done' "$TMP/board.log"; then
+  ok legacy-label-not-owner 'the old label alone no longer blocks agent work'
 else
-  bad qa-valentin-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+  bad legacy-label-not-owner "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
+fi
+
+run_case Done '[{"name":"hold"}]' '{"comments":[]}'
+if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
+   && grep -qF 'pickup skipped for TEST-1: label Hold' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-hold-label-skip 'a Hold-labelled ticket is not run or moved'
+else
+  bad qa-hold-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
   HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
@@ -283,7 +291,7 @@ env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
   MOCK_MOVE_FAIL=no MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
   MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" \
   "$ROOT/scripts/agent-board-poll" --once qa-runner >/dev/null 2>&1 || true
-if [ "$(grep -cF 'pickup skipped for TEST-1: label valentin' "$TMP/state/agent-board-poll/qa-runner.log")" -eq 1 ]; then
+if [ "$(grep -cF 'pickup skipped for TEST-1: label Hold' "$TMP/state/agent-board-poll/qa-runner.log")" -eq 1 ]; then
   ok qa-protection-log-daily 'a protected QA ticket logs its skip only once per UTC day'
 else
   bad qa-protection-log-daily "log=$(cat "$TMP/state/agent-board-poll/qa-runner.log")"
@@ -313,15 +321,70 @@ else
   bad dev-manager-only-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 
-run_case Done '[]' '{"comments":[]}' '[{"id":6},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
+run_case Done '[]' '{"comments":[]}' '[{"id":88},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
 if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
-   && grep -qF 'pickup skipped for TEST-1: board owner assignment' "$TMP/state/agent-board-poll/qa-runner.log"; then
-  ok qa-board-owner-skip 'a board-owner-assigned ticket is not run or moved'
+   && grep -qF 'pickup skipped for TEST-1: human owner' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-human-owner-skip 'a human-assigned ticket is not run or moved'
 else
-  bad qa-board-owner-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+  bad qa-human-owner-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 
-run_case Done '[{"name":"valentin"}]' '{"comments":[]}'
+# A human without a label wins even when the agent is assigned and addressed.
+run_case Done '[]' '{"comments":[{"id":18,"createdAt":"2026-09-27T00:00:00Z","userId":6,"text":"<p>Hold this?</p>"}]}' \
+  '[{"id":88},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
+if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
+   && grep -qF 'pickup skipped for TEST-1: human owner' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-human-comment-skip 'a human owner with a comment receives no status, claim, move or verdict'
+else
+  bad qa-human-comment-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+# The model cannot bypass pickup through its board wrapper.
+: > "$TMP/board.log"
+if ! env HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+     MOCK_TASKS="$TMP/tasks.json" MOCK_BOARD_LOG="$TMP/board.log" \
+     "$TMP/board" task assign TEST-1 --assignee agent-qa > "$TMP/wrapper.out" 2>&1 \
+   && ! env HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+     MOCK_TASKS="$TMP/tasks.json" MOCK_BOARD_LOG="$TMP/board.log" \
+     "$TMP/board" task update TEST-1 --labels changed >> "$TMP/wrapper.out" 2>&1 \
+   && ! env HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+     MOCK_TASKS="$TMP/tasks.json" MOCK_BOARD_LOG="$TMP/board.log" \
+     "$TMP/board" comment add TEST-1 --text '<p>Done: test.</p>' >> "$TMP/wrapper.out" 2>&1 \
+   && ! env HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+     MOCK_TASKS="$TMP/tasks.json" MOCK_BOARD_LOG="$TMP/board.log" \
+     "$TMP/board" task move TEST-1 --section Done >> "$TMP/wrapper.out" 2>&1 \
+   && [ ! -s "$TMP/board.log" ] \
+   && [ "$(grep -cF 'human owner' "$TMP/wrapper.out")" -eq 4 ]; then
+  ok wrapper-human-owner-skip 'the board wrapper blocks claim, label, comment, and move on a human ticket'
+else
+  bad wrapper-human-owner-skip "board=$(cat "$TMP/board.log") output=$(cat "$TMP/wrapper.out")"
+fi
+
+python3 - "$TMP/tasks.json" "$TMP/multiple-tasks.json" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+doc["tasks"].insert(0, {"id": "free-1", "ticketNumber": "TEST-2", "assignees": [], "labels": []})
+json.dump(doc, open(sys.argv[2], "w"))
+PYEOF
+if ! env HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+     MOCK_TASKS="$TMP/multiple-tasks.json" MOCK_BOARD_LOG="$TMP/board.log" \
+     "$TMP/board" task move TEST-1 --section Done > "$TMP/multiple.out" 2>&1 \
+   && [ ! -s "$TMP/board.log" ] && grep -qF 'human owner' "$TMP/multiple.out"; then
+  ok wrapper-multiple-tickets 'a safe first row cannot hide a human owner later in the response'
+else
+  bad wrapper-multiple-tickets "board=$(cat "$TMP/board.log") output=$(cat "$TMP/multiple.out")"
+fi
+
+sed -i 's/AGENT_KIND="qa"/AGENT_KIND="dev"/' "$TMP/config/qa-runner.conf"
+run_case Done '[]' '{"comments":[]}' '[{"id":88},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]'
+sed -i 's/AGENT_KIND="dev"/AGENT_KIND="qa"/' "$TMP/config/qa-runner.conf"
+if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
+   && grep -qF 'pickup skipped for TEST-1: human owner' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok dev-human-owner-skip 'a dev lane skips a human owner without a label'
+else
+  bad dev-human-owner-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+
+run_case Done '[{"name":"hold"}]' '{"comments":[]}'
 sed -i 's/AGENT_KIND="qa"/AGENT_KIND="dev"/' "$TMP/config/qa-runner.conf"
 rm -rf "$TMP/state"; mkdir -p "$TMP/state/agent-board-poll"
 : > "$TMP/board.log"; : > "$TMP/model.log"
@@ -333,10 +396,10 @@ env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
   "$ROOT/scripts/agent-board-poll" --once qa-runner > "$TMP/out" 2>&1 || true
 sed -i 's/AGENT_KIND="dev"/AGENT_KIND="qa"/' "$TMP/config/qa-runner.conf"
 if [ ! -s "$TMP/board.log" ] && [ ! -s "$TMP/model.log" ] \
-   && grep -qF 'pickup skipped for TEST-1: label valentin' "$TMP/state/agent-board-poll/qa-runner.log"; then
-  ok dev-valentin-label-skip 'a valentin-labelled ticket is held from a non-QA lane too'
+   && grep -qF 'pickup skipped for TEST-1: label Hold' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok dev-hold-label-skip 'a Hold-labelled ticket is held from a non-QA lane too'
 else
-  bad dev-valentin-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+  bad dev-hold-label-skip "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 
 old="$(date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"

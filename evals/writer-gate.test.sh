@@ -20,6 +20,10 @@ if [ "${1:-} ${2:-} ${3:-}" = "--json project show" ]; then
   printf '%s\n' '{"project":{"ownerId":"owner-1"}}'
   exit 0
 fi
+if [ "${1:-} ${2:-}" = "--json task" ] && [ "${3:-}" = get ]; then
+  printf '{"task":{"id":"task-1","ticketNumber":"%s","assignees":[],"labels":[]}}\n' "$4"
+  exit 0
+fi
 if [ "${1:-} ${2:-} ${3:-}" = "--json comment list" ]; then
   printf '%s\n' '{"comments":[]}'
   exit 0

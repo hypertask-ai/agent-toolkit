@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Comment-loop checks use local command stubs and never call a board or model.
 set -euo pipefail
+unset AGENT_ORIGINAL_PATH AGENT_IDENTITY_PATH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
@@ -66,6 +67,7 @@ chmod +x "$TMP/bin/"*
 cat > "$TMP/tasks.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","section":"Review","title":"Loop guard","description":"Check activity","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":2,"updatedAt":"2026-01-01T00:01:00Z"}]}
 EOF
+export TASKS_JSON="$TMP/tasks.json"
 cat > "$TMP/home/.config/agents/test.conf" <<EOF
 AGENT_ID="agent-1"
 AGENT_NAME="Test Bot"
@@ -270,6 +272,10 @@ fi
 
 # shellcheck disable=SC1090
 . "$ROOT/adapters/hypertask/adapter.sh"
+cat > "$TMP/mechanical-tasks.json" <<'EOF'
+{"tasks":[{"id":"task-1","ticketNumber":"TEST-1","assignees":[{"agent":{"id":"agent-1"}}],"labels":[]},{"id":"task-2","ticketNumber":"TEST-2","assignees":[],"labels":[]},{"id":"task-3","ticketNumber":"TEST-3","assignees":[],"labels":[]}]}
+EOF
+export TASKS_JSON="$TMP/mechanical-tasks.json"
 printf '{"comments":[]}\n' > "$TMP/mechanical-comments.json"
 MECH_COMMENTS="$TMP/mechanical-comments.json"
 MECH_POSTS="$TMP/mechanical-posts"

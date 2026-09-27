@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Queue-ranking checks use local command stubs and never call a board or model.
 set -euo pipefail
+unset AGENT_ORIGINAL_PATH AGENT_IDENTITY_PATH
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"

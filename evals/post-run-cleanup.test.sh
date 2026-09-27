@@ -94,6 +94,7 @@ cat > "$TMP/bin/hypertask" <<'EOF'
 #!/usr/bin/env bash
 args=" $* "
 case "$args" in
+  *' task get AGTE-999'*) printf '{"task":{"id":"alarm-1","ticketNumber":"AGTE-999","assignees":[],"labels":[]}}\n' ;;
   *' task get '*) cat "$MOCK_TASKS" ;;
   *' comment list '*) printf '{"comments":[]}\n' ;;
   *' task create '*)

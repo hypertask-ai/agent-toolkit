@@ -1910,18 +1910,17 @@ for line in sys.stdin:
 }
 
 qa_protection_reason() {
-  local row="$1" board="$2" owner
-  owner="$(qa_config_field "$board" owner_id)"
-  printf '%s' "$row" | OWNER="$owner" python3 -c '
-import json, os, sys
+  local row="$1" board="$2"
+  printf '%s' "$row" | python3 -c '
+import json, sys
 row = json.load(sys.stdin)
 labels = {str(value).strip().casefold() for value in row.get("labels") or []}
-if "manager-only" in labels:
+if row.get("human_assignee_ids"):
+    print("human owner")
+elif "hold" in labels:
+    print("label Hold")
+elif "manager-only" in labels:
     print("label manager-only")
-elif "valentin" in labels:
-    print("label valentin")
-elif os.environ["OWNER"] and os.environ["OWNER"] in {str(value) for value in row.get("human_assignee_ids") or []}:
-    print("board owner assignment")
 '
 }
 
@@ -3135,7 +3134,7 @@ raise SystemExit(0 if only_guard else 1)
     gate_hold_reason="ticket is in $gate_section"
   elif [ -n "$gate_humans" ]; then
     gate_hold_reason="ticket has a human assignee"
-  elif [[ "$gate_labels" == *,valentin,* ]] || [ "${gate_owner_state:-}" = "hold" ]; then
+  elif [[ "$gate_labels" == *,hold,* ]] || [ "${gate_owner_state:-}" = "hold" ]; then
     gate_hold_reason="ticket is held by the owner"
   fi
   if [ -n "$gate_hold_reason" ]; then
@@ -3409,6 +3408,12 @@ print("yes" if json.load(sys.stdin).get("assignee_count", 1) == 0 else "no")')"
   # the follow-up reads go, not the first entry in the conf.
   board="$(row_field "$row" board)"
   [ -n "$board" ] || board="${BOARD_ID%%,*}"
+  qa_protection="$(qa_protection_reason "$row" "$board")"
+  if [ -n "$qa_protection" ]; then
+    explain "skip  $ref: $qa_protection"
+    log_once_per_day "$SLUG-$board-$ref-owner-protected" "pickup skipped for $ref: $qa_protection"
+    continue
+  fi
 
   # The addressed comment may come from the board cursor scan rather than be
   # the ticket's newest comment. Preserve that exact human question or mention
@@ -3717,15 +3722,6 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
 
   if [ "$GITHUB_PAUSED" = "yes" ] && [ "$is_reply_only" = "no" ]; then
     explain "skip  $ref: GitHub is paused, so only board-only work can run"
-    continue
-  fi
-
-  # Reserved owner tickets never enter agent work, on any lane. The same guard
-  # also runs in the board wrapper so a model cannot bypass it with a move.
-  qa_protection="$(qa_protection_reason "$row" "$board")"
-  if [ -n "$qa_protection" ]; then
-    explain "skip  $ref: owner hold ($qa_protection)"
-    log_once_per_day "$SLUG-$board-$ref-owner-protected" "pickup skipped for $ref: $qa_protection"
     continue
   fi
 
@@ -4096,7 +4092,7 @@ QA VERDICT CONTRACT:
 - FAIL: post exactly one \`Handoff:\` comment whose single line names the failing step, then move $ref to \`$qa_fail_target\`. The runner clears every assignee.
 - CANNOT TEST: post exactly one \`Question:\` comment naming what is needed, then ${qa_blocked_target:+move $ref to \`$qa_blocked_target\`}${qa_blocked_target:-leave it in place because this board has no manager review column}.
 - Never use \`Decision:\` for a QA verdict. Never post more than one verdict comment.
-- Never move a ticket labelled \`valentin\` or directly assigned to the board owner.
+- Never work on a ticket with a human assignee or the Hold label.
 
 A successful process must finish the comment and move before it exits. If you
 post the verdict but miss the move, the runner applies the move from the marker."
