@@ -1297,7 +1297,22 @@ PYEOF
 }
 
 move_ticket_or_report() {
-  local ref="$1" section="$2" board="$3" context="$4"
+  local ref="$1" section="$2" board="$3" context="$4" qa_verdict
+  if [ "$AGENT_KIND" = dev ] && [ "${VERDICT_FINAL:-no}" = yes ] \
+     && [ "${section,,}" != "${IN_PROGRESS_SECTION,,}" ]; then
+    qa_verdict="$(adapter_latest_qa_verdict "$TOKEN_FILE" "$task_id" "$board" "$(adapter_qa_agent_ids)" 2>>"$LOG")" || return 1
+    if [ "$qa_verdict" = fail ]; then
+      local current
+      current="$(adapter_current_section "$BOARD_CLI" "$ref" 2>>"$LOG")" || return 1
+      if [ "${current,,}" = "${DONE_SECTION,,}" ] \
+         || [ "${current,,}" = "${REVIEW_SECTION,,}" ]; then
+        adapter_move_task "$BOARD_CLI" "$ref" "$origin_section" >>"$LOG" 2>&1 || return 1
+        current="$origin_section"
+      fi
+      log "$context left $ref in ${current:-$origin_section}: QA FAIL is final until a new verdict"
+      return 0
+    fi
+  fi
   if adapter_move_task "$BOARD_CLI" "$ref" "$section" >>"$LOG" 2>&1; then
     log "$context moved $ref to $section"
     return 0
@@ -3387,6 +3402,11 @@ while IFS= read -r row; do
     continue
   fi
   trigger="$(row_field "$row" trigger)"
+  if [ "${FEATURE_FREEZE:-no}" = yes ] \
+     && ROW="$row" python3 -c 'import json,os,sys; r=json.loads(os.environ["ROW"]); sys.exit(0 if str(r.get("section") or "").casefold() == "features" or "feature" in [str(x).casefold() for x in r.get("labels") or []] else 1)'; then
+    log "skip $ref: feature freeze"
+    continue
+  fi
   is_pr_fix="no"
   [ "$trigger" = "pr_fix" ] && is_pr_fix="yes"
   if [ "$is_pr_fix" = "no" ] \
@@ -3816,7 +3836,7 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     why="$ref owns PR #$PR_GATE_NUMBER and its current feedback requires a fix"
   elif declare -F adapter_pick_rank >/dev/null 2>&1; then
     verdict="$(adapter_pick_rank "$TOKEN_FILE" "$board" "$AGENT_ID" "$AGENT_NAME" \
-                 "$ref" "$task_id" "$section" "$reason" 2>>"$LOG")" || verdict=""
+                 "$ref" "$task_id" "$section" "$reason" "$row" 2>>"$LOG")" || verdict=""
     if [ -n "$verdict" ]; then
       rank="${verdict%% *}"
       why="${verdict#* }"
@@ -5008,8 +5028,22 @@ ${qa_comment:-No ticket comment was posted.}"
       post_ticket_comment "$ref" text "$quota_wait_comment" || log "provider reset wait comment failed for $ref"
       move_ticket_or_report "$ref" "$origin_section" "$board" "provider reset wait" || true
     elif [ "$merged_pr_outcome" = "yes" ]; then
+      merged_target="$DONE_SECTION"
+      qa_verdict=""
+      if [ "$AGENT_KIND" = dev ] && { [ "${REQUIRE_QA_VERDICT:-no}" = yes ] || [ "${VERDICT_FINAL:-no}" = yes ]; }; then
+        qa_verdict="$(adapter_latest_qa_verdict "$TOKEN_FILE" "$task_id" "$board" "$(adapter_qa_agent_ids)" 2>>"$LOG")" || qa_verdict="unknown"
+        if [ "${VERDICT_FINAL:-no}" = yes ] && [ "$qa_verdict" = fail ]; then
+          merged_target="$IN_PROGRESS_SECTION"
+        elif [ "${REQUIRE_QA_VERDICT:-no}" = yes ] && [ "$qa_verdict" != pass ]; then
+          merged_target="QA"
+        fi
+      fi
       run_record_status="done"
-      if ! move_ticket_or_report "$ref" "$DONE_SECTION" "$board" "merged PR outcome"; then
+      [ "$merged_target" = "$DONE_SECTION" ] || run_record_status="review"
+      if [ "$qa_verdict" = unknown ]; then
+        rc=74
+        run_record_status="move-failed"
+      elif ! move_ticket_or_report "$ref" "$merged_target" "$board" "merged PR outcome"; then
         rc=74
         run_record_status="move-failed"
       fi
