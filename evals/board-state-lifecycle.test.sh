@@ -273,7 +273,7 @@ if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]
    && grep -qF 'run done AGTE-168 exit=0' "$TMP/state/agent-board-poll/dev.log"; then
   echo 'PASS merged-pr-comment-rewrite          a refused closing comment is linked and the merged PR finishes the run'
 else
-  echo "FAIL merged-pr-comment-rewrite          task=$(cat "$TMP/tasks.json") record=$(cat "$merged_record" 2>/dev/null) board=$(cat "$TMP/board.log") log=$(tail -n 30 "$TMP/state/agent-board-poll/dev.log") output=$(cat "$TMP/merged-comment.out")"; exit 1
+  echo "FAIL merged-pr-comment-rewrite          task=$(cat "$TMP/tasks.json") record=$(cat "$merged_record" 2>/dev/null) board=$(cat "$TMP/board.log") output=$(cat "$TMP/merged-comment.out")"; exit 1
 fi
 
 reset_case
