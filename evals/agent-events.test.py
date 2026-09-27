@@ -122,9 +122,14 @@ with tempfile.TemporaryDirectory() as temporary:
     paused_audit = io.StringIO()
     with contextlib.redirect_stdout(paused_audit):
         assert module.audit_all(json_output=True) == 0
+    assert json.loads(paused_audit.getvalue())["foreign_webhooks"] == [{
+        "agent": "foreign-agent",
+        "url": "https://retired.example/webhook",
+        "host": "retired.example",
+    }]
+    with contextlib.redirect_stdout(io.StringIO()):
         assert module.reconcile_all() == 0
-    assert json.loads(paused_audit.getvalue())["foreign_webhooks"] == []
-    assert len(configure_calls) == 2
+    assert len(configure_calls) == 3
     subprocess.run([root / "scripts/agent-resume", "foreign-agent"], check=True)
     with contextlib.redirect_stdout(io.StringIO()):
         assert module.audit_all(json_output=True) == 0
@@ -196,6 +201,26 @@ with tempfile.TemporaryDirectory() as temporary:
             assert response.status == 202
             assert json.load(response) == {"status": "paused"}
         assert module.read_queue("test-agent") == []
+        dropped = dict(payload, deliveryId="delivery-paused", ticketNumber="AGTE-40")
+        dropped_raw = json.dumps(dropped, separators=(",", ":")).encode()
+        dropped_signature = "sha256=" + hmac.new(
+            secret.encode(), timestamp.encode() + b"." + dropped_raw, hashlib.sha256
+        ).hexdigest()
+        paused_request = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_port}/webhook/hypertask",
+            data=dropped_raw, method="POST",
+            headers={
+                "X-Hypertask-Timestamp": timestamp,
+                "X-Hypertask-Signature": dropped_signature,
+                "X-Hypertask-Event": "task.assigned",
+                "X-Hypertask-Delivery": "delivery-paused",
+            },
+        )
+        with urllib.request.urlopen(paused_request, timeout=5) as response:
+            assert response.status == 202
+            assert json.load(response) == {"status": "paused"}
+        assert module.read_queue("test-agent") == []
+        assert "delivery-paused" not in (state / "test-agent.handled").read_text()
         backlog = dict(payload, deliveryId="delivery-backlog", ticketNumber="AGTE-39")
         module.write_queue("test-agent", [backlog])
         module.wake.set()

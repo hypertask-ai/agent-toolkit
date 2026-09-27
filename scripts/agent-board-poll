@@ -69,7 +69,7 @@ CONF="$(core_find_conf "$SLUG")" || die \
   "run create-agent.sh --name \"<Name>\" --wiring poll to create one, or check the slug"
 unset PAUSED
 core_read_conf "$CONF"
-if [ "${PAUSED:-}" = "yes" ]; then
+if core_is_paused "${PAUSED:-}" "$SLUG"; then
   CORE_STATE_NAME="agent-board-poll"
   STATE_DIR="$(core_state_dir)"
   mkdir -p "$STATE_DIR"

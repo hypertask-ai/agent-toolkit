@@ -54,5 +54,47 @@ if "$ROOT/scripts/agent-board-poll" --ticket AGTE-38 test-agent > "$TMP/out" 2>&
 elif grep -q 'has no AGENT_ID' "$TMP/out"; then
   ok non-yes-default
 else bad non-yes-default; fi
+# Every paused spelling must stop the poll before required-key validation.
+for value in YES TrUe 1 ON unexpected '   '; do
+  printf 'PAUSED=%q\n' "$value" > "$conf"
+  if "$ROOT/scripts/agent-board-poll" --once test-agent > "$TMP/out" 2>&1 \
+     && grep -q ' paused$' "$XDG_STATE_HOME/agent-board-poll/test-agent.log"; then
+    ok "pause-value-${value// /space}"
+  else bad "pause-value-${value// /space}"; fi
+  if [ "$value" = unexpected ] && grep -q 'WARNING:.*unrecognized PAUSED' "$TMP/out"; then
+    ok pause-unknown-warns
+  elif [ "$value" = unexpected ]; then bad pause-unknown-warns; fi
+done
+for value in NO FaLsE 0 OFF ''; do
+  printf 'PAUSED=%q\n' "$value" > "$conf"
+  if "$ROOT/scripts/agent-board-poll" --once test-agent > "$TMP/out" 2>&1; then
+    bad "running-value-${value:-empty}"
+  elif grep -q 'has no AGENT_ID' "$TMP/out"; then
+    ok "running-value-${value:-empty}"
+  else bad "running-value-${value:-empty}"; fi
+done
+printf 'BOARD_ADAPTER=hypertask\nPAUSED=on\n' > "$conf"
+if "$ROOT/scripts/agent-board-reconcile" --config-dir "$AGENT_CONFIG_DIR" \
+    --state-dir "$TMP/reconcile" > "$TMP/out" 2>&1; then
+  ok paused-reconcile-skips-conf
+else bad paused-reconcile-skips-conf; fi
+if [ "$(stat -c %a "$conf.lock")" = 600 ]; then ok pause-lock-private; else bad pause-lock-private; fi
+if python3 - "$conf" "$ROOT/scripts/agent-resume" <<'PYEOF'
+import fcntl
+import subprocess
+import sys
+
+with open(sys.argv[1]) as conf:
+    fcntl.flock(conf, fcntl.LOCK_EX)
+    process = subprocess.Popen([sys.argv[2], "test-agent"])
+    try:
+        process.wait(timeout=0.2)
+        raise AssertionError("resume did not wait for conf lock")
+    except subprocess.TimeoutExpired:
+        pass
+    fcntl.flock(conf, fcntl.LOCK_UN)
+    assert process.wait(timeout=5) == 0
+PYEOF
+then ok pause-conf-flock; else bad pause-conf-flock; fi
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

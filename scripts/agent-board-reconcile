@@ -152,11 +152,12 @@ done < "$DIRECT_REPOS"
 
 for conf in "${CONF_FILES[@]}"; do
   (
-    unset AGENT_ID AGENT_NAME AGENT_SLUG AGENT_KIND AGENT_ROLE ROLE BOARD_ADAPTER BOARD_ID BOARD_CLI TOKEN_FILE PR_REPO PR_BRANCH_PREFIX GH_LOGIN GITHUB_LOGIN DONE_SECTION QA_SECTION
+    unset AGENT_ID AGENT_NAME AGENT_SLUG AGENT_KIND AGENT_ROLE ROLE BOARD_ADAPTER BOARD_ID BOARD_CLI TOKEN_FILE PR_REPO PR_BRANCH_PREFIX GH_LOGIN GITHUB_LOGIN DONE_SECTION QA_SECTION PAUSED
     # shellcheck disable=SC1090
     . "$conf"
     [ "${BOARD_ADAPTER:-}" = "hypertask" ] || exit 0
     slug="${AGENT_SLUG:-$(basename "$conf" .conf)}"
+    if core_is_paused "${PAUSED:-}" "$slug"; then exit 0; fi
     : "${AGENT_ID:?missing AGENT_ID in $conf}" "${BOARD_ID:?missing BOARD_ID in $conf}"
     : "${BOARD_CLI:?missing BOARD_CLI in $conf}" "${TOKEN_FILE:?missing TOKEN_FILE in $conf}"
     IN_PROGRESS_SECTION="${IN_PROGRESS_SECTION:-In Progress}"

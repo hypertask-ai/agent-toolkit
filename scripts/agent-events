@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config_files import config_files
+from config_files import config_files, is_paused
 from typing import Any
 
 MAX_BODY = 1024 * 1024
@@ -105,8 +105,6 @@ def foreign_webhooks(deactivate: bool = False) -> tuple[list[dict[str, str]], li
     violations: list[dict[str, str]] = []
     errors: list[str] = []
     for path, values in agent_rows():
-        if values.get("PAUSED") == "yes":
-            continue
         adapter = values.get("BOARD_ADAPTER", "")
         if adapter and adapter != "hypertask":
             continue
@@ -396,7 +394,7 @@ def dispatch() -> None:
         launched = False
         with queue_lock:
             for path, values in agent_rows(events_only=True):
-                if values.get("PAUSED") == "yes":
+                if is_paused(values.get("PAUSED"), values.get("AGENT_SLUG") or path.stem):
                     continue
                 slug = values.get("AGENT_SLUG") or path.stem
                 try:
@@ -500,7 +498,7 @@ class EventHandler(BaseHTTPRequestHandler):
         if not fresh or not hmac.compare_digest(signature, expected):
             self.reply(401, "invalid signature")
             return
-        if values.get("PAUSED") == "yes":
+        if is_paused(values.get("PAUSED"), slug):
             self.reply(202, "paused")
             return
         boards = {item.strip() for item in values.get("BOARD_ID", "").split(",") if item.strip()}
