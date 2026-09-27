@@ -446,12 +446,16 @@ gate filters those rows to open PRs before ownership and labels are evaluated. A
 pull request labelled `valentin-review` becomes a protected wait only while it is
 open. The runner disables GitHub native auto-merge and does not review, modify,
 close, or merge it. Moving its ticket to `Valentin Review` or `HT Manager Review`
-disables auto-merge too. The runner restores auto-merge only after the label and
-review-lane hold are gone. The runner command shim refuses manual merges and
-checks the label before any other pull request mutation. A GitHub rate-limit
-response records its `X-RateLimit-Reset` time for the repository. Until then,
-each tick logs `GitHub paused until HH:MM`, runs board reconciliation and comment
-replies, skips code and pull request work, and exits 75.
+disables auto-merge too. The PR stays bound but does not use a pickup slot or
+block a new claim while its ticket waits in either lane. When the ticket leaves
+the lane, its PR gets the first turn ahead of new tickets, even if it spent
+more than two hours in review. The runner restores auto-merge only after the
+label and review-lane hold are gone.
+The runner command shim refuses manual merges and checks the label before any
+other pull request mutation. A GitHub rate-limit response records its
+`X-RateLimit-Reset` time for the repository. Until then, each tick logs
+`GitHub paused until HH:MM`, runs board reconciliation and comment replies,
+skips code and pull request work, and exits 75.
 
 Ownership is proved only when a branch starts with the agent slug, directly or
 after `agent/` (case-insensitive), by `<slug>.opened-prs`, or by an explicitly

@@ -1,0 +1,1 @@
+- AGTE-152 keeps pull requests bound without consuming pickup slots while their tickets wait in Valentin Review or HT Manager Review, then restores PR-first work when review ends.

@@ -361,8 +361,14 @@ elif [[ "$url" == *'/mcp/tasks?'* ]]; then
     ticket_section='Review'
     task1_assignees='[]'
   fi
+  extra_tasks=''
+  if [ "${PR_TEST_SCENARIO:-}" = two-green ]; then
+    review_first_section='Bugs'
+    [ "${BOARD_TEST_SCENARIO:-}" != review-first ] || review_first_section='Valentin Review'
+    extra_tasks="{\"id\":\"task-9\",\"ticketNumber\":\"HTPR-9\",\"projectId\":\"15\",\"section\":\"$review_first_section\",\"assignees\":[{\"agent\":{\"id\":\"agent-1\"}}]},{\"id\":\"task-10\",\"ticketNumber\":\"HTPR-10\",\"projectId\":\"15\",\"section\":\"Bugs\",\"assignees\":[{\"agent\":{\"id\":\"agent-1\"}}]},"
+  fi
   cat <<JSON
-{"tasks":[{"id":"task-1","ticketNumber":"HTPR-1","projectId":"15","section":"$ticket_section","title":"PR ticket","description":"fix it","assignees":$task1_assignees,"labels":$task1_labels,"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0},{"id":"task-5","ticketNumber":"HTPR-5","section":"Bugs","title":"Legacy branch ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
+{"tasks":[${extra_tasks}{"id":"task-1","ticketNumber":"HTPR-1","projectId":"15","section":"$ticket_section","title":"PR ticket","description":"fix it","assignees":$task1_assignees,"labels":$task1_labels,"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0},{"id":"task-5","ticketNumber":"HTPR-5","section":"Bugs","title":"Legacy branch ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
 JSON
 elif [[ "$url" == *'task_id=task-1'* ]] \
      && [ -e "${MODEL_OPEN_MARKER:-/no-marker}" ]; then
@@ -489,7 +495,7 @@ echo 'PASS pending PR remains bound without inventing work'
 : > "$TMP/gh-calls"
 protected="$(GH_CALL_LOG="$TMP/gh-calls" PR_AUTO_MERGE_ENABLED=yes run_gate valentin-review)"
 [[ "$protected" == *'"action": "wait"'* && "$protected" == *'"state": "protected"'* ]]
-[[ "$protected" == *'label valentin-review'* ]]
+[[ "$protected" == *'label valentin-review'* && "$protected" == *'"blocks_pickup": true'* ]]
 grep -qF 'pr view 14 --repo example/repo --json state,autoMergeRequest' "$TMP/gh-calls"
 grep -qF 'pr merge --repo example/repo --disable-auto 14' "$TMP/gh-calls"
 ! grep -qE '/comments|/compare|/deployments' "$TMP/gh-calls"
@@ -500,9 +506,19 @@ for review_section in 'Valentin Review' 'HT Manager Review'; do
   section_hold="$(GH_CALL_LOG="$TMP/gh-calls" PR_AUTO_MERGE_ENABLED=yes \
     API_TASK_SECTION="$review_section" run_gate "section-${review_section// /-}")"
   [[ "$section_hold" == *'"state": "protected"'* && "$section_hold" == *"ticket is in $review_section"* ]]
+  [[ "$section_hold" == *'"pickup_slot": false'* && "$section_hold" == *'"blocks_pickup": false'* ]]
   grep -qF 'pr merge --repo example/repo --disable-auto 1' "$TMP/gh-calls"
+  : > "$TMP/gh-calls"
+  rm -rf "$TMP/cache-section-${review_section// /-}-dev-1/pr-cache"
+  resumed="$(GH_CALL_LOG="$TMP/gh-calls" API_TASK_SECTION=Bugs run_gate "section-${review_section// /-}")"
+  [[ "$resumed" == *'"state": "pending"'* && "$resumed" == *'"blocks_pickup": true'* ]]
+  grep -qF 'pr merge --repo example/repo --auto --squash 1' "$TMP/gh-calls"
 done
-echo 'PASS human-review ticket lanes disable native auto-merge without a PR label'
+echo 'PASS both human-review lanes retain PR ownership without a pickup slot and restore the gate on exit'
+
+labelled_lane="$(PR_LABEL_OVERRIDE=valentin-review API_TASK_SECTION='Valentin Review' run_gate labelled-lane)"
+[[ "$labelled_lane" == *'"pickup_slot": false'* && "$labelled_lane" == *'"blocks_pickup": false'* ]]
+echo 'PASS a PR label does not consume a pickup slot while its ticket awaits human review'
 
 : > "$TMP/gh-calls"
 GH_CALL_LOG="$TMP/gh-calls" PR_LABEL_OVERRIDE=valentin-review PR_AUTO_MERGE_ENABLED=yes \
@@ -550,6 +566,16 @@ assert result["wait_reason"] == "red: ci-tests, revert-guard, pr-title"
 assert result["pickup_slot"] is False and result["unfixable"] is True
 PYEOF
 echo 'PASS a red PR older than two hours stays reportable without blocking pickup'
+
+for review_section in 'Valentin Review' 'HT Manager Review'; do
+  held_old="$(API_TASK_SECTION="$review_section" run_gate stale-red)"
+  [[ "$held_old" == *'"state": "protected"'* && "$held_old" == *'"pickup_slot": false'* ]]
+  rm -rf "$TMP/cache-stale-red-dev-1/pr-cache"
+  resumed_old="$(API_TASK_SECTION=Bugs run_gate stale-red)"
+  [[ "$resumed_old" == *'"action": "fix"'* && "$resumed_old" == *'"blocks_pickup": true'* ]]
+  [[ -z "$(API_TASK_SECTION=Bugs run_gate stale-red)" ]]
+done
+echo 'PASS old red PRs receive a repair turn when either human-review lane releases them'
 
 for merged_scenario in undeployed deployed fallback qa-fail qa-passed base-missing; do
   [[ -z "$(run_gate "$merged_scenario")" ]]
@@ -775,6 +801,21 @@ two_green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-two_green_run" PR_TEST_SC
 [[ "$two_green_run" == *'bound to PR #9 (awaiting-review); no new ticket was ranked.'* ]]
 [[ "$two_green_run" != *'would pick up'* ]]
 echo 'PASS two green PRs fill both pickup slots'
+
+rm -rf "$state/pr-live-cache"
+review_and_green="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-review-and-green" PR_TEST_SCENARIO=two-green BOARD_TEST_SCENARIO=review-first HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$review_and_green" == *'would pick up HTPR-2'* && "$review_and_green" != *'no new ticket was ranked'* ]]
+echo 'PASS a held PR plus a green PR leaves room for new work'
+
+for review_section in 'Valentin Review' 'HT Manager Review'; do
+  rm -rf "$state/pr-live-cache"
+  review_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-review-${review_section// /-}" PR_TEST_SCENARIO=pending API_TASK_SECTION="$review_section" BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+  [[ "$review_run" == *'would pick up HTPR-2'* && "$review_run" != *'no new ticket was ranked'* ]]
+  rm -rf "$state/pr-live-cache"
+  resumed_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-resumed-${review_section// /-}" PR_TEST_SCENARIO=red API_TASK_SECTION=Bugs BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+  [[ "$resumed_run" == *'would run a structured fix round for PR #1; no new ticket was ranked.'* && "$resumed_run" != *'would pick up HTPR-2'* ]]
+done
+echo 'PASS leaving either human-review lane puts its PR ahead of new work'
 
 rm -rf "$state/pr-live-cache"
 stale_red_green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-stale_red_green_run" PR_TEST_SCENARIO=stale-red-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"

@@ -396,7 +396,9 @@ stores every open PR plus merges from the last 48 hours without PR bodies. The
 binding gate filters this cache to open PRs before ownership or labels can bind
 an agent. A `valentin-review` label makes an open PR manager-only. The runner
 disables GitHub native auto-merge and starts no fix. Moving the linked ticket to
-`Valentin Review` or `HT Manager Review` also disables auto-merge. The runner
+`Valentin Review` or `HT Manager Review` also disables auto-merge. Its PR
+remains bound, but uses no pickup slot while the ticket waits there. Leaving
+either lane resumes the PR ahead of new work when it needs attention. The runner
 restores auto-merge only after the label and review-lane hold are gone. Its
 command shim rejects manual merges and checks the label before any other allowed
 PR mutation. When GitHub reports a rate limit, all runners use its
@@ -404,11 +406,11 @@ PR mutation. When GitHub reports a rate limit, all runners use its
 paused until HH:MM`, completes board reconciliation and comment replies, skips
 code and pull request work, and exits 75.
 
-Two open PRs fill the pickup slots and stop every new claim, including an
-`emergency`. The runner ranks that queue oldest first. A red or pending PR older
-than two hours no longer uses a slot because another run has not made it
-fixable; it remains monitored and is reported on Board health. One green open
-PR never stops a new pickup. An open PR whose ticket is
+Two open PRs outside human review lanes fill the pickup slots and stop every
+new claim, including an `emergency`. The runner ranks that queue oldest first.
+A red or pending PR older than two hours no longer uses a slot because another
+run has not made it fixable; it remains monitored and is reported on Board
+health. One green open PR never stops a new pickup. An open PR whose ticket is
 unassigned or assigned to no active agent blocks nobody unless branch or run
 state identifies an owner. The first tick each UTC day logs `orphaned PR #<n>
 (<branch>) has no owning agent` for supervisor follow-up.
