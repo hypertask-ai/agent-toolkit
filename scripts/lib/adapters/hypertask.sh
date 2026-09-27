@@ -189,7 +189,7 @@ try:
     previous = {str(row.get("number")): row for row in json.load(open(os.environ["MONITOR"], encoding="utf-8"))}
 except (OSError, ValueError):
     previous = {}
-human_review = {"valentin review", "ht manager review"}
+human_review = {"valentin review", "ht manager review", "supervisor review"}
 for row in rows:
     prior = previous.get(str(row.get("number")), {})
     resumed = (str(prior.get("ticket_section") or "").strip().casefold() in human_review
@@ -322,7 +322,8 @@ if match:
     print(match)
     raise SystemExit
 if wanted.casefold() == "review":
-    manager = next((name for name in names if name.casefold() == "ht manager review"), None)
+    manager = next((name for preferred in ("supervisor review", "ht manager review")
+                    for name in names if name.casefold() == preferred), None)
     if manager:
         print(manager)
         raise SystemExit

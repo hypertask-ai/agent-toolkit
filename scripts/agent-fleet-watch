@@ -227,7 +227,7 @@ def intake_sections(config_dir: Path, root: Path, agents: list[dict[str, Any]], 
             continue
         derived: set[str] = set()
         excluded = {"in progress", "ai review", "review", "qa", "done", "archive",
-                    "agent blocked (infra)", "ht manager review", "valentin review"}
+                    "agent blocked (infra)", "ht manager review", "supervisor review", "valentin review"}
         for agent in agents:
             if board not in agent["boards"] or agent["kind"] in {"qa", "answer", "manager"}:
                 continue
