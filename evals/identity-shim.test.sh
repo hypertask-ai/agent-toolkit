@@ -89,6 +89,16 @@ else
 fi
 gh pr merge --repo example/repo --auto --squash 7 >/dev/null
 GH_PR_LABEL=valentin-review gh pr merge --repo example/repo --disable-auto 7 >/dev/null
+if gh repo edit example/repo --enable-auto-merge > /dev/null 2> "$REPO_AUTOMERGE_ERROR"; then
+  printf '0\n' > "$REPO_AUTOMERGE_RC"
+else
+  printf '%s\n' "$?" > "$REPO_AUTOMERGE_RC"
+fi
+if gh api graphql -f 'query=mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }' > /dev/null 2> "$GRAPHQL_AUTOMERGE_ERROR"; then
+  printf '0\n' > "$GRAPHQL_AUTOMERGE_RC"
+else
+  printf '%s\n' "$?" > "$GRAPHQL_AUTOMERGE_RC"
+fi
 if gh api -X PUT repos/example/repo/pulls/7/merge > /dev/null 2> "$API_MERGE_ERROR"; then
   printf '0\n' > "$API_MERGE_RC"
 else
@@ -161,6 +171,8 @@ run_poll() {
     RESOLVED_CAPTURE="$TMP/resolved" TOKEN_CAPTURE="$TMP/received-token" \
     GH_CAPTURE="$TMP/gh-calls" GH_LABEL_BODY="$TMP/gh-label-body" \
     PR_CREATE_OUTPUT="$TMP/pr-create-output" PR_OWNERSHIP_CAPTURE="$TMP/pr-ownership" \
+    REPO_AUTOMERGE_RC="$TMP/repo-automerge.rc" REPO_AUTOMERGE_ERROR="$TMP/repo-automerge.error" \
+    GRAPHQL_AUTOMERGE_RC="$TMP/graphql-automerge.rc" GRAPHQL_AUTOMERGE_ERROR="$TMP/graphql-automerge.error" \
     MANUAL_MERGE_RC="$TMP/manual-merge.rc" \
     MANUAL_MERGE_ERROR="$TMP/manual-merge.error" API_MERGE_RC="$TMP/api-merge.rc" \
     API_MERGE_ERROR="$TMP/api-merge.error" GRAPHQL_MERGE_RC="$TMP/graphql-merge.rc" \
@@ -221,20 +233,21 @@ else
   bad identity-shim-pr-ownership "opened-prs=$(cat "$TMP/pr-ownership" 2>/dev/null || true)"
 fi
 
-if [ "$(cat "$TMP/manual-merge.rc")" -ne 0 ] \
+if [ "$(cat "$TMP/manual-merge.rc")" -eq 0 ] \
    && [ "$(cat "$TMP/api-merge.rc")" -ne 0 ] \
+   && [ "$(cat "$TMP/repo-automerge.rc")" -eq 0 ] \
+   && [ "$(cat "$TMP/graphql-automerge.rc")" -ne 0 ] \
+   && grep -qF 'auto-merge disabled by policy' "$TMP/repo-automerge.error" \
    && [ "$(cat "$TMP/graphql-merge.rc")" -ne 0 ] \
-   && grep -qF 'runners never merge pull requests by hand' "$TMP/manual-merge.error" \
-   && grep -qF 'runners never merge pull requests by hand' "$TMP/api-merge.error" \
-   && grep -qF 'runners never merge pull requests by hand' "$TMP/graphql-merge.error" \
-   && grep -qxF 'pr merge --repo example/repo --auto --squash 7' "$TMP/gh-calls" \
-   && grep -qxF 'pr merge --repo example/repo --disable-auto 7' "$TMP/gh-calls" \
-   && ! grep -qxF 'pr merge 7' "$TMP/gh-calls" \
+   && grep -qF 'auto-merge disabled by policy' "$TMP/manual-merge.error" \
+   && ! grep -q '^pr merge ' "$TMP/gh-calls" \
+   && ! grep -q -- '--enable-auto-merge' "$TMP/gh-calls" \
+   && ! grep -qF 'enablePullRequestAutoMerge' "$TMP/gh-calls" \
    && ! grep -qF 'api -X PUT repos/example/repo/pulls/7/merge' "$TMP/gh-calls" \
    && ! grep -qF 'mergePullRequest' "$TMP/gh-calls"; then
-  ok identity-shim-manual-merge-blocked 'CLI, REST, and GraphQL manual merges are refused while auto-merge reaches GitHub'
+  ok identity-shim-no-merge 'CLI merge attempts are no-ops; REST and GraphQL merges are blocked'
 else
-  bad identity-shim-manual-merge-blocked "rc=$(cat "$TMP/manual-merge.rc") calls=$(cat "$TMP/gh-calls")"
+  bad identity-shim-no-merge "rc=$(cat "$TMP/manual-merge.rc") calls=$(cat "$TMP/gh-calls")"
 fi
 
 if [ "$(cat "$TMP/protected-pr.rc")" -ne 0 ] \

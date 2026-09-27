@@ -373,6 +373,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/board-state-lifecycle.test.sh" ]; then
   echo "-- board state lifecycle behavioural checks --"
   run_test "$HERE/board-state-lifecycle.test.sh" bash "$HERE/board-state-lifecycle.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/no-agent-merge.test.sh" ]; then
+  echo ""
+  echo "-- no agent merge code paths --"
+  run_test "$HERE/no-agent-merge.test.sh" bash "$HERE/no-agent-merge.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/auto-merge-fallback.test.sh" ]; then
   echo ""
   echo "-- auto-merge fallback behavioural checks --"

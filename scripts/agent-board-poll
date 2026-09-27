@@ -235,7 +235,7 @@ TERMINAL_ADHD_SKILL="${VALENTIN_ADHD_SKILL:-$HOME/.claude/skills/i-have-adhd/SKI
 if [ ! -r "$TERMINAL_ADHD_SKILL" ]; then
   TERMINAL_ADHD_SKILL="$HOME/.claude/plugins/marketplaces/i-have-adhd/skills/i-have-adhd/SKILL.md"
 fi
-PLAIN_LANGUAGE_PROMPT="For every Question:, Answer:, Decision:, Handoff:, or Done: ticket comment, follow the four rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
+PLAIN_LANGUAGE_PROMPT="Question: comments keep the board owner mention when asking for a decision. For every Question:, Answer:, Decision:, Handoff:, or Done: ticket comment, follow the four rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
 
 POSPEAK RULES, VERBATIM:
 $(cat "$POSPEAK_SKILL")
@@ -257,7 +257,7 @@ An instruction to update or build on an allowlisted repository is yours to execu
 Use `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]` for every change to the agent toolkit, supervisor rules, analytics site, app, CLI, or Slack bot. Never run hax or codex directly.
 Write each build specification with four explicit parts: Ticket, What, Done when, and Guardrails.
 Use `agent-template build status [id]` and `agent-template build list` to inspect work. If asked what you did, answer from build list and its recorded output, not from memory.
-Never merge a pull request by hand. Auto-merge or the supervisor handles merges, and open pull requests labelled `valentin-review` stay untouched.
+Never merge or enable auto-merge; the merge gate or an operator session handles merging. Open pull requests labelled `valentin-review` stay untouched.
 Use `agent-template build` for a requested build. Use `agent-template update --keep-timers` for a requested toolkit update after its pull request merges.
 The repository allowlist is the complete boundary. Do not change a repo that is absent from it.'
 fi
@@ -4271,7 +4271,7 @@ COMMENT CONTRACT: A ticket comment must start with exactly one of these five mar
 
 $PLAIN_LANGUAGE_PROMPT
 
-QUIET MODE: QUIET=$QUIET. When it is on, do not @mention the board owner unless replying to a comment where the owner directly mentioned you. That Answer: reply keeps the owner's mention. Otherwise attention comes from moving the ticket to the review column."
+QUIET MODE: QUIET=$QUIET. When it is on, keep the owner mention in a Question: comment and move the ticket to Valentin Review. An Answer: replying to the owner's direct mention also keeps the mention. If the owner-mention budget is exhausted, the wrapper logs the throttle to run activity and still posts Question: without the mention."
   fi
 
   RUN_DIR="${AGENT_REPO:-}"

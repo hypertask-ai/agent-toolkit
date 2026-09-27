@@ -172,6 +172,7 @@ RUNNER="$ROOT/scripts/agent-board-poll"
 run_tick() {
   env -u AGENT_ORIGINAL_PATH -u AGENT_IDENTITY_PATH \
     HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
+    XDG_RUNTIME_DIR="$TMP/runtime" AGENT_IDENTITY_SHIM_DIR="$TMP/shims" \
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_TASKS="$TMP/tasks.json" \
     ADAPTER_CLAIM_TEST_JITTER_SECONDS=0 ADAPTER_CLAIM_TEST_SETTLE_SECONDS=0 \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_TERM="$TMP/model-term" \

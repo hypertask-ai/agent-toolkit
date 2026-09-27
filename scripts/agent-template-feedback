@@ -10,7 +10,7 @@
 # ticket to QA. It then reads Backlog, urgent first, and asks the configured
 # model for accept, need_info, or decline. Every verdict receives a comment.
 # Accepted tickets get one isolated fix branch and pull request, auto-merge is
-# enabled, and the ticket moves to In Progress.
+# disabled, and the ticket moves to In Progress.
 #
 # AGENT_TEMPLATE_BOARD_CLI must be the bot-authenticated wrapper used by the
 # old weekly job. Never point it at a person's token.
@@ -335,7 +335,7 @@ The reported behavior changes after this pull request merges.
 
 **Watch out for**
 
-Auto-merge still waits for required checks.
+Auto-merge stays off; a merge gate or operator session handles merging.
 
 ## Technical detail
 
@@ -343,10 +343,8 @@ Feedback ticket: $URL
 EOF
   PR_URL="$(git -C "$work" status --short >/dev/null; gh pr create --repo hypertask-ai/agent-toolkit --base main --head "$branch" --title "Agent template: $REF $TITLE" --body-file "$BODY")"
   rm -f "$BODY"
-  if ! gh pr merge --repo hypertask-ai/agent-toolkit --auto --squash "$PR_URL" 2>/dev/null; then
-    log "auto-merge unavailable for $PR_URL, left open for the supervisor"
-  fi
-  "$BOARD_CLI" comment add "$REF" --text "<p><strong>Accepted: a fix pull request is open with auto-merge enabled.</strong></p><p><a href=\"$PR_URL\">$PR_URL</a></p>" >/dev/null
+  log "run-activity: auto-merge disabled by policy for $PR_URL"
+  "$BOARD_CLI" comment add "$REF" --text "<p><strong>Accepted: a fix pull request is open; auto-merge is off.</strong></p><p><a href=\"$PR_URL\">$PR_URL</a></p>" >/dev/null
   "$BOARD_CLI" task move "$REF" --section "$IN_PROGRESS" >/dev/null
   log "accepted $REF: $PR_URL"
   cleanup_work

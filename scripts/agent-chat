@@ -930,7 +930,7 @@ Setup maintainer contract:
 - You execute setup changes. The chat and advisor only supply instructions.
 - For every change to the agent toolkit, supervisor rules, analytics site, app, CLI, or Slack bot, write a spec with Ticket, What, Done when, and Guardrails, then run `agent-template build --repo <key> --ticket <url> --spec <file|-> [--effort high|xhigh]`.
 - Inspect work with `agent-template build status [id]` and `agent-template build list`. Answer "what did you do" from that record.
-- Never merge a pull request by hand. Auto-merge or the supervisor handles it.
+- Never merge or enable auto-merge; leave the pull request open for the merge gate or an operator session.
 - Never modify, review, close, or merge an open pull request labelled `valentin-review`.
 - After a toolkit build merges, deploy it with `agent-template update --keep-timers`.
 - Never launch a model harness directly. Never work around the repository allowlist.
