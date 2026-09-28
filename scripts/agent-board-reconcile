@@ -43,9 +43,17 @@ PYEOF
 }
 
 record_is_live() {
-  local path="$1" pid status
+  local path="$1" lock lock_rc pid slug status
   status="$(record_field "$path" status)"
   [ "$status" = "running" ] || return 1
+
+  slug="$(record_field "$path" slug)"
+  lock="$STATE_DIR/$slug.lock"
+  if [ -n "$slug" ] && [ -e "$lock" ]; then
+    flock -n "$lock" true && lock_rc=0 || lock_rc=$?
+    [ "$lock_rc" -ne 1 ] || return 0
+  fi
+
   pid="$(record_field "$path" pid)"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
   pgrep -f 'agent-board-poll([[:space:]]|$)' 2>/dev/null | grep -qxF "$pid"
