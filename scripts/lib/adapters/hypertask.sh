@@ -194,7 +194,7 @@ for row in rows:
     prior = previous.get(str(row.get("number")), {})
     resumed = (str(prior.get("ticket_section") or "").strip().casefold() in human_review
                and str(row.get("ticket_section") or "").strip().casefold() not in human_review)
-    stale = row.get("state") in {"red", "pending"} and age(row) >= 2 * 60 * 60 and not resumed
+    stale = row.get("state") in {"red", "pending", "protected"} and age(row) >= 2 * 60 * 60 and not resumed
     if stale:
         row["action"] = "observe"
         row["pickup_slot"] = False

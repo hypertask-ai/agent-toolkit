@@ -457,23 +457,26 @@ other pull request mutation. A GitHub rate-limit response records its
 `GitHub paused until HH:MM`, runs board reconciliation and comment replies,
 skips code and pull request work, and exits 75.
 
-Ownership is proved only when a branch starts with the agent slug, directly or
-after `agent/` (case-insensitive), by `<slug>.opened-prs`, or by an explicitly
-configured `GH_LOGIN` that differs from the host `gh` login. Slash, hyphen, and
-underscore separators count without allowing `dev-2` to claim `dev-20`.
-`dev-2` also recognizes its historical `dev-cursor-2` and `cursor-dev-2` names.
-The runner records a PR in the ledger before its successful `gh pr create`
-command returns, so a later watchdog stop cannot orphan it. QA agents recognize
-only PRs recorded in their own opened-PR ledger.
-Board assignment and shared GitHub authorship never transfer PR ownership.
+Ownership is proved first by `<slug>.opened-prs`. Otherwise, a branch starting
+with the agent slug, directly or after `agent/` (case-insensitive), counts only
+when the matched ticket is assigned to that agent or no ticket can be matched.
+An explicitly configured `GH_LOGIN` that differs from the host `gh` login can
+also prove ownership. Slash, hyphen, and underscore separators count without
+allowing `dev-2` to claim `dev-20`. `dev-2` also recognizes its historical
+`dev-cursor-2` and `cursor-dev-2` names. The runner records a PR in the ledger
+before its successful `gh pr create` command returns, so a later watchdog stop
+cannot orphan it. QA agents recognize only PRs recorded in their own opened-PR
+ledger. Assignment alone and shared GitHub authorship never transfer ownership.
 
 A red or pending PR stops pickup for its first two hours, then remains monitored
-while new work can start. One green PR awaiting review or merge is monitored
-without stopping pickup; two open PRs fill the pickup slots. A merged or closed
-PR never binds an agent, regardless of labels, deployment state, ticket section,
-or QA result. A PR whose ticket is in the blocked section, has any human assignee,
-or is held by the owner remains bound but starts no fix round while the PR is
-open. An open PR with no active owner is ignored. Once per UTC day, a tick logs
+while new work can start. A protected PR also releases its pickup slot after two
+hours, and a human-review ticket lane can release it sooner. One green PR
+awaiting review or merge is monitored without stopping pickup; two open PRs
+fill the pickup slots. A merged or closed PR never binds an agent, regardless
+of labels, deployment state, ticket section, or QA result. A PR whose ticket is
+in the blocked section, has any human assignee, or is held by the owner remains
+bound but starts no fix round while the PR is open. An open PR with no active
+owner is ignored. Once per UTC day, a tick logs
 `orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can decide
 who should take it.
 

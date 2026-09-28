@@ -1,0 +1,1 @@
+- Pull request pickup now checks ticket assignment before trusting an agent branch prefix, and protected pull requests release pickup after two hours while remaining monitored.

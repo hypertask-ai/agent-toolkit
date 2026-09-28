@@ -2493,8 +2493,9 @@ _ht_reconcile_auto_merge_hold() {
 
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
 # Prints one JSON object per open pull request still owned by this agent.
-# Ownership comes only from an agent slug at the branch start or after agent/
-# (plus dev-2's two historical aliases), the opened-PR ledger, or an explicitly
+# Ownership comes primarily from the opened-PR ledger. It can also come from an
+# agent slug at the branch start or after agent/ (plus dev-2's two historical
+# aliases) when the matched ticket belongs to the agent, or from an explicitly
 # configured GH_LOGIN that differs from the host gh identity. Merged and closed
 # pull requests never become binding candidates.
 #
@@ -2664,12 +2665,20 @@ for pr in sorted(prs, key=lambda row: row.get("createdAt") or ""):
     author = pr.get("author") or {}
     author_login = str(author.get("login") or "").casefold() if isinstance(author, dict) else ""
     by_state = number in opened
-    by_prefix = current[4] != "qa" and agent_named_branch(branch, current[0])
+    task = tasks.get(ref)
+    assigned_to_current = bool(current[1]) and any(
+        isinstance(assignee, dict)
+        and isinstance(assignee.get("agent"), dict)
+        and str(assignee["agent"].get("id") or "") == current[1]
+        for assignee in (task or {}).get("assignees") or []
+    )
+    by_prefix = (current[4] != "qa" and agent_named_branch(branch, current[0])
+                 and (task is None or assigned_to_current))
     by_author = current[4] != "qa" and bool(current[3] and author_login == current[3])
     if not (by_state or by_prefix or by_author):
         continue
     pr["ticket"] = display_ticket(pr)
-    task = tasks.get(ref, {})
+    task = task or {}
     pr["task_id"] = task.get("id") or ""
     pr["board"] = str(task.get("projectId") or os.environ["BOARDS"].split(",", 1)[0])
     pr["ticket_section"] = str(task.get("section") or "")

@@ -351,9 +351,11 @@ our own message rather than "command not found" three layers down.
 
 1. Read the agent's conf and load its adapter.
 2. Take a non-blocking lock; if a tick is already running, exit.
-3. List open PRs owned through the agent's branch prefix or recorded run state.
-   Stop normal pickup only when two open PRs occupy the agent's pickup slots.
-   Closed and merged PRs never bind an agent.
+3. List open PRs owned through recorded run state, a dedicated GitHub login,
+   or an agent branch prefix whose matched ticket is assigned to that agent.
+   A prefix still counts when no ticket can be matched. Stop normal pickup only
+   when two open PRs occupy the agent's pickup slots. Closed and merged PRs
+   never bind an agent.
 4. List the board's tickets in the watched columns.
 5. Read each candidate's full ticket and comment thread. Classify the board
    owner's newest comment as `hold`, `go`, `question`, or `feedback`, then post
@@ -379,19 +381,21 @@ our own message rather than "command not found" three layers down.
 
 ## One ticket until live
 
-A PR is owned only when its branch starts with the agent slug, directly or after
-`agent/` (case-insensitive), when `<slug>.opened-prs` records that the runner
-created it, or when an explicit `GH_LOGIN` differs from the host `gh` login and
-matches the author. Slash, hyphen, and underscore separators all count, but
-partial slug matches do not. `dev-2` also recognizes `dev-cursor-2` and
-`cursor-dev-2`. The runner writes a created PR to the ledger before `gh pr create`
-returns, including when the run later reaches its watchdog cap. QA agents
-recognize only PRs in their own opened-PR ledger. Board assignment and shared
-GitHub authorship do not transfer ownership. PR discovery uses one locked,
-host-wide REST cache per repository. It refreshes no more than once a minute and
-stores every open PR plus merges from the last 48 hours without PR bodies. The
-binding gate filters this cache to open PRs before ownership or labels can bind
-an agent. A `valentin-review` label makes an open PR manager-only. The runner leaves auto-merge off and starts no fix. Its PR remains bound,
+A PR is owned first when `<slug>.opened-prs` records that the runner created it.
+Otherwise, a branch starting with the agent slug, directly or after `agent/`
+(case-insensitive), counts only when the matched ticket is assigned to that
+agent or no ticket can be matched. An explicit `GH_LOGIN` that differs from the
+host `gh` login can also match the author. Slash, hyphen, and underscore
+separators all count, but partial slug matches do not. `dev-2` also recognizes
+`dev-cursor-2` and `cursor-dev-2`. The runner writes a created PR to the ledger
+before `gh pr create` returns, including when the run later reaches its watchdog
+cap. QA agents recognize only PRs in their own opened-PR ledger. Assignment
+alone and shared GitHub authorship do not transfer ownership. PR discovery uses
+one locked, host-wide REST cache per repository. It refreshes no more than once
+a minute and stores every open PR plus merges from the last 48 hours without PR
+bodies. The binding gate filters this cache to open PRs before ownership or
+labels can bind an agent. A `valentin-review` label makes an open PR
+manager-only. The runner leaves auto-merge off and starts no fix. Its PR remains bound,
 but uses no pickup slot while the ticket waits in `Valentin Review` or
 `HT Manager Review`. Leaving either lane resumes the PR ahead of new work when
 it needs attention. The runner never enables auto-merge. Its command shim
@@ -403,11 +407,12 @@ code and pull request work, and exits 75.
 
 Two open PRs outside human review lanes fill the pickup slots and stop every
 new claim, including an `emergency`. The runner ranks that queue oldest first.
-A red or pending PR older than two hours no longer uses a slot because another
-run has not made it fixable; it remains monitored and is reported on Board
-health. One green open PR never stops a new pickup. An open PR whose ticket is
-unassigned or assigned to no active agent blocks nobody unless branch or run
-state identifies an owner. The first tick each UTC day logs `orphaned PR #<n>
+A red, pending, or protected PR older than two hours no longer uses a slot
+because another run has not made it fixable; it remains monitored and is
+reported on Board health. One green open PR never stops a new pickup. A matched
+ticket assigned to another agent prevents a branch prefix alone from binding
+the PR; an opened-PR record still proves ownership. The first tick each UTC day
+logs `orphaned PR #<n>
 (<branch>) has no owning agent` for supervisor follow-up.
 
 A merged or closed PR never binds an agent, regardless of its labels,
