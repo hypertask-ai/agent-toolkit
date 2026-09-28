@@ -3,7 +3,12 @@ set -euo pipefail
 unset AGENT_ORIGINAL_PATH AGENT_IDENTITY_PATH
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+lock_holder=""
+cleanup() {
+  [ -z "$lock_holder" ] || kill "$lock_holder" 2>/dev/null || true
+  rm -rf "$TMP"
+}
+trap cleanup EXIT
 mkdir -p "$TMP/home" "$TMP/config" "$TMP/bin" "$TMP/repo" "$TMP/company" "$TMP/state"
 printf '# skills\n' > "$TMP/company/INDEX.md"
 printf 'test\n' > "$TMP/company/VERSION"
@@ -411,6 +416,47 @@ if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]
   echo 'PASS merged-pr-live-run-skip           a live run prevents merged-PR completion'
 else
   echo "FAIL merged-pr-live-run-skip           tasks=$(cat "$TMP/tasks.json") log=$(cat "$TMP/board.log")"; exit 1
+fi
+
+reset_case
+cat > "$TMP/tasks.json" <<'EOF'
+{"tasks":[{"id":"task-999","ticketNumber":"AGTE-999","projectId":15,"section":"In Progress","title":"Change it","description":"A namespaced run is still active","assignees":[{"agent":{"id":"agent-dev","displayName":"Dev"}}],"labels":[],"commentCount":0,"updatedAt":"2026-01-01T00:00:00Z"}]}
+EOF
+mkdir -p "$TMP/state/agent-board-poll/run-records"
+printf '{"status":"running","slug":"dev","pid":99999999,"ref":"AGTE-999","board":"15","origin_section":"Backlog"}\n' > "$TMP/state/agent-board-poll/run-records/dev-AGTE-999.json"
+lock="$TMP/state/agent-board-poll/dev.lock"
+lock_ready="$TMP/lock-ready"
+bash -c 'exec 9>"$1"; flock 9; touch "$2"; exec sleep 60' _ "$lock" "$lock_ready" &
+lock_holder=$!
+python3 - "$lock_ready" <<'PYEOF'
+import pathlib, sys, time
+path = pathlib.Path(sys.argv[1])
+for _ in range(400):
+    if path.exists():
+        break
+    time.sleep(0.01)
+else:
+    raise SystemExit("lock holder did not start")
+PYEOF
+env "${run_env[@]}" "$ROOT/scripts/agent-board-reconcile"
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = 'In Progress' ] \
+   && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$TMP/state/agent-board-poll/run-records/dev-AGTE-999.json")" = running ] \
+   && ! grep -q '^move AGTE-999 ' "$TMP/board.log"; then
+  echo 'PASS namespaced-run-lock-held           a held slug lock keeps a run live when its pid is invisible'
+else
+  echo "FAIL namespaced-run-lock-held           tasks=$(cat "$TMP/tasks.json") record=$(cat "$TMP/state/agent-board-poll/run-records/dev-AGTE-999.json") log=$(cat "$TMP/board.log")"; exit 1
+fi
+kill "$lock_holder" 2>/dev/null || true
+wait "$lock_holder" 2>/dev/null || true
+lock_holder=""
+: > "$TMP/board.log"
+env "${run_env[@]}" "$ROOT/scripts/agent-board-reconcile"
+if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"][0]["section"])' "$TMP/tasks.json")" = Backlog ] \
+   && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$TMP/state/agent-board-poll/run-records/dev-AGTE-999.json")" = reconciled ] \
+   && grep -qxF 'move AGTE-999 Backlog' "$TMP/board.log"; then
+  echo 'PASS namespaced-run-lock-free           a stale slug lock does not keep an invisible run live'
+else
+  echo "FAIL namespaced-run-lock-free           tasks=$(cat "$TMP/tasks.json") record=$(cat "$TMP/state/agent-board-poll/run-records/dev-AGTE-999.json") log=$(cat "$TMP/board.log")"; exit 1
 fi
 
 reset_case
