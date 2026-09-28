@@ -291,13 +291,19 @@ elif scenario not in merged_scenarios | {"merged-protected"}:
         rows = [row(11, 11, "legacy/fix-11", updated="2026-01-01T00:00:00Z")]
     elif scenario == "foreign-prefix":
         rows = [row(13, 13, "dev-2/htpr-13", updated="2026-01-01T00:00:00Z")]
+    elif scenario == "human-foreign-prefix":
+        rows = [row(728, 6506, "dev-2/htpr-6506-split-monoliths",
+                    author="human-owner", updated="2026-09-18T21:00:00Z")]
     elif scenario == "slug-prefix":
         rows = [row(12, 12, "DeV-1/htpr-12-fix", updated="2026-09-18T21:00:00Z"),
                 row(15, 15, "agent/dev-1-htpr-15-fix", updated="2026-09-18T21:00:00Z"),
                 row(16, 16, "dev-1_htpr-16-fix", updated="2026-09-18T21:00:00Z"),
                 row(17, 17, "agent/dev-10-htpr-17-fix", updated="2026-09-18T21:00:00Z")]
     elif scenario == "valentin-review":
-        rows = [row(14, 14, "dev-1/htpr-14-fix", updated="2026-01-01T00:00:00Z",
+        rows = [row(14, 14, "dev-1/htpr-14-fix", updated="2026-09-18T21:00:00Z",
+                    labels=["valentin-review"])]
+    elif scenario == "stale-protected":
+        rows = [row(14, 14, "dev-1/htpr-14-fix", updated="2026-09-18T19:00:00Z",
                     labels=["valentin-review"])]
     elif scenario == "closed-protected":
         rows = [row(703, 703, "dev-1/htpr-703", updated="2026-01-01T00:00:00Z",
@@ -369,6 +375,8 @@ elif [[ "$url" == *'/mcp/tasks?'* ]]; then
     review_first_section='Bugs'
     [ "${BOARD_TEST_SCENARIO:-}" != review-first ] || review_first_section='Valentin Review'
     extra_tasks="{\"id\":\"task-9\",\"ticketNumber\":\"HTPR-9\",\"projectId\":\"15\",\"section\":\"$review_first_section\",\"assignees\":[{\"agent\":{\"id\":\"agent-1\"}}]},{\"id\":\"task-10\",\"ticketNumber\":\"HTPR-10\",\"projectId\":\"15\",\"section\":\"Bugs\",\"assignees\":[{\"agent\":{\"id\":\"agent-1\"}}]},"
+  elif [ "${PR_TEST_SCENARIO:-}" = human-foreign-prefix ]; then
+    extra_tasks='{"id":"task-6506","ticketNumber":"HTPR-6506","projectId":"15","section":"Bugs","assignees":[{"agent":{"id":"agent-qa"}}]},'
   fi
   cat <<JSON
 {"tasks":[${extra_tasks}{"id":"task-1","ticketNumber":"HTPR-1","projectId":"15","section":"$ticket_section","title":"PR ticket","description":"fix it","assignees":$task1_assignees,"labels":$task1_labels,"commentCount":0},{"id":"task-2","ticketNumber":"HTPR-2","section":"Bugs","title":"Emergency","description":"urgent fix","assignees":[{"agent":{"id":"agent-1"}}],"labels":$emergency_labels,"commentCount":0},{"id":"task-3","ticketNumber":"HTPR-3","section":"Bugs","title":"Claimed in a comment","description":"fix it","assignees":[],"labels":[],"commentCount":1},{"id":"task-4","ticketNumber":"HTPR-4","section":"Bugs","title":"Another owner's ticket","description":"fix it","assignees":[{"agent":{"id":"agent-2"}}],"labels":[],"commentCount":0},{"id":"task-5","ticketNumber":"HTPR-5","section":"Bugs","title":"Legacy branch ticket","description":"fix it","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
@@ -453,7 +461,7 @@ LEGACY_PROMPT="unterminated
 EOF
 
 run_gate() {
-  local scenario="$1" slug="${2:-dev-1}" name="${3:-Dev One}" cache opened
+  local scenario="$1" slug="${2:-dev-1}" name="${3:-Dev One}" agent_id="${5:-agent-1}" cache opened
   cache="$TMP/cache-$scenario-$slug"
   opened="$TMP/home/.local/state/agent-board-poll/$slug.opened-prs"
   mkdir -p "$(dirname "$opened")"
@@ -461,7 +469,7 @@ run_gate() {
   AGENT_PR_CACHE_DIR="$cache/pr-cache" PR_TEST_SCENARIO="$scenario" \
     PR_FIXTURE="$ROOT/evals/fixtures/status-context-pr.json" \
     PR_GATE_NOW="2026-09-18T22:00:00Z" PR_BRANCH_PREFIX="${4:-}" adapter_pr_gate \
-      "$TMP/token" 15 agent-1 "$name" "$slug" "$cache" \
+      "$TMP/token" 15 "$agent_id" "$name" "$slug" "$cache" \
       "$TMP/home/.config/hypertask-agents" "$opened"
 }
 
@@ -505,6 +513,18 @@ protected="$(GH_CALL_LOG="$TMP/gh-calls" PR_AUTO_MERGE_ENABLED=yes run_gate vale
 ! grep -qF 'pr merge ' "$TMP/gh-calls"
 ! grep -qE '/comments|/compare|/deployments' "$TMP/gh-calls"
 echo 'PASS valentin-review leaves auto-merge untouched by policy'
+
+stale_protected="$(run_gate stale-protected)"
+[[ -z "$stale_protected" ]]
+python3 - "$TMP/home/.local/state/agent-board-poll/dev-1.monitored-prs.json" <<'PYEOF'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+assert len(rows) == 1
+result = rows[0]
+assert result["action"] == "observe" and result["state"] == "protected"
+assert result["pickup_slot"] is False and result["unfixable"] is True
+PYEOF
+echo 'PASS a protected PR older than two hours stays monitored without blocking pickup'
 
 for review_section in 'Valentin Review' 'HT Manager Review'; do
   : > "$TMP/gh-calls"
@@ -586,13 +606,13 @@ echo 'PASS a red PR older than two hours stays reportable without blocking picku
 
 for review_section in 'Valentin Review' 'HT Manager Review'; do
   held_old="$(API_TASK_SECTION="$review_section" run_gate stale-red)"
-  [[ "$held_old" == *'"state": "protected"'* && "$held_old" == *'"pickup_slot": false'* ]]
+  [[ -z "$held_old" ]]
   rm -rf "$TMP/cache-stale-red-dev-1/pr-cache"
   resumed_old="$(API_TASK_SECTION=Bugs run_gate stale-red)"
   [[ "$resumed_old" == *'"action": "fix"'* && "$resumed_old" == *'"blocks_pickup": true'* ]]
   [[ -z "$(API_TASK_SECTION=Bugs run_gate stale-red)" ]]
 done
-echo 'PASS old red PRs receive a repair turn when either human-review lane releases them'
+echo 'PASS old protected PRs release pickup and receive a repair turn when human review ends'
 
 for merged_scenario in undeployed deployed fallback qa-fail qa-passed base-missing; do
   [[ -z "$(run_gate "$merged_scenario")" ]]
@@ -648,6 +668,14 @@ echo 'PASS shared host GitHub authorship does not transfer PR ownership'
 foreign_prefix="$(run_gate foreign-prefix 2>/dev/null)"
 [[ -z "$foreign_prefix" ]]
 echo 'PASS shared-login PR with a foreign branch prefix does not bind'
+
+foreign_assignee="$(run_gate human-foreign-prefix dev-2 'Dev Two' '' agent-2 2>/dev/null)"
+[[ -z "$foreign_assignee" ]]
+printf 'example/repo\t728\tHTPR-6506\n' > "$TMP/home/.local/state/agent-board-poll/dev-2.opened-prs"
+rm -rf "$TMP/cache-human-foreign-prefix-dev-2"
+recorded_foreign_assignee="$(run_gate human-foreign-prefix dev-2 'Dev Two' '' agent-2)"
+[[ "$recorded_foreign_assignee" == *'"number": 728'* ]]
+echo 'PASS a human PR on an agent branch binds only through its explicit opened-PR record when another agent owns the ticket'
 
 slug_prefix="$(run_gate slug-prefix)"
 [[ "$slug_prefix" == *'"number": 12'* ]]
@@ -1053,7 +1081,7 @@ printf '%s' "$failure_comment" | python3 "$ROOT/adapters/hypertask/plain-languag
 echo 'PASS failed PR release move retains the verdict, clears both bindings, and links its health comment'
 
 rm -rf "$state/run-records" "$state/pr-live-cache"
-rm -f "$state/dev-1.released-prs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/actions"
+rm -f "$state/dev-1.released-prs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/actions" "$TMP/unassigned"
 WORKER_EXIT=42 run_actual red
 record="$state/run-records/dev-1-HTPR-1.json"
 RECORD="$record" python3 -c 'import json,os; assert json.load(open(os.environ["RECORD"]))["fix_rounds"] == 1'
