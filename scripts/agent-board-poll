@@ -93,6 +93,15 @@ done
   "PR_REPO is not set: every agent needs a repo, run create-agent --repo" \
   "run create-agent.sh --resume --pr-repo <org/name> for this agent, or add PR_REPO= to $CONF by hand"
 MAX_CONCURRENT_RUNS="${MAX_CONCURRENT_RUNS:-1}"
+# HR-02 (2026-09-29): a dev agent holds one fix until it is live. While it
+# owns an open PR it works only that PR (review findings, failing checks,
+# rebases) and picks up no new ticket. Default 1 so a single owned open PR
+# already fills the pickup slot; a conf can raise it, never assumed to be 2.
+MAX_OPEN_PRS="${MAX_OPEN_PRS:-1}"
+case "$MAX_OPEN_PRS" in
+  ''|*[!0-9]*) die "MAX_OPEN_PRS must be a whole number, got '$MAX_OPEN_PRS'" \
+    "set MAX_OPEN_PRS=1 in $CONF, or remove the line to use the default" ;;
+esac
 QUIET="${QUIET:-on}"
 case "$QUIET" in
   on|off) : ;;
@@ -3122,7 +3131,7 @@ print(sum(json.loads(line).get("pickup_slot") is True for line in sys.stdin if l
   PR_GATE_SINCE="$(row_field "$PR_GATE" since)"
   PR_GATE_REASON="$(row_field "$PR_GATE" wait_reason)"
   PR_GATE_MERGED_AT="$(row_field "$PR_GATE" merged_at)"
-  if [ "$PR_GATE_COUNT" -ge 2 ] || printf '%s' "$PR_GATE" | python3 -c '
+  if [ "$PR_GATE_COUNT" -ge "$MAX_OPEN_PRS" ] || printf '%s' "$PR_GATE" | python3 -c '
 import json, sys
 sys.exit(0 if json.load(sys.stdin).get("blocks_pickup") is not False else 1)
 '; then
@@ -3811,8 +3820,8 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     continue
   fi
   if [ "$is_reply_only" = "no" ] && [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$is_pr_fix" = "no" ]; then
-    if [ "$PR_GATE_COUNT" -ge 2 ]; then
-      explain "skip  $ref: $PR_GATE_COUNT owned open PRs fill the pickup slots, so only PR #$PR_GATE_NUMBER may run"
+    if [ "$PR_GATE_COUNT" -ge "$MAX_OPEN_PRS" ]; then
+      explain "skip  $ref: $PR_GATE_COUNT owned open PR(s) fill the pickup slots (max $MAX_OPEN_PRS), so only PR #$PR_GATE_NUMBER may run"
       continue
     fi
     case ",$(row_labels "$row")," in
