@@ -114,6 +114,35 @@ if [ "$rc" -ne 27 ] \
 fi
 printf 'PASS failed-tick-logged              preserves exit and writes the failure marker\n'
 
+# A 403 or 429 leaves the marker; the tick then skips cleanly and backs off.
+cat > "$TMP/bin/limited-poll" <<'EOF'
+#!/usr/bin/env bash
+mkdir -p "$XDG_STATE_HOME/agent-board-poll"
+date +%s > "$XDG_STATE_HOME/agent-board-poll/rate-limited"
+exit 1
+EOF
+chmod +x "$TMP/bin/limited-poll"
+set +e
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state2" AGENT_BOARD_POLL_BIN="$TMP/bin/limited-poll" \
+  "$ROOT/scripts/agent-board-poll-tick" product-bot >/dev/null 2>&1
+rc=$?
+set -e
+if [ "$rc" -ne 0 ] || ! grep -qF 'poll skipped, rate limited' "$TMP/state2/agent-board-poll/product-bot.log" \
+   || grep -qF 'run FAILED' "$TMP/state2/agent-board-poll/product-bot.log"; then
+  printf 'FAIL rate-limited-tick-skips rc=%s\n' "$rc"
+  exit 1
+fi
+set +e
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state2" AGENT_BOARD_POLL_BIN="$TMP/bin/failing-poll" \
+  "$ROOT/scripts/agent-board-poll-tick" product-bot >/dev/null 2>&1
+rc=$?
+set -e
+if [ "$rc" -ne 0 ]; then
+  printf 'FAIL rate-limited-tick-backs-off rc=%s\n' "$rc"
+  exit 1
+fi
+printf 'PASS rate-limited-tick-skips         403 or 429 skips with exit 0 and backs off\n'
+
 # shellcheck disable=SC1091
 . "$ROOT/scripts/lib/core.sh"
 core_write_poll_units "$TMP/units" "$TMP/bin"

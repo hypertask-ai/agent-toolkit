@@ -71,9 +71,45 @@ _ht_get() {
   status="${body##*$'\n'}"
   body="${body%$'\n'*}"
   if [ "$status" != "200" ]; then
+    case "$status" in
+      403|429) _ht_mark_rate_limited ;;
+    esac
     die "the board API returned HTTP $status for ${path}" \
         "if this is 401 the token is wrong or revoked; if it is 403 or an HTML body the host is rate limited, back off before retrying"
   fi
+  printf '%s' "$body"
+}
+
+# A 403 or 429 means the host is rate limited or bot checked. Leave a marker so
+# the tick wrapper can skip cleanly and back off instead of failing the unit.
+_ht_rate_limit_marker() {
+  printf '%s/agent-board-poll/rate-limited' "${XDG_STATE_HOME:-$HOME/.local/state}"
+}
+_ht_mark_rate_limited() {
+  local marker
+  marker="$(_ht_rate_limit_marker)"
+  { mkdir -p "$(dirname "$marker")" && date +%s > "$marker"; } 2>/dev/null || true
+}
+
+# _ht_get_comments_cached <token-file> <board-id> <task-id>
+# Merged-PR lookups reread every open ticket's comments each reconcile pass.
+# Reuse a copy up to HT_COMMENTS_CACHE_TTL seconds old (default 1800) so one
+# run stops making dozens of identical calls.
+_ht_get_comments_cached() {
+  local token_file="$1" board_id="$2" task_id="$3" ttl="${HT_COMMENTS_CACHE_TTL:-1800}"
+  local dir file now modified body
+  dir="${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll/comments-cache"
+  file="$dir/${board_id}-${task_id}.json"
+  now="$(date +%s)"
+  if [ -r "$file" ]; then
+    modified="$(stat -c %Y "$file" 2>/dev/null || echo 0)"
+    if [ "$((now - modified))" -lt "$ttl" ]; then
+      cat "$file"
+      return 0
+    fi
+  fi
+  body="$(_ht_get "$token_file" "/mcp/comments?task_id=${task_id}&project_id=${board_id}")" || return $?
+  { mkdir -p "$dir" && printf '%s' "$body" > "$file.tmp.$$" && mv "$file.tmp.$$" "$file"; } 2>/dev/null || true
   printf '%s' "$body"
 }
 
@@ -2197,7 +2233,7 @@ for pr in json.loads(os.environ["ROWS"] or "[]"):
     direct_failed="yes"
   fi
 
-  comments="$(_ht_get "$token_file" "/mcp/comments?task_id=$task_id&project_id=$board_id")" || return 2
+  comments="$(_ht_get_comments_cached "$token_file" "$board_id" "$task_id")" || return 2
   if url="$(printf '%s' "$comments" | adapter_merged_pr_from_comments "$repo")"; then
     printf '%s\n' "$url"
     return 0
