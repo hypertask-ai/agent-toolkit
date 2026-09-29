@@ -1,0 +1,1 @@
+- A board API 403 or 429 now makes a poll tick log "skipped, rate limited", back off for five minutes and exit cleanly instead of failing the unit, and merged-pull-request lookups reuse ticket comments for up to 30 minutes so one run makes far fewer board calls.

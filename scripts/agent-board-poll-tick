@@ -9,10 +9,34 @@ else
   slug="unknown"
 fi
 
+state="${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll"
+log="$state/$slug.log"
+marker="$state/rate-limited"
+backoff="${POLL_RATE_LIMIT_BACKOFF:-300}"
+
+note() { { mkdir -p "$state" && printf '%s %s\n' "$(date -Is)" "$1" >> "$log"; } 2>/dev/null || true; }
+marker_time() { cat "$marker" 2>/dev/null || echo 0; }
+
+# The board API answers 403 or 429 when this host is rate limited. Back off and
+# skip cleanly instead of failing the unit and alerting.
+now="$(date +%s)"
+last="$(marker_time)"
+case "$last" in ''|*[!0-9]*) last=0 ;; esac
+if [ "$((now - last))" -lt "$backoff" ]; then
+  note "poll skipped, rate limited: backing off for up to ${backoff}s"
+  exit 0
+fi
+
+started="$now"
 "$POLL" --once "$@"
 rc=$?
 if [ "$rc" -ne 0 ]; then
-  log="${XDG_STATE_HOME:-$HOME/.local/state}/agent-board-poll/$slug.log"
+  last="$(marker_time)"
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  if [ "$last" -ge "$started" ]; then
+    note "poll skipped, rate limited: board API returned 403 or 429 (tick exit=$rc)"
+    exit 0
+  fi
   { mkdir -p "$(dirname "$log")" && printf '%s run FAILED tick exit=%s\n' "$(date -Is)" "$rc" >> "$log"; } 2>/dev/null || true
 fi
 exit "$rc"
