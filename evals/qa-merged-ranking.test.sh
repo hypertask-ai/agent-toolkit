@@ -16,6 +16,19 @@ COMMENTS='{"comments":[{"createdAt":"2026-09-18T21:00:00Z","text":"QA verdict: p
 COMMENTS='{"comments":[{"createdAt":"2026-09-18T21:00:00Z","agent":{"id":"agent-qa"},"text":"<p>Done: verified checkout</p>"}]}'
 [[ "$(rank qa QA)" == '0 '* ]] || { echo 'FAIL an agent Done verdict must stop repeated QA'; exit 1; }
 echo 'PASS merged ticket enters QA once, only in QA without a later verdict'
+
+# Regression for the QA/Bugs bounce loop: the reconciler posts a hand-off
+# notice under the QA agent's own identity when it moves a merged PR to QA.
+# That notice is an instruction to go check, not a verdict, and must never
+# block the real QA run from starting. Older tickets still carry the notice
+# under its original "Handoff:" wording, so both forms are checked.
+COMMENTS='{"comments":[{"createdAt":"2026-09-18T21:00:00Z","agent":{"id":"agent-qa"},"text":"<p>Handoff: QA must verify https://github.com/org/repo/pull/1 on live against every acceptance criterion.</p>"}]}'
+[[ "$(rank qa QA)" == '3 '* ]] || { echo 'FAIL the reconciler hand-off notice (old Handoff: wording) must not block a real QA run'; exit 1; }
+COMMENTS='{"comments":[{"createdAt":"2026-09-18T21:00:00Z","agent":{"id":"agent-qa"},"text":"<p>Decision: QA must verify https://github.com/org/repo/pull/1 on live against every acceptance criterion.</p>"}]}'
+[[ "$(rank qa QA)" == '3 '* ]] || { echo 'FAIL the reconciler hand-off notice (Decision: wording) must not block a real QA run'; exit 1; }
+COMMENTS='{"comments":[{"createdAt":"2026-09-18T21:00:00Z","agent":{"id":"agent-qa"},"text":"<p>Handoff: Dev must fix the failing checkout step.</p>"}]}'
+[[ "$(rank qa QA)" == '0 '* ]] || { echo 'FAIL a genuine QA Handoff/FAIL verdict must still stop repeated QA'; exit 1; }
+echo 'PASS the reconciler hand-off notice never blocks a real QA run, and a genuine verdict still does'
 for flag in no yes; do
   verdict="$(FEATURE_FREEZE="$flag" rank dev Features)"
   if [ "$flag" = yes ]; then

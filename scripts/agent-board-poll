@@ -1979,6 +1979,9 @@ for comment in comments:
     except ValueError:
         pass
     plain = html.unescape(re.sub(r"<[^>]+>", " ", str(comment.get("html") or "")))
+    # The reconciler hand-off notice is not a verdict; see qa_verdict_info.
+    if re.search(r"qa must verify .+ on live against every acceptance criterion", plain, re.I):
+        continue
     if re.match(r"\s*(Done|Handoff|Question):", plain, re.I):
         raise SystemExit(1)
 raise SystemExit(0)
@@ -1999,6 +2002,12 @@ if not (agent_id == os.environ["AID"] or (not agent_id and author == os.environ[
     raise SystemExit
 plain = html.unescape(re.sub(r"<[^>]+>", " ", str(row.get("html") or "")))
 plain = " ".join(plain.split())
+# The reconciler posts this exact instruction under the QA agent own identity
+# whenever it hands a merged PR to QA. It is a hand-off, not a verdict, and
+# must never move the ticket, no matter which marker word it starts with
+# (older copies on the board still say "Handoff:").
+if re.search(r"qa must verify .+ on live against every acceptance criterion", plain, re.I):
+    raise SystemExit
 match = re.match(r"(Done|Handoff|Question):", plain, re.I)
 if not match:
     raise SystemExit
@@ -3445,6 +3454,7 @@ print("yes" if json.load(sys.stdin).get("assignee_count", 1) == 0 else "no")')"
   comment_is_human="no"
   comment_is_other_bot_marker="no"
   comment_has_addressed_question="no"
+  comment_is_reconciler_notice="no"
   mentioned="no"
   comments_json=""
   comments_available="no"
@@ -3587,6 +3597,15 @@ for item in sorted(comments, key=key, reverse=True):
 import html, json, os, re
 doc = json.loads(os.environ["CJ"])
 print(html.unescape(re.sub(r"<[^>]+>", " ", doc.get("html") or "")).strip()[:1200])')"
+    # The reconciler's own hand-off notice ("QA must verify ... on live
+    # against every acceptance criterion") is posted under this agent's own
+    # identity, but it asks this agent to act; it must never look like
+    # settled work of this agent's own that blocks a fresh pickup.
+    if TEXT="$comment_text" python3 -c '
+import os, re, sys
+sys.exit(0 if re.search(r"qa must verify .+ on live against every acceptance criterion", os.environ["TEXT"], re.I) else 1)'; then
+      comment_is_reconciler_notice="yes"
+    fi
     if CJ="$comment_json" AID="$AGENT_ID" NAME="$AGENT_NAME" python3 -c '
 import json, os, sys
 doc = json.loads(os.environ["CJ"])
@@ -3763,8 +3782,11 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
   # Last-comment authorship only guards work this agent already owns. A free,
   # unlabelled queue ticket is first pickup, not a comment-triggered rerun.
   # Stale QA has its own turnaround gate and must not remain stuck behind an
-  # old agent status comment.
-  if [ "$assigned" = "yes" ] && [ "$stale_qa" = "no" ] && [ "$comment_is_own" = "yes" ]; then
+  # old agent status comment. The reconciler's hand-off notice is posted
+  # under this agent's own identity but asks it to act, so it never counts
+  # as settled work that blocks a fresh pickup.
+  if [ "$assigned" = "yes" ] && [ "$stale_qa" = "no" ] && [ "$comment_is_own" = "yes" ] \
+     && [ "$comment_is_reconciler_notice" = "no" ]; then
     explain "skip  $ref: newest comment $comment_id is by this agent's own identity, so it cannot trigger another run"
     continue
   fi
