@@ -4841,7 +4841,17 @@ print(json.dumps({"ref": os.environ["REF"], "url": os.environ["URL"],
         adapter_run_activity "$TOKEN_FILE" "$runtime_run_id" "$LOG" thought "provider $route_provider quota exhausted"
       fi
     done < <(provider_routes "$RUN_MODEL_CLI")
-    if [ "$is_pr_fix" = "no" ] && [ "$worker_exited" = "yes" ] \
+    # Dev-only: a merged PR here means this dev's own run shipped it, so a
+    # crash after that merge should not fail the run. QA never merges a PR
+    # itself; every ticket a QA agent picks up already has one merged PR by
+    # definition (that is how it reached QA), so this same check on a QA run
+    # is not evidence of anything QA's own run did. Applying it there forced
+    # a crashed QA run's exit code to 0 and asked the board to move straight
+    # to Done with no parsed verdict; the same request also fired right after
+    # a real Done verdict had already completed the ticket, asking to move it
+    # to Done a second time with no verdict behind that second ask. See
+    # qa_missing_verdict below for what a QA run failure must do instead.
+    if [ "$AGENT_KIND" = "dev" ] && [ "$is_pr_fix" = "no" ] && [ "$worker_exited" = "yes" ] \
        && declare -F adapter_ticket_merged_pr >/dev/null 2>&1; then
       if merged_pr_url="$(adapter_ticket_merged_pr "$TOKEN_FILE" "$board" "$task_id" \
           "$PR_REPO" "$ref" yes 2>>"$LOG")" && [ -n "$merged_pr_url" ]; then
@@ -4986,9 +4996,11 @@ ${qa_comment:-No ticket comment was posted.}"
     fi
     if [ -z "$qa_info" ]; then
       if [ "$qa_retried" = "no" ] && [ "$rc" -ne 0 ]; then
+        qa_missing_verdict="yes"
         log "QA verdict check skipped for $ref: model exited $rc before returning a verdict"
       elif [ "$qa_retry_rc" -ne 0 ]; then
         rc="$qa_retry_rc"
+        qa_missing_verdict="yes"
         log "QA verdict retry failed for $ref: model exited $qa_retry_rc before returning a verdict"
       else
         printf 'QA verdict comment must start with Done:, Handoff:, or Question: after one retry\n' >> "$ERRFILE"
@@ -5053,22 +5065,13 @@ ${qa_comment:-No ticket comment was posted.}"
       post_ticket_comment "$ref" text "$quota_wait_comment" || log "provider reset wait comment failed for $ref"
       move_ticket_or_report "$ref" "$origin_section" "$board" "provider reset wait" "$task_id" "$origin_section" || true
     elif [ "$merged_pr_outcome" = "yes" ]; then
-      merged_target="$DONE_SECTION"
-      qa_verdict=""
-      if [ "$AGENT_KIND" = dev ] && { [ "${REQUIRE_QA_VERDICT:-no}" = yes ] || [ "${VERDICT_FINAL:-no}" = yes ]; }; then
-        qa_verdict="$(adapter_latest_qa_verdict "$TOKEN_FILE" "$task_id" "$board" "$(adapter_qa_agent_ids "$board")" 2>>"$LOG")" || qa_verdict="unknown"
-        if [ "${VERDICT_FINAL:-no}" = yes ] && [ "$qa_verdict" = fail ]; then
-          merged_target="$QA_SECTION"
-        elif [ "${REQUIRE_QA_VERDICT:-no}" = yes ] && [ "$qa_verdict" != pass ]; then
-          merged_target="$QA_SECTION"
-        fi
-      fi
+      # Dev-only (see the AGENT_KIND=dev gate above). A merged PR is a
+      # developer handoff to QA, never a completion: only a parsed QA PASS
+      # verdict moves a ticket to Done, so this always targets QA_SECTION,
+      # regardless of REQUIRE_QA_VERDICT/VERDICT_FINAL.
+      merged_target="$QA_SECTION"
       run_record_status="done"
-      [ "$merged_target" = "$DONE_SECTION" ] || run_record_status="review"
-      if [ "$qa_verdict" = unknown ]; then
-        rc=74
-        run_record_status="move-failed"
-      elif ! move_ticket_or_report "$ref" "$merged_target" "$board" "merged PR outcome" "$task_id" "$origin_section"; then
+      if ! move_ticket_or_report "$ref" "$merged_target" "$board" "merged PR outcome" "$task_id" "$origin_section"; then
         rc=74
         run_record_status="move-failed"
       fi
