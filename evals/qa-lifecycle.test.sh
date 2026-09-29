@@ -29,6 +29,22 @@ esac
 EOF
 cat > "$TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
+# A ticket in QA already has a merged PR by definition (that is how it got
+# here). MOCK_MERGED_PR_TITLE simulates that for the AGTE-179-style cases
+# below; every other case leaves it unset and gets the old empty-PR-list
+# behavior.
+if [ -n "${MOCK_MERGED_PR_TITLE:-}" ] && [ "${1:-}" = api ] \
+   && [[ "${2:-}" == repos/example/repo/pulls\?state=* ]]; then
+  case "${2:-}" in
+    *state=open*) printf '[]\n' ;;
+    *)
+      now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf '[{"number":999,"title":"%s","html_url":"https://github.com/example/repo/pull/999","head":{"ref":"human/change"},"base":{"ref":"main"},"user":{"login":"human"},"draft":false,"created_at":"%s","updated_at":"%s","merged_at":"%s"}]\n' \
+        "$MOCK_MERGED_PR_TITLE" "$now" "$now" "$now"
+      ;;
+  esac
+  exit 0
+fi
 printf '[]\n'
 EOF
 cat > "$TMP/bin/model" <<'EOF'
@@ -166,7 +182,7 @@ EOF
     HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/config" XDG_STATE_HOME="$TMP/state" \
     COMPANY_SKILLS_DIR="$TMP/company" PATH="$TMP/bin:$PATH" MOCK_VERDICT="$verdict" \
     MOCK_MODEL_EXIT="$model_exit" MOCK_RETRY_VERDICT="$retry_verdict" MOCK_RETRY_EXIT="$retry_exit" \
-    MOCK_MOVE_FAIL="$move_fail" \
+    MOCK_MOVE_FAIL="$move_fail" MOCK_MERGED_PR_TITLE="${MOCK_MERGED_PR_TITLE:-}" \
     MOCK_TASKS="$TMP/tasks.json" MOCK_COMMENTS="$TMP/comments.json" \
     MOCK_BOARD_LOG="$TMP/board.log" MOCK_MODEL_LOG="$TMP/model.log" MOCK_PROMPT_LOG="$TMP/prompt.log" \
     "$ROOT/scripts/agent-board-poll" --once qa-runner > "$TMP/out" 2>&1
@@ -245,11 +261,13 @@ fi
 run_case Silent '[]' '{"comments":[]}' \
   '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' no '' 75
 if [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 1 ] \
-   && grep -qxF 'move TEST-1 Agent Blocked (Infra)' "$TMP/board.log" \
+   && grep -qxF 'move TEST-1 QA' "$TMP/board.log" \
+   && ! grep -qxF 'move TEST-1 Agent Blocked (Infra)' "$TMP/board.log" \
+   && ! grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
    && grep -qF 'exited 75' "$TMP/out" \
    && ! grep -qF 'QA verdict marker missing for TEST-1' "$TMP/state/agent-board-poll/qa-runner.log" \
    && grep -qF 'model exited 75 before returning a verdict' "$TMP/state/agent-board-poll/qa-runner.log"; then
-  ok qa-process-failure-no-retry 'a failed QA process keeps its exit and does not spend the marker retry'
+  ok qa-process-failure-no-retry 'a failed QA process keeps its exit, does not spend the marker retry, and stays in QA'
 else
   bad qa-process-failure-no-retry "exit=$(cat "$TMP/exit") board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
@@ -435,6 +453,65 @@ if [ "$(grep -cFx 'move TEST-1 Done' "$TMP/board.log")" -eq 2 ] \
 else
   bad qa-move-retry-health "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
 fi
+
+# HR-08 (2026-09-29): the QA model's runtime crashed on every run, and the
+# runner's "merged PR outcome" fallback (meant for a developer whose own run
+# crashed after its own PR merged) also fired for QA runs. Every ticket a QA
+# agent picks up already has a merged PR by definition, so the fallback
+# treated an unrelated pre-existing merged PR as this run's own success,
+# forced the exit code to 0, and asked the board to move straight to Done
+# with no parsed QA verdict. A separate board-CLI guard (hypertask-runner-cli,
+# AGTE-179) caught every one of those requests on board 15, so no ticket
+# actually reached Done from the crash path; instead each run was wrongly
+# logged and recorded as "done", and burned an extra QA verdict-marker retry
+# on a model that had already crashed.
+#
+# Worse, the same fallback ran unconditionally on every QA outcome, not only
+# crashes: after a real "Done:" verdict with live evidence had already
+# legitimately moved the ticket to Done, this fallback fired right after it,
+# asked to move the same ticket to Done again without the flag that lets a
+# move to Done through, and the CLI guard rewrote that second request back to
+# QA. So a real, correct QA pass on a ticket with a merged PR (effectively
+# every QA ticket) was being silently bounced back to QA every time. These
+# cases pin the fix: a merged PR already on the ticket must never be read as
+# this QA run's own outcome.
+MOCK_MERGED_PR_TITLE='TEST-1: shipped'
+
+run_case Silent '[]' '{"comments":[]}' \
+  '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' no '' 134 134
+if [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 1 ] \
+   && grep -qxF 'move TEST-1 QA' "$TMP/board.log" \
+   && ! grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
+   && grep -qF 'exited 134' "$TMP/out" \
+   && [ "$(awk '$1 == "task-1" && $3 == "model" && $4 == "failed" { n++ } END { print n + 0 }' "$TMP/state/agent-board-poll/qa-runner.attempts")" -eq 1 ] \
+   && ! grep -qF 'using the merged pull request as the run outcome' "$TMP/state/agent-board-poll/qa-runner.log" \
+   && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$TMP/state/agent-board-poll/run-records/qa-runner-TEST-1.json")" = "qa-missing-verdict" ]; then
+  ok qa-merged-pr-crash-stays-qa 'a crashed QA run never reads a pre-existing merged PR as its own outcome'
+else
+  bad qa-merged-pr-crash-stays-qa "exit=$(cat "$TMP/exit") board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") attempts=$(cat "$TMP/state/agent-board-poll/qa-runner.attempts" 2>/dev/null) output=$(cat "$TMP/out")"
+fi
+
+run_case Unmarked '[]' '{"comments":[]}' \
+  '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' no Unmarked
+if grep -qxF 'move TEST-1 QA' "$TMP/board.log" \
+   && ! grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
+   && grep -qF 'exited 65' "$TMP/out" \
+   && ! grep -qF 'using the merged pull request as the run outcome' "$TMP/state/agent-board-poll/qa-runner.log" \
+   && [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["status"])' "$TMP/state/agent-board-poll/run-records/qa-runner-TEST-1.json")" = "qa-missing-verdict" ]; then
+  ok qa-merged-pr-unmarked-stays-qa 'a merged PR present cannot turn an unmarked QA reply into a Done move'
+else
+  bad qa-merged-pr-unmarked-stays-qa "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
+fi
+
+run_case Done '[]' '{"comments":[]}'
+if [ "$(tail -n1 "$TMP/board.log")" = "move TEST-1 Done" ] \
+   && [ "$(grep -cFx 'move TEST-1 Done' "$TMP/board.log")" -eq 1 ] \
+   && ! grep -qxF 'move TEST-1 QA' "$TMP/board.log"; then
+  ok qa-merged-pr-real-pass-still-done 'a real QA Done verdict with live evidence completes and a merged PR cannot bounce it back to QA'
+else
+  bad qa-merged-pr-real-pass-still-done "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out")"
+fi
+unset MOCK_MERGED_PR_TITLE
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

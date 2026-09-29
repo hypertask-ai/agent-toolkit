@@ -277,6 +277,8 @@ if [ "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["tasks"]
    && grep -qF '<a href="https://app.hypertask.ai/detail/project-5500/168">AGTE-168 Keep merged PR runs successful when closing comments fail</a>' "$TMP/board.log" \
    && grep -qF '<a href="https://github.com/example/repo/pull/9">https://github.com/example/repo/pull/9</a>' "$TMP/board.log" \
    && grep -qF 'model exited 74 after https://github.com/example/repo/pull/9 merged; using the merged pull request as the run outcome' "$TMP/state/agent-board-poll/dev.log" \
+   && grep -qF 'merged PR outcome moved AGTE-168 to QA' "$TMP/state/agent-board-poll/dev.log" \
+   && ! grep -qF 'merged PR outcome moved AGTE-168 to Done' "$TMP/state/agent-board-poll/dev.log" \
    && grep -qF 'run done AGTE-168 exit=0' "$TMP/state/agent-board-poll/dev.log"; then
   echo 'PASS merged-pr-comment-rewrite          a refused closing comment is linked and the merged PR finishes the run'
 else
