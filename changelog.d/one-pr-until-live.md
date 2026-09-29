@@ -1,0 +1,1 @@
+- Dev agents now hold one owned pull request until it closes or its merge reaches a successful Production deployment. Protected and green pull requests keep the gate closed, while emergency tickets and comment replies can still interrupt.

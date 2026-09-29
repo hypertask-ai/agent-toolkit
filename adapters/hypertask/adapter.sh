@@ -2492,12 +2492,13 @@ _ht_reconcile_auto_merge_hold() {
 }
 
 # adapter_pr_gate <token-file> <board-ids> <agent-id> <agent-name> <slug> <cache-dir> <config-dir> <opened-prs>
-# Prints one JSON object per open pull request still owned by this agent.
+# Prints one JSON object per pull request still owned by this agent.
 # Ownership comes primarily from the opened-PR ledger. It can also come from an
 # agent slug at the branch start or after agent/ (plus dev-2's two historical
 # aliases) when the matched ticket belongs to the agent, or from an explicitly
-# configured GH_LOGIN that differs from the host gh identity. Merged and closed
-# pull requests never become binding candidates.
+# configured GH_LOGIN that differs from the host gh identity. With
+# ONE_PR_UNTIL_LIVE=yes, a merged PR remains a candidate until its production
+# deployment succeeds. A closed unmerged PR never binds.
 #
 # An open PR with no owner among the living conf files is ignored and logged
 # once per UTC day through stderr, which core appends to the tick log.
@@ -2505,7 +2506,7 @@ adapter_pr_gate() (
   local token_file="$1" board_ids="$2" agent_id="$3" agent_name="$4" slug="$5" cache_dir="$6"
   local config_dir="${7:-}" opened_prs="${8:-}" repo="${PR_REPO:-}"
   local state_dir released_prs tmp pr number branch marker today owner_conf owner_slug one board_json
-  local offset path returned github_login host_login cache_rc agent_role rc hold_reason
+  local offset path returned github_login host_login cache_rc agent_role rc hold_reason missing ticket view
 
   [ -n "$repo" ] || return 1
   command -v gh >/dev/null 2>&1 || return 1
@@ -2522,13 +2523,79 @@ adapter_pr_gate() (
   fi
   [ "$cache_rc" -eq 0 ] || return "$cache_rc"
   _ht_github_paused "$repo" && return 75
+  if [ "${ONE_PR_UNTIL_LIVE:-no}" = "yes" ] && [ -r "$opened_prs" ]; then
+    missing="$(ROWS="$pr" REPO="$repo" python3 - "$opened_prs" <<'PYEOF'
+import json
+import os
+import sys
+
+known = {str(row.get("number")) for row in json.loads(os.environ["ROWS"] or "[]")}
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        fields = line.rstrip("\n").split("\t")
+        if len(fields) >= 2 and fields[0] == os.environ["REPO"] and fields[1] not in known:
+            print("%s\t%s" % (fields[1], fields[2] if len(fields) >= 3 else ""))
+PYEOF
+)"
+    : > "$tmp/recovered.jsonl"
+    while IFS=$'\t' read -r number ticket; do
+      [ -n "$number" ] || continue
+      if view="$(_ht_gh "$repo" pr view "$number" --repo "$repo" \
+          --json number,state,url,title,headRefName,baseRefName,author,isDraft,createdAt,updatedAt,mergedAt 2>/dev/null)"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      [ "$rc" -eq 0 ] || { [ "$rc" -eq 75 ] && return 75; return 1; }
+      VIEW="$view" NUMBER="$number" TICKET="$ticket" REPO="$repo" python3 - <<'PYEOF' >> "$tmp/recovered.jsonl"
+import json
+import os
+
+row = json.loads(os.environ["VIEW"])
+number = int(os.environ["NUMBER"]) if os.environ["NUMBER"].isdigit() else os.environ["NUMBER"]
+row["number"] = row.get("number") or number
+row["url"] = row.get("url") or "https://github.com/%s/pull/%s" % (os.environ["REPO"], number)
+row["title"] = row.get("title") or os.environ["TICKET"] or "PR #%s" % number
+row["headRefName"] = row.get("headRefName") or ""
+row["baseRefName"] = row.get("baseRefName") or ""
+row["createdAt"] = row.get("createdAt") or row.get("mergedAt") or ""
+row["updatedAt"] = row.get("updatedAt") or row.get("mergedAt") or row["createdAt"]
+row["prLabels"] = []
+print(json.dumps(row))
+PYEOF
+    done <<< "$missing"
+    if [ -s "$tmp/recovered.jsonl" ]; then
+      pr="$(ROWS="$pr" python3 - "$tmp/recovered.jsonl" <<'PYEOF'
+import json
+import os
+import sys
+
+rows = json.loads(os.environ["ROWS"] or "[]")
+known = {str(row.get("number")) for row in rows}
+with open(sys.argv[1], encoding="utf-8") as handle:
+    for line in handle:
+        row = json.loads(line)
+        if str(row.get("number")) not in known:
+            rows.append(row)
+            known.add(str(row.get("number")))
+print(json.dumps(rows))
+PYEOF
+)"
+    fi
+  fi
   printf '%s\n' "$pr" > "$tmp/prs.json"
   python3 - "$tmp/prs.json" <<'PYEOF' > "$tmp/open.json"
 import json, sys
 print(json.dumps([row for row in json.load(open(sys.argv[1]))
                   if str(row.get("state") or "").upper() == "OPEN"]))
 PYEOF
-  if python3 - "$tmp/open.json" <<'PYEOF'
+  STRICT="${ONE_PR_UNTIL_LIVE:-no}" python3 - "$tmp/prs.json" <<'PYEOF' > "$tmp/binding.json"
+import json, os, sys
+states = {"OPEN", "MERGED"} if os.environ["STRICT"] == "yes" else {"OPEN"}
+print(json.dumps([row for row in json.load(open(sys.argv[1]))
+                  if str(row.get("state") or "").upper() in states]))
+PYEOF
+  if python3 - "$tmp/binding.json" <<'PYEOF'
 import json, sys
 raise SystemExit(0 if not json.load(open(sys.argv[1], encoding="utf-8")) else 1)
 PYEOF
@@ -2596,7 +2663,8 @@ PYEOF
   done
 
   SLUG="$slug" REPO="$repo" OPENED_PRS="$opened_prs" RELEASED_PRS="$released_prs" BOARDS="$board_ids" \
-    python3 - "$tmp/open.json" "$tmp/owners.tsv" "$tmp/tasks.jsonl" <<'PYEOF' > "$tmp/candidates.jsonl"
+    STRICT="${ONE_PR_UNTIL_LIVE:-no}" \
+    python3 - "$tmp/binding.json" "$tmp/owners.tsv" "$tmp/tasks.jsonl" <<'PYEOF' > "$tmp/candidates.jsonl"
 import json, os, re, sys
 prs_path, owners_path, tasks_path = sys.argv[1:]
 slug = os.environ["SLUG"].casefold()
@@ -2656,7 +2724,8 @@ current = next((owner for owner in owners if owner[0] == slug and owner[4]),
 for pr in sorted(prs, key=lambda row: row.get("createdAt") or ""):
     state = str(pr.get("state") or "").upper()
     number = str(pr.get("number"))
-    if state != "OPEN" or number in released:
+    allowed_states = {"OPEN", "MERGED"} if os.environ["STRICT"] == "yes" else {"OPEN"}
+    if state not in allowed_states or number in released:
         continue
     branch = str(pr.get("headRefName") or "").casefold()
     ref = title_ticket(pr)
@@ -2747,6 +2816,34 @@ PYEOF
   while IFS= read -r pr; do
     [ -n "$pr" ] || continue
     number="$(ROW="$pr" python3 -c 'import json,os;print(json.loads(os.environ["ROW"])["number"])')"
+    pr_state="$(ROW="$pr" python3 -c 'import json,os;print(str(json.loads(os.environ["ROW"]).get("state") or "").upper())')"
+    if [ "$pr_state" = "MERGED" ]; then
+      if live="$(_ht_pr_live_state "$repo" "$number" "$cache_dir")"; then
+        rc=0
+      else
+        rc=$?
+      fi
+      [ "$rc" -eq 0 ] || { [ "$rc" -eq 75 ] && return 75; return 1; }
+      if LIVE="$live" python3 -c 'import json,os,sys;sys.exit(0 if json.loads(os.environ["LIVE"]).get("live") is True else 1)'; then
+        continue
+      fi
+      PR="$pr" LIVE="$live" python3 -c '
+import json, os
+pr, live = json.loads(os.environ["PR"]), json.loads(os.environ["LIVE"])
+print(json.dumps({"action":"wait", "state":live.get("state") or "merged-undeployed",
+                  "wait_reason":"merged; production deploy pending",
+                  "definition":live.get("definition") or "GitHub Production deployments",
+                  "number":pr["number"], "url":pr["url"], "ticket":pr["ticket"],
+                  "title":pr["title"], "branch":pr["headRefName"],
+                  "since":pr.get("mergedAt") or pr.get("updatedAt") or pr["createdAt"],
+                  "merged_at":pr.get("mergedAt") or "",
+                  "task_id":pr.get("task_id") or "", "board":pr.get("board") or "",
+                  "ticket_section":pr.get("ticket_section") or "", "labels":pr.get("labels") or [],
+                  "human_assignee_ids":pr.get("human_assignee_ids") or [],
+                  "pickup_slot":True, "blocks_pickup":True, "unfixable":False}))
+'
+      continue
+    fi
     hold_reason="$(ROW="$pr" python3 -c '
 import json, os
 row = json.loads(os.environ["ROW"])
