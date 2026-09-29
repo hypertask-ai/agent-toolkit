@@ -58,6 +58,12 @@ fi
 EOF
 cat > "$TMP/bin/provider" <<'EOF'
 #!/usr/bin/env bash
+if [ "${CHECK_MODE:-}" = repair ] || [ "${CHECK_MODE:-}" = unfixed ]; then
+  printf 'round\n' >> "$CHECK_ROUNDS"
+  if [ "${CHECK_MODE:-}" = repair ] && [ "$(wc -l < "$CHECK_ROUNDS")" -eq 2 ]; then touch "$CHECK_READY"; fi
+  gh pr create --repo example/repo --title test --body test >/dev/null || true
+  exit 0
+fi
 command -v hypertask > "$RESOLVED_CAPTURE"
 command -v ht >> "$RESOLVED_CAPTURE"
 command -v htbot >> "$RESOLVED_CAPTURE"
@@ -79,6 +85,7 @@ else
   printf '%s\n' "$?" > "$SHORT_INTERVAL_RC"
 fi
 gh pr checks 7 --repo example/repo >/dev/null
+touch "$CHECK_READY"
 gh pr create --repo example/repo --title test --body test > "$PR_CREATE_OUTPUT"
 cat "$AGENT_OPENED_PRS" > "$PR_OWNERSHIP_CAPTURE"
 printf 'after-pr-create\n' >> "$GH_CAPTURE"
@@ -144,7 +151,7 @@ adapter_install_board_cli test "$TMP/token" "$TMP/board" "Test Agent"
 cat > "$TMP/board.json" <<'EOF'
 {"tasks":[{"id":"task-1","ticketNumber":"TEST-1","section":"Bugs","title":"Identity test","description":"Verify the provider identity boundary","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
 EOF
-printf 'test,%s,example/repo,main,,full-ci,needs-checks\n' "$TMP/repo" \
+printf 'test,%s,example/repo,main,,full-ci,needs-checks,test=test -f %s/ready\n' "$TMP/repo" "$TMP/repo" \
   > "$TMP/home/.config/agents/repos.allow"
 cat > "$TMP/home/.config/agents/test.conf" <<EOF
 AGENT_ID="agent-1"
@@ -169,7 +176,7 @@ run_poll() {
     XDG_RUNTIME_DIR= XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
     BOARD_JSON="$TMP/board.json" BOARD_POSTED="$TMP/posted" \
     RESOLVED_CAPTURE="$TMP/resolved" TOKEN_CAPTURE="$TMP/received-token" \
-    GH_CAPTURE="$TMP/gh-calls" GH_LABEL_BODY="$TMP/gh-label-body" \
+    GH_CAPTURE="$TMP/gh-calls" GH_LABEL_BODY="$TMP/gh-label-body" CHECK_READY="$TMP/repo/ready" CHECK_ROUNDS="$TMP/rounds" \
     PR_CREATE_OUTPUT="$TMP/pr-create-output" PR_OWNERSHIP_CAPTURE="$TMP/pr-ownership" \
     REPO_AUTOMERGE_RC="$TMP/repo-automerge.rc" REPO_AUTOMERGE_ERROR="$TMP/repo-automerge.error" \
     GRAPHQL_AUTOMERGE_RC="$TMP/graphql-automerge.rc" GRAPHQL_AUTOMERGE_ERROR="$TMP/graphql-automerge.error" \
@@ -289,6 +296,58 @@ if [ "$missing_rc" -ne 0 ] \
   ok identity-shim-missing-token "the run fails loudly before any board write"
 else
   bad identity-shim-missing-token "missing token exit=$missing_rc or the run reached a board write"
+fi
+
+printf 'agent-token\n' > "$TMP/token"
+cat > "$TMP/board.json" <<'EOF'
+{"tasks":[{"id":"task-2","ticketNumber":"TEST-2","section":"Bugs","title":"Check retry","description":"<p><strong>Check:</strong> test -f /nonexistent</p>","assignees":[{"agent":{"id":"agent-1"}}],"labels":[],"commentCount":0}]}
+EOF
+python3 - "$TMP/board.json" "$TMP/repo" <<'PYEOF'
+import json, sys
+path, repo = sys.argv[1:]
+data = json.load(open(path))
+data["tasks"][0]["description"] = f"<p><strong>Check:</strong> test -f {repo}/ready</p>"
+json.dump(data, open(path, "w"))
+PYEOF
+"$ROOT/scripts/ticket-check" resolve --description '<p><strong>Check:</strong> exit 17</p>' \
+  --allow "$TMP/home/.config/agents/repos.allow" --repo example/repo --command-file "$TMP/override.check"
+"$ROOT/scripts/ticket-check" resolve --description '<p>No ticket check</p>' \
+  --allow "$TMP/home/.config/agents/repos.allow" --repo example/repo --command-file "$TMP/default.check"
+if [ "$(cat "$TMP/override.check")" = 'exit 17' ] \
+   && [ "$(cat "$TMP/default.check")" = "test -f $TMP/repo/ready" ]; then
+  ok check-ticket-overrides-default 'the ticket command wins; a missing line uses the repository default'
+else
+  bad check-ticket-overrides-default "override=$(cat "$TMP/override.check") default=$(cat "$TMP/default.check")"
+fi
+rm -f "$TMP/repo/ready" "$TMP/rounds"
+: > "$TMP/gh-calls"
+if CHECK_MODE=repair run_poll > "$TMP/repair.out" 2> "$TMP/repair.err" \
+   && [ "$(wc -l < "$TMP/rounds")" -eq 2 ] \
+   && [ "$(grep -c '^pr create ' "$TMP/gh-calls")" -eq 1 ] \
+   && grep -qF 'post-check failed for TEST-2' "$TMP/state/agent-board-poll/test.log"; then
+  ok check-repair-before-pr 'a failed post-check blocks creation and runs one more worker round'
+else
+  bad check-repair-before-pr "rounds=$(cat "$TMP/rounds" 2>/dev/null) calls=$(cat "$TMP/gh-calls") log=$(tail -n 20 "$TMP/state/agent-board-poll/test.log")"
+fi
+rm -f "$TMP/rounds"
+mv "$TMP/state/agent-board-poll" "$TMP/previous-run"
+if CHECK_MODE=repair run_poll > "$TMP/pre-pass.out" 2> "$TMP/pre-pass.err" \
+   && [ ! -e "$TMP/rounds" ] \
+   && grep -qF 'pre-check passed for TEST-2' "$TMP/state/agent-board-poll/test.log"; then
+  ok check-already-passes 'the ticket returns to the queue without starting a worker'
+else
+  bad check-already-passes "rounds=$(cat "$TMP/rounds" 2>/dev/null) log=$(tail -n 20 "$TMP/state/agent-board-poll/test.log")"
+fi
+mv "$TMP/state/agent-board-poll" "$TMP/pre-pass-run"
+rm -f "$TMP/repo/ready" "$TMP/rounds"
+: > "$TMP/gh-calls"
+if CHECK_MODE=unfixed run_poll > "$TMP/unfixed.out" 2> "$TMP/unfixed.err" \
+   && [ "$(wc -l < "$TMP/rounds")" -eq 2 ] \
+   && ! grep -q '^pr create ' "$TMP/gh-calls" \
+   && grep -qF 'post-check still fails for TEST-2' "$TMP/state/agent-board-poll/test.log"; then
+  ok check-unfixed-no-pr 'two failing post-checks never open a pull request'
+else
+  bad check-unfixed-no-pr "rounds=$(cat "$TMP/rounds" 2>/dev/null) calls=$(cat "$TMP/gh-calls") log=$(tail -n 20 "$TMP/state/agent-board-poll/test.log")"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

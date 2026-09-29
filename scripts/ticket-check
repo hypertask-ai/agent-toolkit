@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Resolve a ticket check or execute it in its worktree."""
+import argparse
+import csv
+from html.parser import HTMLParser
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+
+class TicketText(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+        self.current = ""
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"p", "div", "li", "br"}:
+            self.handle_endtag(tag)
+
+    def handle_endtag(self, tag):
+        if tag in {"p", "div", "li", "br"}:
+            self.lines.append(self.current.strip())
+            self.current = ""
+
+    def handle_data(self, data):
+        self.current += data
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("action", choices=["resolve", "run"])
+parser.add_argument("--description")
+parser.add_argument("--allow")
+parser.add_argument("--repo")
+parser.add_argument("--command-file")
+parser.add_argument("--cwd")
+parser.add_argument("--phase", choices=["pre", "post"])
+args = parser.parse_args()
+
+if args.action == "resolve":
+    text = TicketText()
+    text.feed(args.description or "")
+    lines = text.lines + [text.current.strip()]
+    # Plain-text descriptions also support a line of their own.
+    lines = [part.strip() for line in lines for part in line.splitlines()]
+    checks = [match.group(1).strip() for line in lines
+              if (match := re.match(r"^Check:\s*(.*)$", line, re.I))]
+    if len(checks) > 1 or (checks and not checks[0]):
+        parser.error("ticket must have exactly one nonempty Check: command")
+    command = checks[0] if checks else ""
+    if not command:
+        with open(args.allow, newline="", encoding="utf-8") as handle:
+            for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#")):
+                if len(row) >= 4 and row[2].casefold() == args.repo.casefold():
+                    command = next((value[5:].strip() for value in row[5:]
+                                    if value.strip().startswith("test=")), "")
+                    break
+    if not command:
+        parser.error("no Check: line or default test= command in repos.allow")
+    Path(args.command_file).write_text(command + "\n", encoding="utf-8")
+else:
+    command = Path(args.command_file).read_text(encoding="utf-8").strip()
+    if not command:
+        parser.error("empty check command")
+    try:
+        result = subprocess.run(command, shell=True, executable="/bin/bash", cwd=args.cwd,
+                                env={**os.environ, "AGENT_CHECK_PHASE": args.phase or "post"},
+                                timeout=1800, check=False)
+    except subprocess.TimeoutExpired:
+        print("check timed out after 1800 seconds", file=sys.stderr)
+        sys.exit(124)
+    sys.exit(result.returncode)

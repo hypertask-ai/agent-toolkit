@@ -112,7 +112,7 @@ for path in sys.argv[1:]:
     with open(path, encoding="utf-8", newline="") as handle:
         for row in csv.reader(line for line in handle if line.strip() and not line.lstrip().startswith("#")):
             row = [value.strip() for value in row]
-            if len(row) not in (4, 5):
+            if len(row) < 4:
                 continue
             key, checkout, slug, base = row[:4]
             item = (key, checkout, slug, base)

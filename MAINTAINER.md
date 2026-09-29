@@ -112,7 +112,11 @@ agent-template instruct <slug> <text|-> [--ticket <url>]
 
 `repos.allow` beside the agent conf is CSV. Each row starts with `key,path,
 github slug,base branch,memory cap`; the cap is optional and any remaining
-fields are pull request labels. The cap defaults to 12 GB when the host has more
+fields are pull request labels or one `test=<shell command>` default check.
+A standalone `Check: <shell command>` line in a ticket overrides the default.
+The runner requires failure before work and success before opening a pull
+request. A passing pre-check requeues the ticket; a failed post-check starts
+one repair round. The cap defaults to 12 GB when the host has more
 than 32 GB of RAM and half of RAM otherwise. On first install, the slug and
 branch are discovered from each checkout's `origin` and `origin/HEAD`. Updates
 preserve host policy and add shipped label defaults only to rows without labels.

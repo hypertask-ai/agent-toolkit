@@ -161,6 +161,7 @@ RUN_MAX_SECONDS="30"
 FLEET_PROGRESS_SUPERVISOR="off"
 EOF
 
+printf 'app,%s,example/repo,main,,test=test "${AGENT_CHECK_PHASE:-}" = post\n' "$TMP/repo" > "$TMP/config/repos.allow"
 reset_case() {
   rm -rf "$TMP/state" "$TMP/repo"; mkdir -p "$TMP/state" "$TMP/repo"
   : > "$TMP/board.log"

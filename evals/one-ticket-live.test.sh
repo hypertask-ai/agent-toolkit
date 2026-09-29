@@ -795,6 +795,7 @@ SKILLS_INDEX=""
 CLAIM_UNASSIGNED="no"
 TRIAGE="no"
 EOF
+printf 'app,%s,example/repo,main,,test=test "${AGENT_CHECK_PHASE:-}" = post\n' "$TMP/repo" > "$TMP/home/.config/hypertask-agents/repos.allow"
 state="$TMP/home/.local/state/agent-board-poll"
 mkdir -p "$state"
 set +e
