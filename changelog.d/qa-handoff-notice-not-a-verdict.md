@@ -1,0 +1,1 @@
+- QA no longer bounces a merged ticket between QA and Bugs forever: the reconciler's own hand-off notice to QA is never read as a verdict by the backfill or by pickup ranking, the reconciler skips a duplicate notice once one is already on the ticket, and a merged ticket sitting in QA now actually gets a live QA run.

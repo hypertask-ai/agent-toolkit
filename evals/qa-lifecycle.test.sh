@@ -411,6 +411,22 @@ else
   bad qa-verdict-backfill "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
 fi
 
+# Regression for the QA/Bugs bounce loop: the reconciler posts this exact
+# notice under the QA agent's own identity when it hands a merged PR to QA.
+# It is not a verdict, so backfill must leave it alone and a real QA run
+# must still happen (old tickets carry the notice under its original
+# "Handoff:" wording, so that form is checked here).
+old="$(date -u -d '11 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+run_case Done '[]' "{\"comments\":[{\"id\":95,\"createdAt\":\"$old\",\"agent\":{\"id\":\"agent-qa\",\"displayName\":\"QA Runner\"},\"text\":\"<p>Handoff: QA must verify https://github.com/example/repo/pull/9 on live against every acceptance criterion.</p>\"}]}"
+if [ "$(grep -cFx 'move TEST-1 Bugs' "$TMP/board.log")" -eq 0 ] \
+   && grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
+   && [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 1 ] \
+   && ! grep -qF 'QA backfill comment 95 moved' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-backfill-ignores-handoff-notice 'the reconciler hand-off notice is not read as a FAIL verdict, so a real QA run still happens'
+else
+  bad qa-backfill-ignores-handoff-notice "board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+
 run_case Done '[]' '{"comments":[]}' \
   '[{"id":40,"agent":{"id":"agent-dev","displayName":"Dev"}},{"id":41,"agent":{"id":"agent-qa","displayName":"QA Runner"}}]' yes
 if [ "$(grep -cFx 'move TEST-1 Done' "$TMP/board.log")" -eq 2 ] \

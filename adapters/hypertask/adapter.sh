@@ -3076,6 +3076,13 @@ def author_of(comment):
         return str(who.get("displayName") or who.get("display_name") or who.get("name") or "")
     return str(who)
 
+# The reconciler posts this exact notice under the QA agent own identity
+# whenever it hands a merged PR to QA. It is an instruction to go check, not a
+# verdict, and must never count as one no matter which marker word it starts
+# with (old copies on the board still say "Handoff:").
+RECONCILER_NOTICE = re.compile(
+    r"qa must verify .+ on live against every acceptance criterion", re.I)
+
 agent_name = os.environ["AGENT_NAME"].strip().casefold()
 ref = os.environ["REF"]
 section = os.environ["SECTION"].strip().casefold()
@@ -3125,6 +3132,7 @@ merged_at = max((stamp for p in json.loads(os.environ["PR_JSON"]) or []
                  if (stamp := timestamp(p.get("mergedAt"))) is not None), default=None)
 verdict_after_merge = merged_at is not None and any(
     (stamp := timestamp(c.get("createdAt"))) is not None and stamp > merged_at
+    and not RECONCILER_NOTICE.search(text_of(c))
     and (re.search(r"\bqa\s*(?:verdict|result)?\s*[:\-]?\s*(?:pass(?:ed)?|fail(?:ed|s|ing)?)\b",
                    text_of(c), re.I)
          or (str((c.get("agent") or {}).get("id") or "") == os.environ["AGENT_ID"]
