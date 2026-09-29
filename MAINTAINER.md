@@ -442,15 +442,16 @@ runs leave pull requests open for the merge gate or an operator session.
 
 Before any normal or event-ticket ranking, the runner reads one host-wide PR
 cache for the repository. The first tick after 60 seconds refreshes it under a
-lock and paginates every open PR plus merges from the last 48 hours. Each row
-stores the PR number, title, branch, author, and labels, with no body. The binding
-gate filters those rows to open PRs before ownership and labels are evaluated. A
-pull request labelled `valentin-review` becomes a protected wait only while it is
-open. The runner never enables auto-merge and does not review, modify,
-close, or merge it. The PR stays bound but does not use a pickup slot or
-block a new claim while its ticket waits in `Valentin Review` or
-`HT Manager Review`. When the ticket leaves the lane, its PR gets the first
-turn ahead of new tickets, even if it spent more than two hours in review.
+lock and paginates every open PR plus merges from the last 48 hours. A strict
+gate also reads any older PR in its opened-PR ledger directly, so an old
+undeployed merge cannot disappear at the cache cutoff. Each row stores the PR
+number, title, branch, author, and labels, with no body.
+`ONE_PR_UNTIL_LIVE=yes` lets the binding gate consider both open and merged
+rows. A pull request labelled `valentin-review` becomes a protected wait while
+it is open. The runner never enables auto-merge and does not review, modify,
+close, or merge it. A protected PR and a PR whose ticket waits in
+`Valentin Review` or `HT Manager Review` stay bound and block normal pickup,
+but start no fix round. An emergency ticket may interrupt.
 The runner command shim no-ops merge requests and checks the label before any
 other pull request mutation. A GitHub rate-limit response records its
 `X-RateLimit-Reset` time for the repository. Until then, each tick logs
@@ -468,15 +469,15 @@ before its successful `gh pr create` command returns, so a later watchdog stop
 cannot orphan it. QA agents recognize only PRs recorded in their own opened-PR
 ledger. Assignment alone and shared GitHub authorship never transfer ownership.
 
-A red or pending PR stops pickup for its first two hours, then remains monitored
-while new work can start. A protected PR also releases its pickup slot after two
-hours, and a human-review ticket lane can release it sooner. One green PR
-awaiting review or merge is monitored without stopping pickup; two open PRs
-fill the pickup slots. A merged or closed PR never binds an agent, regardless
-of labels, deployment state, ticket section, or QA result. A PR whose ticket is
-in the blocked section, has any human assignee, or is held by the owner remains
-bound but starts no fix round while the PR is open. An open PR with no active
-owner is ignored. Once per UTC day, a tick logs
+`ONE_PR_UNTIL_LIVE=yes` is the dev default. One owned PR blocks normal pickup
+while open, including when it is green or protected. After merge, it keeps
+blocking until a newer successful Production deployment contains the merge
+commit. Closing it without a merge also releases the agent. This mode caps
+development concurrency at one even if `MAX_CONCURRENT_RUNS` is higher. The
+two-hour stale release applies only when `ONE_PR_UNTIL_LIVE=no`, which keeps
+the former two-slot policy. A PR whose ticket is in the blocked section, has
+any human assignee, or is held by the owner remains bound but starts no fix
+round. An open PR with no active owner is ignored. Once per UTC day, a tick logs
 `orphaned PR #<n> (<branch>) has no owning agent` so the supervisor can decide
 who should take it.
 

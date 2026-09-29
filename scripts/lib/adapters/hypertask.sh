@@ -159,7 +159,8 @@ adapter_pr_gate() (
   fi
   [ "$rc" -eq 0 ] || return "$rc"
   mkdir -p "$state_dir"
-  ROWS="$rows" NOW="${PR_GATE_NOW:-}" MONITOR="$monitor" python3 - <<'PYEOF'
+  ROWS="$rows" NOW="${PR_GATE_NOW:-}" MONITOR="$monitor" \
+    STRICT="${ONE_PR_UNTIL_LIVE:-no}" python3 - <<'PYEOF'
 import datetime
 import json
 import os
@@ -183,29 +184,37 @@ def age(row):
         return 0
 
 
-# A PR can spend days in human review. Give it one turn when its ticket leaves
-# the lane before applying the usual two-hour stale rule.
 try:
     previous = {str(row.get("number")): row for row in json.load(open(os.environ["MONITOR"], encoding="utf-8"))}
 except (OSError, ValueError):
     previous = {}
-human_review = {"valentin review", "ht manager review", "supervisor review"}
-for row in rows:
-    prior = previous.get(str(row.get("number")), {})
-    resumed = (str(prior.get("ticket_section") or "").strip().casefold() in human_review
-               and str(row.get("ticket_section") or "").strip().casefold() not in human_review)
-    stale = row.get("state") in {"red", "pending", "protected"} and age(row) >= 2 * 60 * 60 and not resumed
-    if stale:
-        row["action"] = "observe"
-        row["pickup_slot"] = False
-        row["unfixable"] = True
+if os.environ["STRICT"] == "yes":
+    for row in rows:
+        row["pickup_slot"] = True
+        row["blocks_pickup"] = True
+        row["unfixable"] = False
+    gates = rows
+else:
+    # Under the legacy multi-PR policy, a PR can spend days in human review.
+    # Give it one turn when its ticket leaves the lane before applying the
+    # two-hour stale release.
+    human_review = {"valentin review", "ht manager review", "supervisor review"}
+    for row in rows:
+        prior = previous.get(str(row.get("number")), {})
+        resumed = (str(prior.get("ticket_section") or "").strip().casefold() in human_review
+                   and str(row.get("ticket_section") or "").strip().casefold() not in human_review)
+        stale = row.get("state") in {"red", "pending", "protected"} and age(row) >= 2 * 60 * 60 and not resumed
+        if stale:
+            row["action"] = "observe"
+            row["pickup_slot"] = False
+            row["unfixable"] = True
 
-open_slots = [row for row in rows
-              if row.get("pickup_slot") is True
-              and row.get("state") in {"red", "pending", "awaiting-review"}]
-gates = [row for row in rows if not row.get("unfixable")]
-if len(open_slots) < 2:
-    gates = [row for row in gates if row.get("state") != "awaiting-review"]
+    open_slots = [row for row in rows
+                  if row.get("pickup_slot") is True
+                  and row.get("state") in {"red", "pending", "awaiting-review"}]
+    gates = [row for row in rows if not row.get("unfixable")]
+    if len(open_slots) < 2:
+        gates = [row for row in gates if row.get("state") != "awaiting-review"]
 
 # Prefer repairable failures when multiple open PRs fill the available slots.
 gates.sort(key=lambda row: (row.get("action") != "fix", str(row.get("since") or "")))

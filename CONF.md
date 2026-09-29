@@ -85,7 +85,8 @@ Pause is not a security boundary while agents run as the same Unix user: they ca
 | `SKILLS_INDEX` | Optional comma-separated extra indexes. |
 | `PAUSED` | `yes`, `true`, `1`, or `on` (case-insensitive) pauses poll ticks (including manual `--once`/`--ticket`), event delivery, chat replies, and board reconciliation. Only empty/absent, `no`, `false`, `0`, or `off` means running. Any other non-empty value warns and pauses (fail closed). The webhook remains registered; signed events received during a pause return 202 but are dropped, not replayed on resume. Queued events from before the pause wait until the dispatcher sees the resumed conf. Foreign-webhook audits and deactivation still run while paused. |
 | `PAUSED_REASON`, `PAUSED_AT` | Optional reason and UTC timestamp written by `agent-pause`; removed by `agent-resume`. |
-| `MAX_CONCURRENT_RUNS` | Runs started per tick, default 1. |
+| `MAX_CONCURRENT_RUNS` | Runs started per tick, default 1. `ONE_PR_UNTIL_LIVE=yes` caps development runs at 1 even when this is higher. |
+| `ONE_PR_UNTIL_LIVE` | `yes` keeps any agent-owned pull request bound until it closes or its merge commit has a successful Production deployment. It blocks new ticket pickup in every open PR state, including protected and green. An `emergency` ticket may interrupt. Defaults to `yes` for dev agents and `no` for other kinds. |
 | `RETRY_LIMIT` | Total failed attempts allowed per window. By default this is three plus the number of `LADDER` commands. |
 | `RETRY_WINDOW_SECONDS` | Failure window, default 21600. |
 | `RUN_COOLDOWN_SECONDS` | Minimum seconds between runs of one ticket without a new external comment, default 1800. |

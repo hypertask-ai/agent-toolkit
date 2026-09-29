@@ -351,11 +351,11 @@ our own message rather than "command not found" three layers down.
 
 1. Read the agent's conf and load its adapter.
 2. Take a non-blocking lock; if a tick is already running, exit.
-3. List open PRs owned through recorded run state, a dedicated GitHub login,
-   or an agent branch prefix whose matched ticket is assigned to that agent.
-   A prefix still counts when no ticket can be matched. Stop normal pickup only
-   when two open PRs occupy the agent's pickup slots. Closed and merged PRs
-   never bind an agent.
+3. List PRs owned through recorded run state, a dedicated GitHub login, or an
+   agent branch prefix whose matched ticket is assigned to that agent. A prefix
+   still counts when no ticket can be matched. For a dev agent,
+   `ONE_PR_UNTIL_LIVE=yes` is the default: one owned PR blocks normal pickup
+   until it closes or its merge commit has a successful Production deployment.
 4. List the board's tickets in the watched columns.
 5. Read each candidate's full ticket and comment thread. Classify the board
    owner's newest comment as `hold`, `go`, `question`, or `feedback`, then post
@@ -387,49 +387,42 @@ Otherwise, a branch starting with the agent slug, directly or after `agent/`
 agent or no ticket can be matched. An explicit `GH_LOGIN` that differs from the
 host `gh` login can also match the author. Slash, hyphen, and underscore
 separators all count, but partial slug matches do not. `dev-2` also recognizes
-`dev-cursor-2` and `cursor-dev-2`. The runner writes a created PR to the ledger
-before `gh pr create` returns, including when the run later reaches its watchdog
-cap. QA agents recognize only PRs in their own opened-PR ledger. Assignment
-alone and shared GitHub authorship do not transfer ownership. PR discovery uses
-one locked, host-wide REST cache per repository. It refreshes no more than once
-a minute and stores every open PR plus merges from the last 48 hours without PR
-bodies. The binding gate filters this cache to open PRs before ownership or
-labels can bind an agent. A `valentin-review` label makes an open PR
-manager-only. The runner leaves auto-merge off and starts no fix. Its PR remains bound,
-but uses no pickup slot while the ticket waits in `Valentin Review` or
-`HT Manager Review`. Leaving either lane resumes the PR ahead of new work when
-it needs attention. The runner never enables auto-merge. Its command shim
-no-ops merge requests and checks the label before any other allowed
-PR mutation. When GitHub reports a rate limit, all runners use its
+`dev-cursor-2` and `cursor-dev-2`. A human PR on a dev branch does not bind that
+agent when its ticket belongs to somebody else. An opened-PR record still proves
+ownership. The runner writes that record before `gh pr create` returns,
+including when the run later reaches its watchdog cap. QA agents recognize only
+PRs in their own opened-PR ledger. Assignment alone and shared GitHub authorship
+do not transfer ownership.
+
+`ONE_PR_UNTIL_LIVE=yes` is the default for dev agents. Any owned open PR blocks
+normal ticket pickup while it is red, pending, protected, green, or waiting for
+merge. A merged PR stays bound until the Production deployment after that merge
+succeeds and contains the merge commit. A closed unmerged PR releases the agent.
+The runner logs `waiting: <ticket> PR #<n> is not live yet` when this gate
+blocks pickup. It may still run fix rounds for the bound PR and answer comments.
+An `emergency` ticket is the only new development work that may interrupt.
+
+This mode caps development work at one run at a time even if
+`MAX_CONCURRENT_RUNS` is higher. Protected PRs never receive the two-hour grace
+release. Human review lanes keep the PR bound but start no fix until it leaves
+the lane. The runner never enables auto-merge. Its command shim no-ops merge
+requests and checks the label before any other allowed PR mutation.
+
+`ONE_PR_UNTIL_LIVE=no` retains the older two-slot policy. Under that policy,
+red, pending, or protected PRs older than two hours remain monitored but release
+their pickup slot, and one green PR does not block pickup. The two-hour alarm
+still appears on Board health. A matched ticket assigned to another agent
+prevents a branch prefix alone from binding the PR. The first tick each UTC day
+logs `orphaned PR #<n> (<branch>) has no owning agent` for supervisor follow-up.
+
+PR discovery uses one locked, host-wide REST cache per repository. It refreshes
+no more than once a minute and stores every open PR plus recent merges without
+PR bodies. A strict gate fetches an older ledger-recorded PR directly, so the
+recent-merge cache cutoff cannot release an undeployed merge. When GitHub
+reports a rate limit, all runners use its
 `X-RateLimit-Reset` header to pause repository calls. A paused tick logs `GitHub
 paused until HH:MM`, completes board reconciliation and comment replies, skips
 code and pull request work, and exits 75.
-
-Two open PRs outside human review lanes fill the pickup slots and stop every
-new claim, including an `emergency`. The runner ranks that queue oldest first.
-A red, pending, or protected PR older than two hours no longer uses a slot
-because another run has not made it fixable; it remains monitored and is
-reported on Board health. One green open PR never stops a new pickup. A matched
-ticket assigned to another agent prevents a branch prefix alone from binding
-the PR; an opened-PR record still proves ownership. The first tick each UTC day
-logs `orphaned PR #<n>
-(<branch>) has no owning agent` for supervisor follow-up.
-
-A merged or closed PR never binds an agent, regardless of its labels,
-deployment state, ticket section, or QA result. This filter runs before PR
-protection, so labels such as `valentin-review` cannot retain a binding after the
-PR leaves the open state.
-
-When two PRs fill the pickup slots, an open red PR gets another fix run with
-exact failed check names, failed-run logs, and verbatim `CONCERNS` or
-changes-requested review text. Pending checks consume the tick at that limit and
-log `waiting on PR #<n>: checks pending`. At two hours, either state creates one
-deduplicated toolkit bug in Review at High priority, notifies the toolkit agent
-room and configured Telegram chat, appears on Board health, and releases its
-pickup slot. The alarm stays in the health JSON until the PR clears; then it gets
-one timestamped cleared comment and moves to Done. A red bug includes every
-failed check name. A green open PR uses one slot but never blocks pickup by
-itself.
 
 PR fix runs never read the attempts file, apply a retry limit or cooldown, use
 the model escalation ladder, or hand work to a manager.
@@ -619,7 +612,8 @@ See `CONF.md` for the complete schema.
 | `RESEARCH_CLI` | optional advisor and research command; absent disables research |
 | `TRIAGE_HARD_CLI` | optional hard-ticket command; absent uses `MODEL_CLI` |
 | `CHAT_CLI` | optional chat command; absent uses `MODEL_CLI` |
-| `MAX_CONCURRENT_RUNS` | runs started per tick, default 1 |
+| `MAX_CONCURRENT_RUNS` | runs started per tick, default 1; strict one-PR dev agents are capped at 1 |
+| `ONE_PR_UNTIL_LIVE` | `yes` binds an owned PR through a successful Production deploy; defaults to `yes` for dev agents and `no` otherwise |
 | `CHAT` | `on` to answer through the host chat daemon, default `on` for non-CLI board agents |
 | `QUIET` | `on` redirects unmarked comments to activity and strips board-owner mentions except in a `Question:` or an `Answer:` to the owner's direct mention; default `on` |
 | `ANSWERER_FALLBACK` | fallback answerer slug when no mention, agent assignee, or prior `Answer:`, `Done:`, or `Decision:` author exists; default empty |

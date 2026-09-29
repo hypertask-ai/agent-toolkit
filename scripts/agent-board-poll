@@ -92,7 +92,21 @@ done
 [ -n "${PR_REPO:-}" ] || die \
   "PR_REPO is not set: every agent needs a repo, run create-agent --repo" \
   "run create-agent.sh --resume --pr-repo <org/name> for this agent, or add PR_REPO= to $CONF by hand"
+AGENT_KIND="${AGENT_KIND:-dev}"
+case "$AGENT_KIND" in
+  dev) ONE_PR_UNTIL_LIVE_DEFAULT="yes" ;;
+  *)   ONE_PR_UNTIL_LIVE_DEFAULT="no" ;;
+esac
+ONE_PR_UNTIL_LIVE="${ONE_PR_UNTIL_LIVE:-$ONE_PR_UNTIL_LIVE_DEFAULT}"
+case "$ONE_PR_UNTIL_LIVE" in
+  yes|no) : ;;
+  *) die "ONE_PR_UNTIL_LIVE must be yes or no, got '$ONE_PR_UNTIL_LIVE'" \
+       "set ONE_PR_UNTIL_LIVE=yes for a development agent" ;;
+esac
 MAX_CONCURRENT_RUNS="${MAX_CONCURRENT_RUNS:-1}"
+if [ "$AGENT_KIND" = "dev" ] && [ "$ONE_PR_UNTIL_LIVE" = "yes" ]; then
+  MAX_CONCURRENT_RUNS=1
+fi
 QUIET="${QUIET:-on}"
 case "$QUIET" in
   on|off) : ;;
@@ -168,7 +182,6 @@ done
 # through on the cheap model. Only an agent that BUILDS is scored: a QA agent
 # verifies somebody else's work and the difficulty of the fix is not its
 # problem.
-AGENT_KIND="${AGENT_KIND:-dev}"
 IN_PROGRESS_SECTION="${IN_PROGRESS_SECTION:-In Progress}"
 REVIEW_SECTION="${REVIEW_SECTION:-AI Review}"
 OWNER_REVIEW_SECTION="${OWNER_REVIEW_SECTION:-Review}"
@@ -3135,6 +3148,9 @@ raise SystemExit(0 if only_guard else 1)
   fi
   PR_OPEN_TICKETS="$(printf '%s\n' "$PR_GATES" | python3 -c 'import json,sys; [print(json.loads(line).get("ticket") or "") for line in sys.stdin if line.strip()]')"
   explain "bound to PR #$PR_GATE_NUMBER for $PR_GATE_TICKET: $PR_GATE_STATE"
+  if [ "$PR_PICKUP_BLOCKED" = "yes" ]; then
+    explain "waiting: $PR_GATE_TICKET PR #$PR_GATE_NUMBER is not live yet"
+  fi
 
   if [ "$PR_PICKUP_BLOCKED" = "no" ]; then
     rm -f "$BLOCKED"
@@ -3160,7 +3176,10 @@ raise SystemExit(0 if only_guard else 1)
   fi
   if [ -n "$gate_hold_reason" ]; then
     log "owned PR #$PR_GATE_NUMBER is not eligible for a fix round: $gate_hold_reason; no new-ticket ranking ran"
-    exit 0
+    if [ "$ONE_PR_UNTIL_LIVE" = "no" ]; then
+      exit 0
+    fi
+    PR_GATE_ACTION="wait"
   fi
 
   mkdir -p "$(dirname "$BLOCKED")"
@@ -3189,13 +3208,15 @@ os.replace(temporary, path)
   esac
 
   if [ "$PR_GATE_STATE" != "red" ] || [ "$PR_GATE_ACTION" != "fix" ]; then
-    [ "$DRY_RUN" = "no" ] || echo "bound to PR #$PR_GATE_NUMBER ($PR_GATE_STATE); no new ticket was ranked."
-    exit 0
-  fi
-  if [ "$DRY_RUN" = "yes" ]; then
-    echo "would run a structured fix round for PR #$PR_GATE_NUMBER; no new ticket was ranked."
-    exit 0
-  fi
+    if [ "$ONE_PR_UNTIL_LIVE" = "no" ]; then
+      [ "$DRY_RUN" = "no" ] || echo "bound to PR #$PR_GATE_NUMBER ($PR_GATE_STATE); no new ticket was ranked."
+      exit 0
+    fi
+  else
+    if [ "$DRY_RUN" = "yes" ] && [ "$ONE_PR_UNTIL_LIVE" = "no" ]; then
+      echo "would run a structured fix round for PR #$PR_GATE_NUMBER; no new ticket was ranked."
+      exit 0
+    fi
 
   pr_record="$RUN_RECORD_DIR/$SLUG-$PR_GATE_TICKET.json"
   pr_state="$(pr_fix_state "$pr_record")"
@@ -3257,13 +3278,15 @@ raise SystemExit(0 if (datetime.datetime.now(datetime.timezone.utc) - first).tot
     fix_round=$((PR_FIX_ROUNDS + 1))
   fi
   fi
+  fi
 else
   rm -f "$BLOCKED"
 fi
 
-# A red binding supplies the only candidate this tick. Do not list or rank new
-# tickets first: poll and exact-ticket event entry points share this path.
-if [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$PR_GATE_ACTION" = "fix" ]; then
+# The legacy multi-PR policy sends a red binding straight to repair. The
+# one-ticket policy still ranks the board so an emergency can interrupt it.
+if [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$PR_GATE_ACTION" = "fix" ] \
+   && [ "$ONE_PR_UNTIL_LIVE" = "no" ]; then
   OWNED_ROWS=""
   CANDIDATES=""
 else
@@ -3785,17 +3808,17 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
   fi
   if [ "$is_reply_only" = "no" ] && [ "$is_pr_fix" = "no" ] \
      && printf '%s\n' "$PR_OPEN_TICKETS" | grep -qxF "$ref"; then
-    explain "skip  $ref: its open PR is monitored without blocking new work"
+    explain "skip  $ref: its owned PR is already tracked by the PR gate"
     continue
   fi
   if [ "$is_reply_only" = "no" ] && [ "$PR_PICKUP_BLOCKED" = "yes" ] && [ "$is_pr_fix" = "no" ]; then
-    if [ "$PR_GATE_COUNT" -ge 2 ]; then
+    if [ "$ONE_PR_UNTIL_LIVE" = "no" ] && [ "$PR_GATE_COUNT" -ge 2 ]; then
       explain "skip  $ref: $PR_GATE_COUNT owned open PRs fill the pickup slots, so only PR #$PR_GATE_NUMBER may run"
       continue
     fi
     case ",$(row_labels "$row")," in
       *,emergency,*) : ;;
-      *) explain "skip  $ref: PR #$PR_GATE_NUMBER is not live, so only that PR or an emergency may run"; continue ;;
+      *) explain "skip  $ref: $PR_GATE_TICKET PR #$PR_GATE_NUMBER is not live yet; only that PR or an emergency may run"; continue ;;
     esac
   fi
 

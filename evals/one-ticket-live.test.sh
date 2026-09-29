@@ -794,9 +794,27 @@ AGENT_REPO="$TMP/repo"
 SKILLS_INDEX=""
 CLAIM_UNASSIGNED="no"
 TRIAGE="no"
+ONE_PR_UNTIL_LIVE="no"
 EOF
 state="$TMP/home/.local/state/agent-board-poll"
 mkdir -p "$state"
+
+set_dev_policy() {
+  POLICY="$1" LIMIT="$2" python3 - "$TMP/home/.config/hypertask-agents/dev-1.conf" <<'PYEOF'
+import os
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+text = re.sub(r'^ONE_PR_UNTIL_LIVE=.*\n', '', text, flags=re.MULTILINE)
+text = re.sub(r'^MAX_CONCURRENT_RUNS=.*\n', '', text, flags=re.MULTILINE)
+if os.environ["POLICY"] != "default":
+    text += 'ONE_PR_UNTIL_LIVE="%s"\n' % os.environ["POLICY"]
+text += 'MAX_CONCURRENT_RUNS="%s"\n' % os.environ["LIMIT"]
+open(path, "w", encoding="utf-8").write(text)
+PYEOF
+}
 set +e
 invalid_release_output="$(SECTION_SCENARIO=invalid AGENT_PR_CACHE_DIR="$TMP/invalid-release-cache" \
   PR_TEST_SCENARIO=pending BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" \
@@ -897,6 +915,60 @@ red_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-red_run" PR_TEST_SCENARIO=red B
 [[ "$red_run" == *'would run a structured fix round for PR #1; no new ticket was ranked.'* ]]
 [[ "$red_run" != *'would pick up HTPR-2'* ]]
 echo 'PASS one red PR starts only its structured repair path'
+
+: > "$state/dev-1.opened-prs"
+set_dev_policy default 3
+
+strict_green="$(ONE_PR_UNTIL_LIVE=yes run_gate green)"
+[[ "$strict_green" == *'"state": "awaiting-review"'* ]]
+[[ "$strict_green" == *'"blocks_pickup": true'* ]]
+echo 'PASS one-PR policy makes one open green PR block pickup'
+
+strict_undeployed="$(ONE_PR_UNTIL_LIVE=yes run_gate undeployed)"
+[[ "$strict_undeployed" == *'"state": "merged-undeployed"'* ]]
+[[ "$strict_undeployed" == *'"blocks_pickup": true'* ]]
+echo 'PASS merged PR blocks pickup while its Production deployment is pending'
+
+strict_deployed="$(ONE_PR_UNTIL_LIVE=yes run_gate deployed)"
+[[ -z "$strict_deployed" ]]
+echo 'PASS merged and deployed PR releases pickup'
+
+strict_closed="$(ONE_PR_UNTIL_LIVE=yes run_gate closed-protected)"
+[[ -z "$strict_closed" ]]
+echo 'PASS closed PR releases pickup'
+
+strict_protected="$(ONE_PR_UNTIL_LIVE=yes run_gate stale-protected)"
+[[ "$strict_protected" == *'"state": "protected"'* ]]
+[[ "$strict_protected" == *'"pickup_slot": true'* && "$strict_protected" == *'"blocks_pickup": true'* ]]
+echo 'PASS protected PR does not auto-release after the legacy grace period'
+
+rm -rf "$state/pr-live-cache"
+strict_emergency="$(AGENT_PR_CACHE_DIR="$TMP/strict-emergency-cache" PR_TEST_SCENARIO=green \
+  BOARD_TEST_SCENARIO=emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
+  COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$strict_emergency" == *'waiting: HTPR-1 PR #1 is not live yet'* ]]
+[[ "$strict_emergency" == *'would pick up HTPR-2'* ]]
+grep -qF 'explain: waiting: HTPR-1 PR #1 is not live yet' "$state/dev-1.log"
+echo 'PASS default one-PR policy logs a plain wait and lets an emergency interrupt'
+
+: > "$state/dev-2.opened-prs"
+strict_human_branch="$(ONE_PR_UNTIL_LIVE=yes run_gate human-foreign-prefix dev-2 'Dev Two' '' agent-2 2>/dev/null)"
+[[ -z "$strict_human_branch" ]]
+echo 'PASS human PR on a dev branch does not bind the agent that does not own its ticket'
+
+rm -rf "$TMP/strict-concurrency-state"
+rm -f "$TMP/strict-worker-prompts"
+XDG_STATE_HOME="$TMP/strict-concurrency-state" AGENT_PR_CACHE_DIR="$TMP/strict-concurrency-cache" \
+  PR_TEST_SCENARIO=deployed BOARD_TEST_SCENARIO=no-emergency RUN_COOLDOWN_SECONDS=0 \
+  HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" \
+  WORKER_LOG="$TMP/strict-worker-prompts" BOARD_CALL_LOG="$TMP/board-calls" \
+  BOARD_COMMENT_LOG="$TMP/board-comments" GH_CALL_LOG="$TMP/gh-calls" ACTION_LOG="$TMP/actions" \
+  "$ROOT/scripts/agent-board-poll" --once dev-1 >/dev/null
+grep -qF 'hit MAX_CONCURRENT_RUNS=1, leaving the rest for the next tick' \
+  "$TMP/strict-concurrency-state/agent-board-poll/dev-1.log"
+echo 'PASS one-PR policy caps development concurrency at one even when the conf asks for three'
+
+set_dev_policy no 1
 
 run_actual() {
   local scenario="$1" board_scenario="${2:-no-emergency}"
@@ -1142,4 +1214,4 @@ orphan_tick_log="$(tail -n "+$((orphan_log_before + 1))" "$state/dev-1.log")"
 [[ -s "$TMP/worker-prompts" ]]
 echo 'PASS dev tick logs an orphan once, ignores it, and claims work'
 
-echo '58 one-ticket-until-live checks passed'
+echo '66 one-ticket-until-live checks passed'
