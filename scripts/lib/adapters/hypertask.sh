@@ -159,7 +159,8 @@ adapter_pr_gate() (
   fi
   [ "$rc" -eq 0 ] || return "$rc"
   mkdir -p "$state_dir"
-  ROWS="$rows" NOW="${PR_GATE_NOW:-}" MONITOR="$monitor" python3 - <<'PYEOF'
+  ROWS="$rows" NOW="${PR_GATE_NOW:-}" MONITOR="$monitor" \
+    MAX_OPEN_PRS="${MAX_OPEN_PRS:-1}" python3 - <<'PYEOF'
 import datetime
 import json
 import os
@@ -204,7 +205,18 @@ open_slots = [row for row in rows
               if row.get("pickup_slot") is True
               and row.get("state") in {"red", "pending", "awaiting-review"}]
 gates = [row for row in rows if not row.get("unfixable")]
-if len(open_slots) < 2:
+# HR-02 (2026-09-29): a dev agent holds ONE fix until it is live, in any
+# state, awaiting-review included. This only makes room for an
+# awaiting-review PR to sit off the gate list (so it is monitored, not
+# reported as the pickup blocker) when the count of open pickup-slot PRs is
+# still below the configured cap; with the default cap of 1 that never
+# happens once one is open, so a lone awaiting-review PR blocks pickup like
+# any other open PR. Raising MAX_OPEN_PRS restores the old multi-slot room.
+try:
+    max_open_prs = int(os.environ.get("MAX_OPEN_PRS") or "1")
+except ValueError:
+    max_open_prs = 1
+if len(open_slots) < max_open_prs:
     gates = [row for row in gates if row.get("state") != "awaiting-review"]
 
 # Prefer repairable failures when multiple open PRs fill the available slots.

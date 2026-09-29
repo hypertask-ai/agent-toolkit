@@ -580,15 +580,24 @@ closed_protected="$(GH_CALL_LOG="$TMP/gh-calls" run_gate closed-protected)"
 ! grep -qE '/comments|/compare|/deployments' "$TMP/gh-calls"
 echo 'PASS a newly closed PR never binds despite valentin-review protection'
 
+# HR-02 (2026-09-29): MAX_OPEN_PRS defaults to 1, so a single owned PR, even
+# one that is merely awaiting review, now fills the pickup slot instead of
+# being set aside for a second one.
 green="$(run_gate green)"
-[[ -z "$green" ]]
+GREEN="$green" python3 -c '
+import json, os
+rows = [json.loads(line) for line in os.environ["GREEN"].splitlines() if line.strip()]
+assert len(rows) == 1
+assert rows[0]["number"] == 1 and rows[0]["state"] == "awaiting-review"
+assert rows[0]["pickup_slot"] is True and rows[0]["unfixable"] is False
+'
 python3 - "$TMP/home/.local/state/agent-board-poll/dev-1.monitored-prs.json" <<'PYEOF'
 import json, sys
 rows = json.load(open(sys.argv[1], encoding="utf-8"))
 assert len(rows) == 1 and rows[0]["state"] == "awaiting-review"
 assert rows[0]["pickup_slot"] is True and rows[0]["unfixable"] is False
 PYEOF
-echo 'PASS one open green PR is monitored without blocking pickup'
+echo 'PASS one open green PR counts toward the default one-PR pickup gate'
 
 stale_red="$(run_gate stale-red)"
 [[ -z "$stale_red" ]]
@@ -767,8 +776,17 @@ oldest="$(run_gate oldest)"
 [[ "$(printf '%s\n' "$oldest" | grep -c .)" = 2 ]]
 echo 'PASS every owed PR is returned oldest first'
 
+# The stale, unfixable red PR (#9) never counts toward the pickup slot; the
+# remaining green PR (#10) does, and under the default MAX_OPEN_PRS=1 that
+# alone is enough to surface as a gate.
 mixed="$(run_gate stale-red-green)"
-[[ -z "$mixed" ]]
+MIXED="$mixed" python3 -c '
+import json, os
+rows = [json.loads(line) for line in os.environ["MIXED"].splitlines() if line.strip()]
+assert len(rows) == 1
+assert rows[0]["number"] == 10 and rows[0]["state"] == "awaiting-review"
+assert rows[0]["pickup_slot"] is True and rows[0]["unfixable"] is False
+'
 python3 - "$TMP/home/.local/state/agent-board-poll/dev-1.monitored-prs.json" <<'PYEOF'
 import json, sys
 rows = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -776,7 +794,7 @@ assert rows[0]["number"] == 9 and rows[0]["action"] == "observe"
 assert rows[0]["pickup_slot"] is False and rows[0]["unfixable"] is True
 assert rows[1]["number"] == 10 and rows[1]["pickup_slot"] is True
 PYEOF
-echo 'PASS an old red PR and one green PR leave pickup unblocked'
+echo 'PASS an old unfixable red PR never fills the pickup slot; the remaining green PR does'
 
 # Run the real pickup path in dry-run mode.
 cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<EOF
@@ -848,9 +866,13 @@ two_green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-two_green_run" PR_TEST_SC
 echo 'PASS two green PRs fill both pickup slots'
 
 rm -rf "$state/pr-live-cache"
+# HR-02: with MAX_OPEN_PRS defaulting to 1, the still-open green PR (#10)
+# alone fills the pickup slot, even while the held PR (#9) sits in human
+# review and cannot itself be worked.
 review_and_green="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-review-and-green" PR_TEST_SCENARIO=two-green BOARD_TEST_SCENARIO=review-first HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$review_and_green" == *'would pick up HTPR-2'* && "$review_and_green" != *'no new ticket was ranked'* ]]
-echo 'PASS a held PR plus a green PR leaves room for new work'
+[[ "$review_and_green" == *'bound to PR #9 (protected); no new ticket was ranked.'* ]]
+[[ "$review_and_green" != *'would pick up'* ]]
+echo 'PASS a held PR plus a green PR still fills the one-PR pickup slot'
 
 for review_section in 'Valentin Review' 'HT Manager Review'; do
   rm -rf "$state/pr-live-cache"
@@ -863,10 +885,13 @@ done
 echo 'PASS leaving either human-review lane puts its PR ahead of new work'
 
 rm -rf "$state/pr-live-cache"
+# The stale red PR (#9) is unfixable and never fills the slot, but the
+# remaining green PR (#10) is a real open PR and, under the default
+# MAX_OPEN_PRS=1, blocks the next pickup on its own.
 stale_red_green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-stale_red_green_run" PR_TEST_SCENARIO=stale-red-green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$stale_red_green_run" == *'would pick up HTPR-2'* ]]
-[[ "$stale_red_green_run" != *'bound to PR'* ]]
-echo 'PASS old red and one green PR do not block the next pickup'
+[[ "$stale_red_green_run" == *'bound to PR #10 (awaiting-review); no new ticket was ranked.'* ]]
+[[ "$stale_red_green_run" != *'would pick up'* ]]
+echo 'PASS an old unfixable red PR does not block, but the remaining green PR does'
 
 rm -rf "$state/pr-live-cache"
 pending_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-pending_run" PR_TEST_SCENARIO=pending BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
@@ -881,10 +906,110 @@ event_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-event_run" PR_TEST_SCENARIO=p
 echo 'PASS exact-ticket event pickup obeys the same PR binding'
 
 rm -rf "$state/pr-live-cache"
+# HR-02 (2026-09-29): a dev agent holds one fix until it is live. Before this
+# fix, one open PR that was merely awaiting review did not fill the pickup
+# slot (the threshold was a hardcoded 2), so the agent could start a second
+# ticket while its first one was still open. MAX_OPEN_PRS now defaults to 1,
+# so a single owned PR in any open state blocks the next pickup.
 green_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-green_run" PR_TEST_SCENARIO=green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
-[[ "$green_run" == *'would pick up HTPR-2'* ]]
-[[ "$green_run" != *'bound to PR'* ]]
-echo 'PASS one green PR does not block normal pickup'
+[[ "$green_run" == *'bound to PR #1 (awaiting-review); no new ticket was ranked.'* ]]
+[[ "$green_run" != *'would pick up'* ]]
+echo 'PASS one green PR now blocks the next pickup (MAX_OPEN_PRS=1)'
+
+# Raising MAX_OPEN_PRS restores the old multi-slot behaviour: a second dev
+# conf that explicitly opts into two open PRs still lets a lone green PR
+# leave room for the next ticket.
+rm -rf "$state/pr-live-cache"
+cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<EOF
+AGENT_ID="agent-1"
+AGENT_NAME="Dev One"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+WATCH_SECTIONS="Bugs"
+MODEL_CLI="$TMP/bin/claude --print --model sonnet"
+SECOND_OPINION_CLI="$TMP/bin/reviewer"
+BOARD_CLI="$TMP/bin/hypertask"
+PR_REPO="example/repo"
+AGENT_REPO="$TMP/repo"
+SKILLS_INDEX=""
+CLAIM_UNASSIGNED="no"
+TRIAGE="no"
+MAX_OPEN_PRS="2"
+EOF
+raised_cap_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-raised-cap" PR_TEST_SCENARIO=green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$raised_cap_run" == *'would pick up HTPR-2'* ]]
+[[ "$raised_cap_run" != *'bound to PR'* ]]
+echo 'PASS MAX_OPEN_PRS=2 restores the old two-slot room for a lone green PR'
+
+# The open PR's own ticket still runs while pickup is blocked: a red PR (a
+# real fix, not just awaiting review) starts its structured repair round
+# rather than being skipped, proving the gate blocks new work, not owned work.
+rm -rf "$state/pr-live-cache"
+cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<EOF
+AGENT_ID="agent-1"
+AGENT_NAME="Dev One"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+WATCH_SECTIONS="Bugs"
+MODEL_CLI="$TMP/bin/claude --print --model sonnet"
+SECOND_OPINION_CLI="$TMP/bin/reviewer"
+BOARD_CLI="$TMP/bin/hypertask"
+PR_REPO="example/repo"
+AGENT_REPO="$TMP/repo"
+SKILLS_INDEX=""
+CLAIM_UNASSIGNED="no"
+TRIAGE="no"
+EOF
+own_ticket_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-own-ticket-run" PR_TEST_SCENARIO=red BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
+[[ "$own_ticket_run" == *'would run a structured fix round for PR #1; no new ticket was ranked.'* ]]
+[[ "$own_ticket_run" != *'would pick up'* ]]
+echo 'PASS the owned open PR keeps running its own fix round while pickup is blocked'
+
+# An invalid MAX_OPEN_PRS fails loudly at startup instead of silently.
+rm -rf "$state/pr-live-cache"
+cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<EOF
+AGENT_ID="agent-1"
+AGENT_NAME="Dev One"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+WATCH_SECTIONS="Bugs"
+MODEL_CLI="$TMP/bin/claude --print --model sonnet"
+SECOND_OPINION_CLI="$TMP/bin/reviewer"
+BOARD_CLI="$TMP/bin/hypertask"
+PR_REPO="example/repo"
+AGENT_REPO="$TMP/repo"
+SKILLS_INDEX=""
+CLAIM_UNASSIGNED="no"
+TRIAGE="no"
+MAX_OPEN_PRS="two"
+EOF
+set +e
+invalid_cap_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-invalid-cap" PR_TEST_SCENARIO=green BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1 2>&1)"
+invalid_cap_rc=$?
+set -e
+[[ "$invalid_cap_rc" -ne 0 ]]
+[[ "$invalid_cap_run" == *"MAX_OPEN_PRS must be a whole number, got 'two'"* ]]
+echo 'PASS an invalid MAX_OPEN_PRS fails loudly instead of silently'
+
+cat > "$TMP/home/.config/hypertask-agents/dev-1.conf" <<EOF
+AGENT_ID="agent-1"
+AGENT_NAME="Dev One"
+BOARD_ADAPTER="hypertask"
+BOARD_ID="15"
+TOKEN_FILE="$TMP/token"
+WATCH_SECTIONS="Bugs"
+MODEL_CLI="$TMP/bin/claude --print --model sonnet"
+SECOND_OPINION_CLI="$TMP/bin/reviewer"
+BOARD_CLI="$TMP/bin/hypertask"
+PR_REPO="example/repo"
+AGENT_REPO="$TMP/repo"
+SKILLS_INDEX=""
+CLAIM_UNASSIGNED="no"
+TRIAGE="no"
+EOF
 
 rm -rf "$state/pr-live-cache"
 undeployed_run="$(AGENT_PR_CACHE_DIR="$TMP/dry-pr-cache-undeployed_run" PR_TEST_SCENARIO=undeployed BOARD_TEST_SCENARIO=no-emergency HOME="$TMP/home" PATH="$TMP/bin:$PATH" COMPANY_SKILLS_DIR="$TMP/company" "$ROOT/scripts/agent-board-poll" --dry-run dev-1)"
