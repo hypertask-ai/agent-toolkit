@@ -1,0 +1,1 @@
+- Board-15 agent settings now replace stale ladders and fallback choices with Codex Sol 6.1 at high effort through hax during creation, installation, updates, and model changes. Approved Cursor Grok 4.7 high extra workers keep their settings. Live completion still requires the normal post-merge update and a completed end-to-end run.

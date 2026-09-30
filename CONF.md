@@ -13,6 +13,30 @@ Only an unresolved product decision (money, access, security, irreversible
 changes or product direction) gets one owner-mentioned `Question:` with a plain
 yes/no question and a move to `Valentin Review`. Other boards retain their rules.
 
+## Board 15 model settings
+
+Ordinary Hypertask board-15 agents use only `hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p` from `~/.local/bin`.
+Creation, installation, updates, and `agent-template model <slug> codex-sol` replace the entire model policy, including existing ladders and obsolete provider commands.
+Research keeps `--raw` but uses high effort too.
+Quota exhaustion waits for Codex rather than trying an old model.
+Existing owner-approved Cursor extra workers using `cursor-grok-4.7-high` keep their settings.
+Legacy configurations without `BOARD_ADAPTER` are not migrated.
+The generic examples below apply to other boards.
+
+The independent second-opinion checks still refuse the worker's own provider family.
+Board-15 second opinions therefore cannot run under the Sol-only policy and do not silently fall back to Claude.
+
+### Installation and live verification
+
+1. After this change merges and the toolkit release is available, run `agent-template update --keep-timers` through the normal operator update path.
+2. Check QA 1's effective `~/.config/hypertask-agents/Hypertask Product/qa-1.conf` and any separately managed staged copy for Sol 6.1 high commands and `PROVIDER_ORDER="codex"`.
+3. Regenerate staged settings through the updated toolkit, or pass their configuration directory to the updated `scripts/migrate-provider-policy.py --version <installed-version>` through the normal staging process.
+4. Verify a completed end-to-end QA 1 run records Codex, `gpt-6.1-sol`, high effort, and its final outcome before claiming live completion.
+
+Backups retain the previous settings for recovery and are not runnable configuration choices.
+An active service or passing configuration tests do not prove the installation or the completed live run.
+The app's already shipped code reviewer is unchanged.
+
 ## The conf decides the provider
 
 The conf owns each provider's full command and its subscription fallback order. The runner only switches commands when the current provider reports exhausted quota. Other failures keep the normal attempt and ladder behavior.

@@ -310,6 +310,8 @@ if [ "$DRY_RUN" = "yes" ]; then
   . "$SRC/scripts/lib/core.sh"
   core_guard_token_wrappers "$BIN" yes
   migrate_product_confs
+  python3 "$SRC/scripts/migrate-provider-policy.py" --version "$(cat "$SRC/VERSION")" \
+    --board15-only --dry-run "$AGENT_CONF_DIR"
   feedback_print_discovery
   exit 0
 fi
@@ -468,6 +470,8 @@ printf '{"title":"x","description":"y","comments":[]}' \
           "run $DEST/scripts/triage.sh --help and check python3 is present"
 
 migrate_product_confs
+python3 "$DEST/scripts/migrate-provider-policy.py" --version "$(cat "$DEST/VERSION")" \
+  --board15-only "$AGENT_CONF_DIR"
 migrate_queued_instructions
 
 # AGTE-13: a hand-made board wrapper that calls hypertask directly (like the

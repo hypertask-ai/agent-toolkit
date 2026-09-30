@@ -396,12 +396,16 @@ fi
 migrate="$TMP/migrate"
 mkdir -p "$migrate"
 cat > "$migrate/cursor.conf" <<'EOF'
+BOARD_ADAPTER="hypertask"
+BOARD_ID="99"
 MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
 EOF
 cat > "$migrate/pi.conf" <<'EOF'
 MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash"
 EOF
 cat > "$migrate/codex.conf" <<'EOF'
+BOARD_ADAPTER="hypertask"
+BOARD_ID="99"
 MODEL_CLI="/opt/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"
 LADDER="kept"
 EOF

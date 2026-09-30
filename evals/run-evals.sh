@@ -283,6 +283,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/command-policy.test.sh" ]; then
   echo "-- command policy behavioural checks --"
   run_test "$HERE/command-policy.test.sh" bash "$HERE/command-policy.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -f "$HERE/sol-model-policy.test.py" ]; then
+  echo ""
+  echo "-- board 15 Sol-only model settings --"
+  run_test "$HERE/sol-model-policy.test.py" python3 "$HERE/sol-model-policy.test.py" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/identity-shim.test.sh" ]; then
   echo ""
   echo "-- identity shim behavioural checks --"
