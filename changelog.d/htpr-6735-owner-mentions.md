@@ -1,0 +1,2 @@
+- Board 15 workers route owner-addressed comments to the supervisor in code, including raw, file and reply-only writes. Only ht-supervisor may mention the owner.
+- Supervisor-first prompts override the older quiet-mode mention exceptions on board 15.

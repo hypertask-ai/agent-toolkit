@@ -370,6 +370,9 @@ MOVED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.moved-tick
 OWNER_MENTIONS="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.owner-mentions"
 PLAIN_LANGUAGE_DIR="$plain_language_dir"
 PLAIN_LANGUAGE_CHECK="\$PLAIN_LANGUAGE_DIR/check-comment.py"
+WORKER_COMMENT_POLICY="\$PLAIN_LANGUAGE_DIR/worker-comment.py"
+SUPERVISOR=no
+if python3 "\$WORKER_COMMENT_POLICY" --is-supervisor "$slug"; then SUPERVISOR=yes; fi
 OUTBOUND_TEXT_GATE="\$PLAIN_LANGUAGE_DIR/outbound-text-gate.sh"
 POSPEAK_SKILL="\${AGENT_POSPEAK_SKILL:-\$PLAIN_LANGUAGE_DIR/pospeak.md}"
 TICKET_FORMAT_RULE="\${AGENT_TICKET_FORMAT_RULE:-\$PLAIN_LANGUAGE_DIR/ticket-format.md}"
@@ -632,6 +635,27 @@ print(text, end="")
 '
 }
 
+_worker_board15() {
+  [ "\$SUPERVISOR" = no ] || return 1
+  [[ "\${1:-}" == HTPR-* ]] || { [[ "\${1:-}" =~ ^[0-9]*$ ]] && [[ ",\$BOARD_IDS," == *,15,* ]]; }
+}
+
+_worker_comment() {
+  local original="\$TEXT"
+  _worker_board15 "\${REF:-}" || return 0
+  TEXT="\$(printf '%s' "\$TEXT" | python3 "\$WORKER_COMMENT_POLICY" "\${REF:-}" "\$BOARD_IDS")" || exit 1
+  if [ "\$TEXT" != "\$original" ]; then
+    if [ -z "\${REF:-}" ]; then
+      _comment_cap_note "worker owner mention refused: use comment add with the ticket so the supervisor can review it"
+      exit 1
+    fi
+    hypertask --token "\$TOKEN" task move "\$REF" --section "Supervisor Review" || exit 1
+    mkdir -p "\$(dirname "\$MOVED")"
+    printf '%s\t%s\n' "\$REF" "Supervisor Review" >> "\$MOVED"
+    _comment_cap_note "worker owner mention rewritten for the supervisor on \$REF; moved to Supervisor Review"
+  fi
+}
+
 # Check every ticket mutation before the writer, including direct model calls.
 REF=""
 case "\${1:-} \${2:-}" in
@@ -686,6 +710,12 @@ else:
   if [ "\$PROTECTION" != "ok" ]; then
     _comment_cap_note "ticket write skipped on \$REF: \$PROTECTION"
     exit 1
+  fi
+fi
+
+if [ "\${1:-} \${2:-}" = "task move" ] && _worker_board15 "\${3:-}"; then
+  if [[ " $* " == *" Valentin Review "* ]]; then
+    set -- task move "\$3" --section "Supervisor Review"
   fi
 fi
 
@@ -773,6 +803,7 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "update" ] && [ -n "\${3:-}" ]; th
   fi
   if [ -n "\$TEXT" ]; then
     ORIGINAL_TEXT="\$TEXT"
+    _worker_comment
     OWNER_IDS="\$(_board_owner_ids)"
     if [ "\$QUIET" = "on" ] && [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
       TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
@@ -833,6 +864,9 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
       Answer:*|Decision:*) MARKED=yes ;;
     esac
     AGENT_QA_VERDICT_BYPASS="\$QA_VERDICT"
+    if [ "\$OWNER_MENTION_REPLY" != yes ]; then
+      _worker_comment
+    fi
     OWNER_IDS="\$(_board_owner_ids)"
     if [ "\$OWNER_MENTION_REPLY" = yes ]; then
       TEXT="\$(_normalize_owner_answer "\$TEXT" "\$OWNER_IDS")"
@@ -846,6 +880,9 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
     fi
     if [ "\$RAW" != yes ]; then
       USE_IMPROVE=yes
+      if _worker_board15 "\$REF"; then
+        USE_IMPROVE=no
+      fi
       if ! _outbound_text_gate "\$TEXT" "\$VERBATIM"; then
         if [ "\$OWNER_MENTION_REPLY" = yes ]; then
           exit 1
@@ -3509,9 +3546,14 @@ is mechanical; do not post another. Plans, progress, checks, retries, blockers,
 costs, and gate ledgers are run activity, not comments. The board wrapper
 redirects any unmarked comment to activity.
 
-When QUIET is on, keep the board owner mention in a Question: comment and move
-the ticket to Valentin Review. A direct reply to the owner also keeps the
-mention even when the daily owner-mention allowance was already used. If a
+On board 15, workers never mention the owner or address him by name, even in
+an Answer: or Question:. Address blockers and decisions to the supervisor in a
+plain Question: comment and move the ticket to Supervisor Review. Only
+ht-supervisor may mention the owner, after trying to fix the blocker and
+commenting whether it could. If it truly needs a product decision, it posts
+one Question: with the owner mention and a plain yes/no question, then moves
+to Valentin Review. On other boards, when QUIET is on, keep the board owner
+mention in a Question: or a reply to the owner's direct mention. If a
 Question: mention is throttled, the wrapper posts the question without the
 mention and logs the throttle to run activity. The existing maximum of three comments
 per ticket per day and one reminder per day remains. An Answer to the owner is exempt from that cap and from quiet-mode redirection. Write as $agent_name, in HTML block tags, with

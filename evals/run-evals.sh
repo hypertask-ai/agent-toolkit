@@ -336,6 +336,11 @@ if [ -z "$ONLY" ] && [ -x "$HERE/comment-loop.test.sh" ]; then
   echo "-- comment loop behavioural checks --"
   run_test "$HERE/comment-loop.test.sh" bash "$HERE/comment-loop.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/owner-mention-route.test.sh" ]; then
+  echo ""
+  echo "-- board 15 owner mention routing --"
+  run_test "$HERE/owner-mention-route.test.sh" bash "$HERE/owner-mention-route.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/quiet-mode.test.sh" ]; then
   echo ""
   echo "-- current conf default migration checks --"
