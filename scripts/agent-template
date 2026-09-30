@@ -344,7 +344,7 @@ manager_model_command() {
   case "$1" in
     grok-fast) printf '%s' 'cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust' ;;
     glm-flash) printf '%s' 'pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash' ;;
-    codex-sol) printf '%s' '/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p' ;;
+    codex-sol) printf '%s' '/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p' ;;
     *) return 1 ;;
   esac
 }
@@ -1148,7 +1148,7 @@ PYEOF
   printf -v q_prompt '%q' "$prompt_file"
   printf -v q_out '%q' "$out_file"
   printf -v q_err '%q' "$err_file"
-  run_command=": > $q_out; : > $q_err; cd $q_repo; rc=\$?; if [ \"\$rc\" -eq 0 ]; then hax --provider=codex --model=gpt-5.6-sol --effort=$effort --no-session -p \"\$(cat $q_prompt)\" > $q_out 2> $q_err; rc=\$?; else echo \"could not enter the allowlisted checkout\" > $q_err; fi; echo \"hax rc=\$rc\" >> $q_out; exit \"\$rc\""
+  run_command=": > $q_out; : > $q_err; cd $q_repo; rc=\$?; if [ \"\$rc\" -eq 0 ]; then hax --provider=codex --model=gpt-6.1-sol --effort=$effort --no-session -p \"\$(cat $q_prompt)\" > $q_out 2> $q_err; rc=\$?; else echo \"could not enter the allowlisted checkout\" > $q_err; fi; echo \"hax rc=\$rc\" >> $q_out; exit \"\$rc\""
   set +e
   systemd-run --user --unit="$unit" -p "MemoryMax=$memory_max" --setenv=PATH="$PATH" \
     bash -c "$run_command" >/dev/null 2>&1
@@ -1956,7 +1956,7 @@ elif provider == "codex":
     if model and model != "auto":
         model_cli += " --model %s" % model
 elif provider == "claude":
-    model_cli = "/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+    model_cli = "/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"
 elif provider == "pi":
     model_cli = "pi --print --tools read,bash,edit,write --no-extensions --no-skills"
     if model and model != "auto":
