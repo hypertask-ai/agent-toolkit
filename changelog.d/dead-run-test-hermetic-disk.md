@@ -1,1 +1,2 @@
 - Evals: the dead-run reconcile test reports a healthy disk, so a nearly full agent host no longer fails the engine install with an unrelated disk-alarm ticket.
+- Evals: the one-ticket-until-live test gets 20 minutes instead of 10, since it takes about 6 minutes alone and timed out on the busy agent host during the staged install.
