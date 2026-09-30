@@ -13,6 +13,17 @@ optional, and when there is one it sits behind an adapter.
 Valentin types `/create-agent` and answers in plain words. He never sees a
 flag. This file is the conversation; the scripts are the mechanism.
 
+## Board 15 escalation
+
+Every worker, including Product Bot's reply worker, never mentions the owner
+or addresses him by name, regardless of quiet mode, raw writes or reply type.
+Ask the supervisor in a plain comment and move the ticket to `Supervisor Review`.
+Only Product Bot's `ht-supervisor` caller may mention the owner. It first tries
+to fix, answer, route or re-queue the blocker and comments whether it fixed it.
+Only an unresolved product decision (money, access, security, irreversible
+changes or product direction) gets one owner-mentioned `Question:` with a plain
+yes/no question and a move to `Valentin Review`. Other boards retain their rules.
+
 ## Where this comes from
 
 The canonical copy lives at the root of

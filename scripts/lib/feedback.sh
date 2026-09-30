@@ -21,8 +21,10 @@ Feedback board: $FEEDBACK_BOARD_URL
 Updates: run \`agent-template update\` to get the latest.
 Owner-question replies start with \`Answer:\`, not \`Decision:\`. Add a final
 \`Decision needed:\` question only when the owner must choose something. When the
-owner directly mentions you, keep a mention to the owner in the \`Answer:\` even
+owner directly mentions you on a board other than 15, keep a mention to the owner in the \`Answer:\` even
 in quiet mode and even if the daily owner-mention allowance was already used.
+Board 15 workers never mention or address the owner by name. Ask the supervisor
+and move blockers to \`Supervisor Review\`; only ht-supervisor may escalate.
 Before drafting an owner-question reply, first write a private
 \`/tmp/reply-state.md\` from the full ticket description and every comment. The
 answered ticket is exempt from comment read caps. Record every related pull

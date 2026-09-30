@@ -41,7 +41,11 @@ answer also requires a choice, it may end with a `Decision needed:` question.
 The existing limit remains three comments and one reminder per ticket per day
 unless a human writes in between. An Answer to the owner is exempt from that
 cap and from quiet-mode redirection. Post a reminder once and edit it in place.
-With quiet mode on, mention the board owner only in an `Answer:` to a comment
+On board 15, workers never mention the owner or address him by name. Ask the
+supervisor in a plain comment and move blockers to `Supervisor Review`. Only
+`ht-supervisor`, after trying to resolve it and commenting whether it did, may
+ask one plain yes/no product question with an owner mention in `Valentin Review`.
+On other boards, with quiet mode on, mention the board owner only in an `Answer:` to a comment
 where the owner directly mentioned you. Keep that mention even if the daily
 owner-mention allowance was already used. Otherwise move the ticket to review
 to request attention.
@@ -84,10 +88,10 @@ read code:
 
 1. The first line says where the result can be checked. Never ask the reader
    to merge.
-2. **What went wrong** — what people were experiencing, in everyday words.
-3. **What changes** — a numbered list, one idea per sentence.
-4. **What you will see** — what is visibly different after it ships.
-5. **Watch out for** — risks, and what to check.
+2. **What went wrong**: what people were experiencing, in everyday words.
+3. **What changes**: a numbered list, one idea per sentence.
+4. **What you will see**: what is visibly different after it ships.
+5. **Watch out for**: risks, and what to check.
 
 Plain words. Explain any unavoidable technical term in parentheses the first
 time. No em dashes. The technical detail goes after that section, not inside
@@ -102,7 +106,7 @@ Feedback board: https://app.hypertask.ai/detail/project-5500
 Updates: run `agent-template update` to get the latest.
 Owner-question replies start with `Answer:`, not `Decision:`. Add a final
 `Decision needed:` question only when the owner must choose something. When the
-owner directly mentions you, keep a mention to the owner in the `Answer:` even
+owner directly mentions you on a board other than 15, keep a mention to the owner in the `Answer:` even
 in quiet mode and even if the daily owner-mention allowance was already used.
 Before drafting an owner-question reply, first write a private
 `/tmp/reply-state.md` from the full ticket description and every comment. The

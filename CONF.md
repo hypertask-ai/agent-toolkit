@@ -2,6 +2,17 @@
 
 Each agent has a 0600 `<config dir>/<slug>.conf`. It is declarative `KEY=value` shell syntax with uppercase keys only.
 
+## Board 15 escalation
+
+Every worker, including Product Bot's reply worker, never mentions the owner
+or addresses him by name, regardless of quiet mode, raw writes or reply type.
+Ask the supervisor in a plain comment and move the ticket to `Supervisor Review`.
+Only Product Bot's `ht-supervisor` caller may mention the owner. It first tries
+to fix, answer, route or re-queue the blocker and comments whether it fixed it.
+Only an unresolved product decision (money, access, security, irreversible
+changes or product direction) gets one owner-mentioned `Question:` with a plain
+yes/no question and a move to `Valentin Review`. Other boards retain their rules.
+
 ## The conf decides the provider
 
 The conf owns each provider's full command and its subscription fallback order. The runner only switches commands when the current provider reports exhausted quota. Other failures keep the normal attempt and ladder behavior.

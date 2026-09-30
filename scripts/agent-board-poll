@@ -253,7 +253,7 @@ TERMINAL_ADHD_SKILL="${VALENTIN_ADHD_SKILL:-$HOME/.claude/skills/i-have-adhd/SKI
 if [ ! -r "$TERMINAL_ADHD_SKILL" ]; then
   TERMINAL_ADHD_SKILL="$HOME/.claude/plugins/marketplaces/i-have-adhd/skills/i-have-adhd/SKILL.md"
 fi
-PLAIN_LANGUAGE_PROMPT="Question: comments keep the board owner mention when asking for a decision. For every Question:, Answer:, Decision:, Handoff:, or Done: ticket comment, follow the four rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
+PLAIN_LANGUAGE_PROMPT="On board 15, workers never mention the owner or address him by name. When stuck or needing a decision, write a plain Question: addressed to the supervisor and move to Supervisor Review. Only ht-supervisor may mention the owner after trying to resolve the blocker and commenting whether it fixed it. An unresolved product decision becomes one Question: with a yes/no product question and owner mention in Valentin Review. On other boards, Question: comments keep the board owner mention when asking for a decision. For every Question:, Answer:, Decision:, Handoff:, or Done: ticket comment, follow the four rule texts below verbatim. The comment is read by a product owner on a phone. The canonical agent communication skill is $TALK_TO_VALENTIN_SKILL when that company-pack path is installed. Before posting, use an HTML <p> first, bold its complete first sentence, stay at or below 80 words, remove paths, function calls, code spans, commit hashes, and em dashes, write every ticket reference as <a href=\"https://...\">TICKET-ID Authoritative title</a>, put every PR reference inside a full https <a href>, and end the last block with a question mark or start it with Next:. Handoff: and Done: must each include one sentence explaining what shipped and cannot be only a link.
 
 POSPEAK RULES, VERBATIM:
 $(cat "$POSPEAK_SKILL")
@@ -4317,7 +4317,11 @@ Ask Graft before grepping: use \`graft ask '<question>'\` or the Graft MCP tools
   fi
 
   if [ "$is_reply_only" = "yes" ]; then
-    if [ "$owner_mention_reply" = "yes" ]; then
+    if [[ ",$BOARD_ID," == *,15,* ]]; then
+      PROMPT="$PROMPT
+
+BOARD 15: Never @mention the owner or address him by name, even in a reply to his mention. Answer directly without his name. If stuck or needing a decision, address the supervisor in a plain Question: and move to Supervisor Review. Only ht-supervisor escalates an unresolved product decision to the owner."
+    elif [ "$owner_mention_reply" = "yes" ]; then
       PROMPT="$PROMPT
 
 QUIET MODE: The board owner directly @mentioned you. Start the Answer: reply with an HTML mention to the owner. This exception keeps the mention even when the daily owner-mention allowance was already used. Leave the ticket in its current column."
@@ -4333,7 +4337,7 @@ COMMENT CONTRACT: A ticket comment must start with exactly one of these five mar
 
 $PLAIN_LANGUAGE_PROMPT
 
-QUIET MODE: QUIET=$QUIET. When it is on, keep the owner mention in a Question: comment and move the ticket to Valentin Review. An Answer: replying to the owner's direct mention also keeps the mention. If the owner-mention budget is exhausted, the wrapper logs the throttle to run activity and still posts Question: without the mention."
+QUIET MODE: QUIET=$QUIET. Board 15 workers never mention or address the owner, regardless of quiet mode or reply type. Ask the supervisor and move to Supervisor Review. Only ht-supervisor may escalate a genuine unresolved product decision with one owner-mentioned Question: to Valentin Review. On other boards, when quiet mode is on, keep the owner mention in a Question: comment and move the ticket to the owner review column. An Answer: replying to the owner's direct mention also keeps the mention. If the owner-mention budget is exhausted, the wrapper logs the throttle to run activity and still posts Question: without the mention."
   fi
 
   RUN_DIR="${AGENT_REPO:-}"
