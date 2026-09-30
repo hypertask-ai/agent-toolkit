@@ -40,7 +40,10 @@ class SolModelPolicy(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
-        self.env = dict(os.environ, HOME=str(self.home), PYTHONDONTWRITEBYTECODE="1")
+        runtime = self.home / "runtime"
+        runtime.mkdir(mode=0o700)
+        self.env = dict(os.environ, HOME=str(self.home), XDG_RUNTIME_DIR=str(runtime),
+                        PYTHONDONTWRITEBYTECODE="1")
 
     def run_policy(self, *args):
         return subprocess.run(
