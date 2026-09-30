@@ -18,6 +18,16 @@ _enforce_plain_comment() {
     return 0
   fi
   mkdir -p "$(dirname "$RUN_LOG")" 2>/dev/null || true
+  if [ "${AGENT_QA_VERDICT_BYPASS:-no}" = yes ]; then
+    # A QA verdict is the run's required result: log the shape problems but
+    # post it, so a wording issue never turns a real verdict into a failed run.
+    {
+      printf '%s plain-language-warning: QA verdict posted despite shape check\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'plain-language-warning: reasons follow\n%s\n' "$reasons"
+    } >> "$RUN_LOG" 2>/dev/null || true
+    TEXT="$original"
+    return 0
+  fi
   case "$kind" in
     Done|Handoff)
       if [ -n "${AGENT_HELD_COMMENT_FILE:-}" ]; then

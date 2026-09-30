@@ -765,6 +765,19 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
   fi
   if [ -n "\$TEXT" ]; then
     ORIGINAL_TEXT="\$TEXT"
+    # A QA verdict (Done:, Handoff:, Question: from a QA-kind run) is the
+    # run's required result. The per-ticket cap, near-duplicate update, owner
+    # mention refusal and plain-language hold are for chatter, so they never
+    # block a verdict; they only strip a throttled mention or log the hold.
+    QA_VERDICT=no
+    MARKED=no
+    case "\$(_plain_comment "\$TEXT")" in
+      Done:*|Handoff:*|Question:*)
+        MARKED=yes
+        [ "\${AGENT_RUNNER_KIND:-\${AGENT_KIND:-}}" != qa ] || QA_VERDICT=yes ;;
+      Answer:*|Decision:*) MARKED=yes ;;
+    esac
+    AGENT_QA_VERDICT_BYPASS="\$QA_VERDICT"
     OWNER_IDS="\$(_board_owner_ids)"
     if [ "\$QUIET" = "on" ] && [ "\$VERBATIM" != "yes" ] && [ "\$OWNER_MENTION_REPLY" != "yes" ] \
        && [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
@@ -869,16 +882,21 @@ elif new_owner_mention:
 else:
     print("OK")
 ')"
-    if [ "\$VERBATIM" = "yes" ] && [[ "\$VERDICT" = UPDATE:* ]]; then
+    if { [ "\$VERBATIM" = "yes" ] || [ "\$QA_VERDICT" = "yes" ]; } && [[ "\$VERDICT" = UPDATE:* ]]; then
+      VERDICT="OK"
+    fi
+    if [ "\$QA_VERDICT" = "yes" ] && [ "\$VERDICT" = "CAP" ]; then
+      _comment_cap_note "comment cap bypassed on \$REF: QA verdict always posts (owner mention removed)"
+      TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
       VERDICT="OK"
     fi
     case "\$VERDICT" in
       OWNER|OWNER_UNKNOWN)
-        if [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
+        if [ "\$QA_VERDICT" != "yes" ] && [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
           _comment_cap_note "owner-mention budget: comment add refused on \$REF (\$VERDICT)"
           exit 0
         fi
-        _run_activity action "owner-mention budget: throttled Question: on \$REF (\$VERDICT); posting without mention"
+        _run_activity action "owner-mention budget: throttled \$([ "\$QA_VERDICT" = yes ] && echo 'QA verdict' || echo 'Question:') on \$REF (\$VERDICT); posting without mention"
         TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
         VERDICT=OK ;;
       UPDATE:*)
@@ -961,6 +979,23 @@ print(comment.get("id") or "")' 2>/dev/null || true)"
         else
           RC=\$?
         fi
+      fi
+    elif [ "\$USE_IMPROVE" = yes ] && [ "\$MARKED" = yes ]; then
+      # The server-side improve-readability rewrite drops the leading marker
+      # (Done:, Handoff:, Question:, Answer:, Decision:), and QA verdict and
+      # hand-off detection read that marker. Use the checked writer instead:
+      # it keeps the marker or falls back to the original text.
+      _write_comment_with_ai "\$TEXT" "\$REF"
+      _outbound_text_gate "\$TEXT" "\$VERBATIM" || exit 0
+      for ((i = 0; i < \${#FALLBACK_ARGS[@]}; i++)); do
+        if [ "\${FALLBACK_ARGS[\$i]}" = "--text" ]; then
+          FALLBACK_ARGS[\$((i + 1))]="\$TEXT"
+        fi
+      done
+      if OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
+        RC=0
+      else
+        RC=\$?
       fi
     elif [ "\$USE_IMPROVE" = yes ]; then
       POST_ARGS+=(--improve --improve-command improve-readability)
