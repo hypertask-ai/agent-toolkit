@@ -4628,6 +4628,15 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
       rc=0
     else
       rc=$?
+      printf 'reply model exited %s; retrying once\n' "$rc" >> "$ERRFILE"
+      if run_reply_model "$PROMPT" "$RETRY_REPLY_FILE" "$RETRY_ERR_FILE"; then
+        cp "$RETRY_REPLY_FILE" "$REPLY_FILE"
+        rc=0
+      else
+        rc=$?
+        cat "$RETRY_ERR_FILE" >> "$ERRFILE" 2>/dev/null || true
+        printf 'reply retry exited %s\n' "$rc" >> "$ERRFILE"
+      fi
     fi
     if [ "$rc" -eq 0 ]; then
       cp "$REPLY_FILE" "$ORIGINAL_REPLY_FILE"
@@ -4712,7 +4721,33 @@ $(cat "$ORIGINAL_REPLY_FILE")"
       fi
     fi
     if [ "$rc" -ne 0 ]; then
-      printf 'I could not answer this, error logged\n' > "$ERROR_FALLBACK_FILE"
+      reason="$(python3 - "$ERRFILE" "$RETRY_ERR_FILE" <<'PY'
+import sys
+lines = []
+for path in sys.argv[1:]:
+    try:
+        lines.extend(open(path, encoding="utf-8", errors="replace"))
+    except OSError:
+        pass
+cleaned = [line.strip() for line in lines if line.strip() and "retrying once" not in line and "reply retry exited" not in line and "reply model exited" not in line]
+print(cleaned[-1] if cleaned else "the reply stopped before it could be posted")
+PY
+)"
+      REASON="$reason" OWNER_ID="${owner_id:-6}" OWNER_NAME="Valentin" \
+        MENTION="$owner_mention_reply" CLASSIFICATION="${owner_classification:-}" python3 -c '
+import html, os, re
+reason = " ".join(os.environ["REASON"].split()).replace("\u2014", "-").replace("\u2013", "-")
+reason = re.sub(r"/+\S+", "a local file", reason)[:160] or "the reply stopped before it could be posted"
+mention_owner = os.environ["MENTION"] == "yes" or os.environ["CLASSIFICATION"] == "question"
+owner_id = re.sub(r"[^A-Za-z0-9_-]", "", os.environ["OWNER_ID"]) or "6"
+owner_name = os.environ["OWNER_NAME"].strip() or "Valentin"
+if mention_owner:
+    lead = "Answer: <span data-type=\"mention\" class=\"mention\" data-id=\"%s\" data-label=\"name-%s\">%s</span>, I could not answer this." % (
+        html.escape(owner_name, quote=True), html.escape(owner_id, quote=True), html.escape(owner_name))
+else:
+    lead = "Answer: I could not answer this."
+print("<p><strong>%s</strong></p><p>%s</p><p>Next: ask again if you still need an answer.</p>" % (lead, html.escape(reason)))
+' > "$ERROR_FALLBACK_FILE"
       if (export AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY="$owner_mention_reply" \
           AGENT_REPLY_TO_COMMENT_ID="$comment_id"; \
           post_ticket_comment "$ref" raw-file "$ERROR_FALLBACK_FILE"); then

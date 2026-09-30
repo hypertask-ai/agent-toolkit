@@ -536,5 +536,50 @@ else
   bad worker-done-still-held "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/worker-held.err")"
 fi
 
+: > "$MECH_POSTS"
+owner_buried='<p><strong><span data-type="mention" data-id="6" data-label="Valentin Yeo">Valentin Yeo</span> Answer: The board loaded.</strong></p><p>Next: check the screenshot.</p>'
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+  AGENT_REPLY_ONLY=yes AGENT_OWNER_MENTION_REPLY=yes \
+  "$TMP/noise-board" comment add TEST-1 --text "$owner_buried" >"$TMP/owner-cap.out" 2>"$TMP/owner-cap.err"
+owner_shape=no
+if python3 - "$MECH_POSTS" <<'PY'
+import html, re, sys
+post = open(sys.argv[1], encoding="utf-8").read()
+start = post.find("<p>")
+raise SystemExit(1 if start < 0 else 0)
+PY
+then
+  if python3 - "$MECH_POSTS" <<'PY'
+import html, re, sys
+post = open(sys.argv[1], encoding="utf-8").read()
+body = post[post.find("<p>"):]
+plain = " ".join(html.unescape(re.sub(r"<[^>]+>", " ", body)).split())
+ok = plain.startswith("Answer:") and ("data-label=\"name-6\"" in body or "data-label='name-6'" in body) and "The board loaded." in plain
+raise SystemExit(0 if ok else 1)
+PY
+  then
+    owner_shape=yes
+  fi
+fi
+if [ "$(wc -l < "$MECH_POSTS")" -eq 1 ] \
+   && [ "$owner_shape" = yes ] \
+   && ! grep -qF 'redirected unmarked ticket comment to run activity' "$TMP/owner-cap.err" \
+   && ! grep -qF 'daily cap reached' "$TMP/owner-cap.err"; then
+  ok owner-answer-posts-at-cap 'an owner Answer posts for real in quiet mode even at the daily cap'
+else
+  bad owner-answer-posts-at-cap "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/owner-cap.err")"
+fi
+
+: > "$MECH_POSTS"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" \
+  "$TMP/noise-board" comment add TEST-1 --text '<p>Thanks, still looking at the board.</p>' >"$TMP/chatter.out" 2>"$TMP/chatter.err"
+if [ ! -s "$MECH_POSTS" ] \
+   && grep -qF 'run-activity: action Thanks, still looking at the board.' "$TMP/state/agent-board-poll/noise-test.log" \
+   && grep -qF 'redirected unmarked ticket comment to run activity' "$TMP/chatter.err"; then
+  ok quiet-chatter-stays-activity 'a non-owner chatter comment in quiet mode still goes to activity'
+else
+  bad quiet-chatter-stays-activity "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/chatter.err")"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

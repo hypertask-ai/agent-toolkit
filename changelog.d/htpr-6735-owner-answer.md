@@ -1,0 +1,1 @@
+- An answer to the board owner is always a real ticket comment. It starts with Answer:, keeps the owner mention, and is exempt from quiet mode and the daily comment cap. If the reply fails, the engine retries once and then posts a real comment saying it could not answer and why.

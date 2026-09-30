@@ -135,7 +135,8 @@ know; `Handoff:` names the receiving agent and explains what shipped; and
 `Handoff:` nor `Done:` can be only a link. Everything else is run activity. A
 reminder that qualifies as a decision is posted once and then edited in place,
 never re-posted. The existing limit remains one reminder and three comments per
-ticket per day unless a human writes in between. With `QUIET="on"`, the wrapper
+ticket per day unless a human writes in between. An Answer to the owner is
+exempt from that cap and from quiet-mode redirection. With `QUIET="on"`, the wrapper
 strips and logs board-owner mentions except when an `Answer:` replies to the
 owner's direct mention. That reply keeps the owner mention even if its daily
 allowance was already used. Moving the ticket to review requests attention in

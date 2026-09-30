@@ -255,7 +255,12 @@ fallback_stamp_ok=no
 if python3 - "$TMP/failure-request.json" <<'PYEOF'
 import json, sys
 row = json.load(open(sys.argv[1], encoding="utf-8"))
-assert row == {"ticket_number": "TEST-4", "text": "I could not answer this, error logged", "reply_to_comment_id": 99}
+assert row["ticket_number"] == "TEST-4"
+assert row["reply_to_comment_id"] == 99
+assert row["text"].startswith("<p><strong>Answer:")
+assert "I could not answer this." in row["text"]
+assert "provider unavailable" in row["text"]
+assert row["text"].rstrip().endswith("<p>Next: ask again if you still need an answer.</p>")
 PYEOF
 then
   fallback_stamp_ok=yes
@@ -263,7 +268,7 @@ fi
 if [ -f "$status_file" ] \
    && [ "$fallback_stamp_ok" = yes ] \
    && python3 -c 'import json,sys; row=json.load(open(sys.argv[1])); assert row["state"] == "failed" and row["ticket"] == "TEST-4"' "$status_file" \
-   && ! grep -q 'comment add TEST-4 --text I could not answer this, error logged' "$board_capture" \
+   && ! grep -q 'comment add TEST-4 --text' "$board_capture" \
    && ! grep -q '^task-TEST-4:99$' "$state/agent-board-poll/test.seen" \
    && grep -q 'no new human or other-agent comment bypasses the 1800s ticket cooldown' "$TMP/failure-next.out" \
    && ! grep -q 'would pick up TEST-4' "$TMP/failure-next.out"; then

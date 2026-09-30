@@ -59,7 +59,9 @@ _outbound_text_gate() {
         return 1
       } ;;
     *)
-      if [ "${AGENT_REPLY_ONLY:-no}" != "yes" ]; then
+      if [ "${OWNER_MENTION_REPLY:-no}" = "yes" ]; then
+        kind="Answer"
+      elif [ "${AGENT_REPLY_ONLY:-no}" != "yes" ]; then
         _outbound_gate_activity action "${plain:-empty comment}"
         _outbound_gate_note "quiet mode: redirected unmarked ticket comment to run activity"
         return 1
