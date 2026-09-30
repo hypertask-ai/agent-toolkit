@@ -238,7 +238,7 @@ if [ "$(cat "$TMP/timeout")" = 300 ] \
    && [ ! -s "$TMP/reply-content" ] \
    && [ "$(cat "$TMP/reply-cwd")" != "$TMP/repo" ] \
    && grep -qxF -- '--provider=codex' "$TMP/hax" \
-   && grep -qxF -- '--model=gpt-5.6-sol' "$TMP/hax" \
+   && grep -qxF -- '--model=gpt-6.1-sol' "$TMP/hax" \
    && grep -qxF -- '--effort=high' "$TMP/hax" \
    && grep -qxF -- '--no-session' "$TMP/hax" \
    && grep -qxF -- '--raw' "$TMP/hax" \

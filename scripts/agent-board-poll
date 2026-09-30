@@ -2131,7 +2131,7 @@ run_reply_model() {
   (
     cd "$reply_dir" || exit 127
     "$timeout_bin" 300 "$hax_bin" \
-      --provider=codex --model=gpt-5.6-sol --effort=high \
+      --provider=codex --model=gpt-6.1-sol --effort=high \
       --no-session --raw -p "$prompt"
   ) > "$reply_file" 2> "$err_file"
   rc=$?
@@ -4530,7 +4530,7 @@ Second-opinion verdict: $REVERT_GUARD_DIAGNOSIS"
   fi
   if [ "$is_reply_only" = "yes" ]; then
     RUN_MODEL_RUNG="reply-codex-sol-high"
-    RUN_MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session --raw -p"
+    RUN_MODEL_CLI="hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session --raw -p"
   elif [ "$is_pr_fix" = "yes" ]; then
     RUN_MODEL_RUNG="pr-fix"
     RUN_MODEL_CLI="$MODEL_CLI"
@@ -4607,7 +4607,7 @@ print(json.dumps({"ticket": os.environ["REF"], "ticket_id": int(identity) if ide
   # draft to a file; core validates and posts it only after the sandbox exits.
   if [ "$is_reply_only" = "yes" ]; then
     RUN_MODEL_RUNG="reply-codex-sol-high"
-    RUN_MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session --raw -p"
+    RUN_MODEL_CLI="hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session --raw -p"
     REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.html"
     ORIGINAL_REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.original.html"
     RETRY_REPLY_FILE="$STATE_DIR/$SLUG-$ref.reply.retry.html"

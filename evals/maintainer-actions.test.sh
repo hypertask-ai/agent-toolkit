@@ -265,7 +265,7 @@ if [ "$build" = "build started: $build_id" ] \
    && ! grep -qF 'gh pr checks --watch --interval 30' "$prompt" \
    && grep -q 'never edit VERSION or CHANGELOG.md' "$prompt" \
    && grep -q 'change one file' "$prompt" \
-   && grep -q -- '--provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session' "$TMP/hax.log" \
+   && grep -q -- '--provider=codex --model=gpt-6.1-sol --effort=xhigh --no-session' "$TMP/hax.log" \
    && grep -q -- '-p MemoryMax=7G --setenv=PATH=' "$TMP/systemd-run.log" \
    && ! grep -q -- '--collect' "$TMP/systemd-run.log" \
    && [ "$(python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))[0]; print(r["status"],r["unit"])' "$record")" = "running codex-allowed-${build_id#allowed-}" ]; then

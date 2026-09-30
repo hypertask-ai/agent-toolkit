@@ -152,10 +152,10 @@ EOF
 enable_provider_fallback() {
   cat >> "$TMP/home/.config/agents/test.conf" <<'EOF'
 PROVIDER_ORDER="codex,cursor"
-PROVIDER_CODEX_CLI="hax --provider=codex --model=gpt-5.6-sol -p"
+PROVIDER_CODEX_CLI="hax --provider=codex --model=gpt-6.1-sol -p"
 PROVIDER_CURSOR_CLI="cursor-agent -p --model cursor-grok-4.6-high-fast"
 EOF
-  sed -i 's#^MODEL_CLI=.*#MODEL_CLI="hax --provider=codex --model=gpt-5.6-sol -p"#' "$TMP/home/.config/agents/test.conf"
+  sed -i 's#^MODEL_CLI=.*#MODEL_CLI="hax --provider=codex --model=gpt-6.1-sol -p"#' "$TMP/home/.config/agents/test.conf"
 }
 
 seed_failures() {
@@ -397,17 +397,17 @@ cat > "$migrate/pi.conf" <<'EOF'
 MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash"
 EOF
 cat > "$migrate/codex.conf" <<'EOF'
-MODEL_CLI="/opt/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+MODEL_CLI="/opt/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"
 LADDER="kept"
 EOF
 HOME="$TMP/home" python3 "$ROOT/scripts/migrate-provider-policy.py" \
   --version 3.16.0 "$migrate" > "$TMP/migrate.out"
-if grep -q '^LADDER=.*/hax --provider=codex.*|.*/hax --provider=codex.*|.*/hax --provider=codex.*--model=gpt-5.6-sol' "$migrate/cursor.conf" \
+if grep -q '^LADDER=.*/hax --provider=codex.*|.*/hax --provider=codex.*|.*/hax --provider=codex.*--model=gpt-6.1-sol' "$migrate/cursor.conf" \
    && grep -q '^RESEARCH_CLI=.*/hax --provider=codex.*--effort=xhigh' "$migrate/cursor.conf" \
    && grep -q '^TRIAGE_HARD_CLI=.*/hax --provider=codex.*--effort=high' "$migrate/cursor.conf" \
    && [ -f "$migrate/cursor.conf.bak-3.16.0" ] \
    && grep -qxF 'PROVIDER_ORDER="codex,cursor"' "$migrate/codex.conf" \
-   && grep -qxF 'PROVIDER_CODEX_CLI="/opt/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"' "$migrate/codex.conf" \
+   && grep -qxF 'PROVIDER_CODEX_CLI="/opt/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"' "$migrate/codex.conf" \
    && grep -qxF 'PROVIDER_CURSOR_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"' "$migrate/codex.conf" \
    && grep -qxF 'LADDER="kept"' "$migrate/codex.conf" \
    && cmp -s "$migrate/pi.conf" <(printf '%s\n' 'MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash"') \

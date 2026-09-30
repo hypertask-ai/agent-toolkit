@@ -330,7 +330,7 @@ worker_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' 
 model="$(AGENT_SLUG=manager run_template model worker codex-sol)"
 worker_backups_after="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' | wc -l)"
 if [ "$model" = 'model worker codex-sol: changed worker.conf' ] \
-   && grep -q '^MODEL_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"$' "$CONF_DIR/worker.conf" \
+   && grep -q '^MODEL_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"$' "$CONF_DIR/worker.conf" \
    && [ "$worker_backups_after" -eq $((worker_backups_before + 1)) ]; then
   ok model-uses-codex-sol "MODEL_CLI changed to the exact Codex subscription command"
 else

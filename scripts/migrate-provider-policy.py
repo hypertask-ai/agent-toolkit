@@ -77,9 +77,9 @@ def migrate(path: Path, version: str, dry_run: bool) -> bool:
 
     additions: dict[str, str] = {}
     binary = str(Path.home() / ".local/bin/hax")
-    high = f"{binary} --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+    high = f"{binary} --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"
     if not any(key in values for key in POLICY_KEYS) and had_314_policy(command):
-        research = f"{binary} --provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session --raw -p"
+        research = f"{binary} --provider=codex --model=gpt-6.1-sol --effort=xhigh --no-session --raw -p"
         additions.update({
             "LADDER": f"{high}|{high}|{high}",
             "RESEARCH_CLI": research,

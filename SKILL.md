@@ -584,13 +584,13 @@ MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills -
 A Codex-first conf can fall back to Cursor within the same run:
 
 ```sh
-MODEL_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+MODEL_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"
 PROVIDER_ORDER="codex,cursor"
-PROVIDER_CODEX_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+PROVIDER_CODEX_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"
 PROVIDER_CURSOR_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"
-LADDER="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
-RESEARCH_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=xhigh --no-session --raw -p"
-TRIAGE_HARD_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-5.6-sol --effort=high --no-session -p"
+LADDER="/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p|/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"
+RESEARCH_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=xhigh --no-session --raw -p"
+TRIAGE_HARD_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"
 CHAT_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust --mode ask"
 ```
 
