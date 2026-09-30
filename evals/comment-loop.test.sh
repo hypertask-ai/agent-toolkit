@@ -459,5 +459,82 @@ else
   bad daily-answer-comment-cap "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/cap.err")"
 fi
 
+# QA verdicts: the three-comment cap still holds for chatter, but a QA-kind
+# Done:/Handoff:/Question: always posts, keeps its marker, and skips the
+# server-side improve rewrite that drops the marker.
+: > "$MECH_POSTS"
+: > "$MECH_UPDATES"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" AGENT_RUNNER_KIND=qa \
+  "$TMP/noise-board" comment add TEST-1 --text '<p><strong>Question: Can the supervisor give QA the flagged test account?</strong></p><p>The search operators are hidden for the plain QA account.</p><p>Next: the supervisor decides.</p>' >"$TMP/qa-cap.out" 2>"$TMP/qa-cap.err"
+if grep -qF 'comment add TEST-1' "$MECH_POSTS" \
+   && grep -qF 'Question: Can the supervisor give QA' "$MECH_POSTS" \
+   && ! grep -qF -- '--improve' "$MECH_POSTS" \
+   && [ ! -s "$MECH_UPDATES" ] \
+   && grep -qF 'comment cap bypassed on TEST-1: QA verdict always posts' "$TMP/state/agent-board-poll/noise-test.log"; then
+  ok qa-verdict-bypasses-cap 'a QA Question: verdict posts with its marker after the three-comment cap'
+else
+  bad qa-verdict-bypasses-cap "posts=$(cat "$MECH_POSTS") updates=$(cat "$MECH_UPDATES") error=$(cat "$TMP/qa-cap.err")"
+fi
+
+: > "$MECH_POSTS"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" AGENT_RUNNER_KIND=qa AGENT_REPLY_ONLY=yes \
+  "$TMP/noise-board" comment add TEST-1 --text '<p><strong>Answer: The fifth distinct update is ready.</strong></p><p>Next: review the fifth update.</p>' >"$TMP/qa-answer.out" 2>"$TMP/qa-answer.err"
+if [ ! -s "$MECH_POSTS" ] && grep -qF 'daily cap reached' "$TMP/qa-answer.err"; then
+  ok qa-answer-still-capped 'a QA-kind Answer: is chatter and still counts against the cap'
+else
+  bad qa-answer-still-capped "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/qa-answer.err")"
+fi
+
+: > "$MECH_POSTS"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" AGENT_RUNNER_KIND=worker \
+  "$TMP/noise-board" comment add TEST-1 --text '<p><strong>Done: The worker shipped the sixth distinct update.</strong></p><p>Next: review the sixth update.</p>' >"$TMP/worker-done.out" 2>"$TMP/worker-done.err"
+if [ ! -s "$MECH_POSTS" ] && grep -qF 'daily cap reached' "$TMP/worker-done.err"; then
+  ok worker-done-still-capped 'a non-QA Done: still counts against the cap'
+else
+  bad worker-done-still-capped "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/worker-done.err")"
+fi
+
+: > "$MECH_POSTS"
+: > "$MECH_UPDATES"
+printf '{"comments":[{"id":61,"createdAt":"%s","agent":{"id":"agent-1","displayName":"Test Bot"},"text":"<p><strong>Done: QA PASS on production, the columns stayed visible.</strong></p><p>Next: nothing.</p>"}]}\n' "$now_iso" > "$TMP/mechanical-comments.json"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" AGENT_RUNNER_KIND=qa \
+  "$TMP/noise-board" comment add TEST-1 --text '<p><strong>Done: QA PASS on production, the columns stayed visible after reload.</strong></p><p>Next: nothing left.</p>' >"$TMP/qa-fresh.out" 2>"$TMP/qa-fresh.err"
+if grep -qF 'Done: QA PASS on production' "$MECH_POSTS" && [ ! -s "$MECH_UPDATES" ]; then
+  ok qa-verdict-posts-fresh 'a QA verdict posts a new comment instead of editing a near-duplicate'
+else
+  bad qa-verdict-posts-fresh "posts=$(cat "$MECH_POSTS") updates=$(cat "$MECH_UPDATES") error=$(cat "$TMP/qa-fresh.err")"
+fi
+
+: > "$MECH_POSTS"
+printf '{"comments":[]}\n' > "$TMP/mechanical-comments.json"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" AGENT_RUNNER_KIND=worker \
+  "$TMP/noise-board" comment add TEST-1 --text '<p><strong>Decision: The worker keeps the release date.</strong></p><p>Next: review the date.</p>' >"$TMP/marked.out" 2>"$TMP/marked.err"
+if grep -qF 'Decision: The worker keeps the release date.' "$MECH_POSTS" \
+   && ! grep -qF -- '--improve' "$MECH_POSTS"; then
+  ok marked-comment-skips-server-improve 'a marked comment keeps its marker and skips the server improve rewrite'
+else
+  bad marked-comment-skips-server-improve "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/marked.err")"
+fi
+
+: > "$MECH_POSTS"
+held_done='<p><strong>Done: <a href="https://github.com/example/repo/pull/2">PR 2</a>.</strong></p><p>Next: nothing left.</p>'
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" AGENT_RUNNER_KIND=qa \
+  "$TMP/noise-board" comment add TEST-1 --text "$held_done" >"$TMP/qa-held.out" 2>"$TMP/qa-held.err"
+if grep -qF 'pull/2' "$MECH_POSTS" \
+   && grep -qF 'QA verdict posted despite shape check' "$TMP/state/agent-board-poll/noise-test.log"; then
+  ok qa-verdict-not-held 'a QA verdict that fails the shape check still posts and logs the reasons'
+else
+  bad qa-verdict-not-held "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/qa-held.err")"
+fi
+
+: > "$MECH_POSTS"
+HOME="$TMP/home" XDG_STATE_HOME="$TMP/state" PATH="$TMP/bin:$PATH" AGENT_RUNNER_KIND=worker \
+  "$TMP/noise-board" comment add TEST-1 --text "$held_done" >"$TMP/worker-held.out" 2>"$TMP/worker-held.err"
+if [ ! -s "$MECH_POSTS" ]; then
+  ok worker-done-still-held 'a non-QA Done: that fails the shape check is still held'
+else
+  bad worker-done-still-held "posts=$(cat "$MECH_POSTS") error=$(cat "$TMP/worker-held.err")"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

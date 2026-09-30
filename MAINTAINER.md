@@ -54,7 +54,11 @@ board write, rather than falling back to the login in the owner's home config.
 
 Bot comments use the `improve-readability` writer mode unless the caller passes
 `--raw`. If the writer refuses a comment, the wrapper prints the CLI error and
-posts the original text instead.
+posts the original text instead. A comment that starts with a marker (`Done:`,
+`Handoff:`, `Question:`, `Answer:`, `Decision:`) skips that server rewrite,
+because it drops the marker; the checked writer keeps the marker or posts the
+original. A QA-kind verdict (`Done:`, `Handoff:`, `Question:`) always posts: the
+daily cap, near-duplicate edits and plain-language holds apply only to chatter.
 
 ## Manager access
 

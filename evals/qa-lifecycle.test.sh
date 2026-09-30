@@ -63,6 +63,7 @@ case "$verdict" in
   DoneWithPr) text='<p><strong>Done: QA passed every acceptance step on live.</strong></p><p>AC 1, checkout completes. Live evidence: checkout completed at https://live.example.test/checkout. PR <a href="https://github.com/example/repo/pull/1">https://github.com/example/repo/pull/1</a>.</p><p>Next: no action.</p>' ;;
   WeakDone) text='<p><strong>Done: QA passed every acceptance step.</strong></p><p>Next: Release the verified change.</p>' ;;
   Handoff) text='<p><strong>Handoff: Dev must fix the failing payment step.</strong></p><p>Next: Fix the payment step.</p>' ;;
+  HandoffWithPr) text='<p><strong>Handoff: Dev must fix the failing payment step.</strong></p><p>Checked the change from <a href="https://github.com/example/repo/pull/1">https://github.com/example/repo/pull/1</a> on live.</p><p>Next: Fix the payment step.</p>' ;;
   Question) text='<p><strong>Question: QA needs test credentials.</strong></p><p>Can the manager provide them?</p>' ;;
   Unmarked) text='<p><strong>QA passed every acceptance step.</strong></p><p>Ready to release.</p>' ;;
   Silent) exit "$model_exit" ;;
@@ -212,7 +213,7 @@ fi
 run_case DoneWithPr '[]' '{"comments":[]}'
 if grep -qxF 'move TEST-1 Done' "$TMP/board.log" \
    && ! grep -qxF 'move TEST-1 AI Review' "$TMP/board.log" \
-   && grep -qF 'QA move skipped for TEST-1: its live-evidence verdict already moved it to Done' "$TMP/state/agent-board-poll/qa-runner.log"; then
+   && ! grep -qF 'as opened by qa-runner' "$TMP/state/agent-board-poll/qa-runner.log"; then
   ok qa-live-verdict-stays-done 'a linked PR cannot pull a qualifying live QA verdict back out of Done'
 else
   bad qa-live-verdict-stays-done "board=$(cat "$TMP/board.log") output=$(cat "$TMP/out") log=$(cat "$TMP/state/agent-board-poll/qa-runner.log")"
@@ -270,6 +271,16 @@ if [ "$(grep -cFx 'model ran' "$TMP/model.log")" -eq 1 ] \
   ok qa-process-failure-no-retry 'a failed QA process keeps its exit, does not spend the marker retry, and stays in QA'
 else
   bad qa-process-failure-no-retry "exit=$(cat "$TMP/exit") board=$(cat "$TMP/board.log") model=$(cat "$TMP/model.log") output=$(cat "$TMP/out")"
+fi
+
+run_case HandoffWithPr '[]' '{"comments":[]}'
+if ! grep -qF 'review the opened pull request' "$TMP/comments.json" \
+   && ! grep -qF 'as opened by qa-runner' "$TMP/state/agent-board-poll/qa-runner.log" \
+   && ! grep -qxF 'move TEST-1 AI Review' "$TMP/board.log" \
+   && grep -qF 'QA outcome TEST-1 verdict=Handoff' "$TMP/state/agent-board-poll/qa-runner.log"; then
+  ok qa-linked-pr-not-opened 'a QA verdict linking the dev PR posts no PR hand-off and makes no review move'
+else
+  bad qa-linked-pr-not-opened "board=$(cat "$TMP/board.log") comments=$(cat "$TMP/comments.json") log=$(cat "$TMP/state/agent-board-poll/qa-runner.log")"
 fi
 
 run_case Handoff '[]' '{"comments":[]}'
