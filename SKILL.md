@@ -677,7 +677,11 @@ log and posts an owner-mentioned alarm comment on the ticket. `mode` sets
 matching the selected board. An omitted board uses the manager's `BOARD_ID`.
 `model` accepts only the named `grok-fast`, `glm-flash`,
 and `codex-sol` presets and writes their exact template policy command, never text
-supplied as a command. `sections` sets `WATCH_SECTIONS` to a comma-separated
+supplied as a command. Board-15 agents accept only `codex-sol` and also repair
+stale ladders, research, chat, triage, and provider choices. Existing approved
+Cursor Grok 4.7 high extra workers keep their configuration during updates.
+See [board-15 model settings](CONF.md#board-15-model-settings) for installation
+and completed-run verification. `sections` sets `WATCH_SECTIONS` to a comma-separated
 list, or `*`, for one current agent. `quiet` sets `QUIET` for one current agent
 or all current agents. Each changed conf is first copied to
 `<conf>.bak-<timestamp>`, and the

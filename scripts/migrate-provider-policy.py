@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Make the former 3.14 built-in command policy explicit in matching confs."""
+"""Migrate toolkit command policies, including board 15 Sol-only settings."""
 from __future__ import annotations
 
 import argparse
@@ -69,29 +69,77 @@ def quoted(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`") + '"'
 
 
+def board15_policy(values: dict[str, str]) -> bool:
+    if values.get("BOARD_ADAPTER") != "hypertask":
+        return False
+    if "15" not in {item.strip() for item in values.get("BOARD_ID", "").split(",")}:
+        return False
+    try:
+        argv = shlex.split(values.get("MODEL_CLI", ""))
+    except ValueError:
+        argv = []
+    # The owner-approved extra workers keep their Cursor Grok 4.7 high command.
+    return not (argv and Path(argv[0]).name == "cursor-agent"
+                and option(argv, "--model") == "cursor-grok-4.7-high")
+
+
 def migrate(path: Path, version: str, dry_run: bool) -> bool:
     values = read_conf(path)
     command = values.get("MODEL_CLI", "")
-    if not command:
+    sol_only = board15_policy(values)
+    if not command and not sol_only:
+        return False
+
+    if values.get("BOARD_ADAPTER") != "hypertask":
+        return False
+    if "15" in {item.strip() for item in values.get("BOARD_ID", "").split(",")} and not sol_only:
         return False
 
     additions: dict[str, str] = {}
     binary = str(Path.home() / ".local/bin/hax")
     high = f"{binary} --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"
-    if not any(key in values for key in POLICY_KEYS) and had_314_policy(command):
+    removals: set[str] = set()
+    if sol_only:
+        additions = {
+            "MODEL_CLI": high,
+            "LADDER": f"{high}|{high}|{high}",
+            "PROVIDER_ORDER": "codex",
+            "PROVIDER_CODEX_CLI": high,
+            "RESEARCH_CLI": high.replace(" -p", " --raw -p"),
+            "TRIAGE_HARD_CLI": high,
+            "TRIAGE_MODEL_CLI": high,
+            "OWNER_COMMENT_CLASSIFIER_CLI": high,
+            "CHAT_CLI": high,
+            "COMMENT_REWRITE_CLI": high,
+            "SECOND_OPINION_CLI": high,
+        }
+        removals = {key for key in values if key.startswith("PROVIDER_")
+                    and key.endswith("_CLI") and key != "PROVIDER_CODEX_CLI"}
+    elif not any(key in values for key in POLICY_KEYS) and had_314_policy(command):
         research = f"{binary} --provider=codex --model=gpt-6.1-sol --effort=xhigh --no-session --raw -p"
         additions.update({
             "LADDER": f"{high}|{high}|{high}",
             "RESEARCH_CLI": research,
             "TRIAGE_HARD_CLI": high,
         })
-    if not any(key in values for key in FALLBACK_KEYS) and command_provider(command) == "codex":
+    if not sol_only and not any(key in values for key in FALLBACK_KEYS) and command_provider(command) == "codex":
         additions.update({
             "PROVIDER_ORDER": "codex,cursor",
             "PROVIDER_CODEX_CLI": command,
             "PROVIDER_CURSOR_CLI": CURSOR_COMMAND,
         })
     if not additions:
+        return False
+    existing = path.read_text(encoding="utf-8")
+    lines = []
+    for line in existing.splitlines():
+        match = re.match(r"^([A-Z][A-Z0-9_]*)=", line)
+        if match and match.group(1) in removals | additions.keys():
+            continue
+        lines.append(line)
+    lines.extend(f"{key}={quoted(value)}" for key, value in additions.items())
+    updated = "\n".join(lines) + "\n"
+    if updated == existing:
         return False
     if dry_run:
         print(f"  would rewrite {path}: " + ", ".join(f"{key}={value}" for key, value in additions.items()))
@@ -100,12 +148,7 @@ def migrate(path: Path, version: str, dry_run: bool) -> bool:
     backup = path.with_name(path.name + f".bak-{version}")
     if not backup.exists():
         shutil.copy2(path, backup)
-    existing = path.read_text(encoding="utf-8")
-    with path.open("a", encoding="utf-8") as handle:
-        if existing and not existing.endswith("\n"):
-            handle.write("\n")
-        for key, value in additions.items():
-            handle.write(f"{key}={quoted(value)}\n")
+    path.write_text(updated, encoding="utf-8")
     path.chmod(0o600)
     print(f"  rewrote {path} (backup {backup}): " + ", ".join(additions))
     return True
@@ -115,15 +158,22 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("directories", nargs="+")
+    parser.add_argument("--file", type=Path)
+    parser.add_argument("--board15-only", action="store_true")
+    parser.add_argument("directories", nargs="*")
     args = parser.parse_args()
 
-    changed = 0
+    if not args.file and not args.directories:
+        parser.error("provide --file or at least one configuration directory")
+    paths = [args.file] if args.file else []
     for directory in dict.fromkeys(Path(item).expanduser() for item in args.directories):
-        if not directory.is_dir():
+        if directory.is_dir():
+            paths.extend(config_files(directory))
+    changed = 0
+    for path in dict.fromkeys(paths):
+        if args.board15_only and not board15_policy(read_conf(path)):
             continue
-        for path in config_files(directory):
-            changed += int(migrate(path, args.version, args.dry_run))
+        changed += int(migrate(path, args.version, args.dry_run))
     action = "would rewrite" if args.dry_run else "rewrote"
     print(f"  {action} {changed} conf(s) with provider policy updates")
     return 0

@@ -344,7 +344,7 @@ manager_model_command() {
   case "$1" in
     grok-fast) printf '%s' 'cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust' ;;
     glm-flash) printf '%s' 'pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash' ;;
-    codex-sol) printf '%s' '/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p' ;;
+    codex-sol) printf '%s' "$HOME/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p" ;;
     *) return 1 ;;
   esac
 }
@@ -774,8 +774,18 @@ if [ "${SUBCOMMAND:-feedback}" = "model" ]; then
     || manager_refuse "model refused: $target is not a current agent slug in the conf dir"
   command="$(manager_model_command "$preset")" \
     || manager_refuse "model refused: preset must be grok-fast, glm-flash, or codex-sol"
+  if [ "$(manager_conf_value "$target_conf" BOARD_ADAPTER)" = "hypertask" ] \
+    && manager_board_matches "$target_conf" 15 && [ "$preset" != "codex-sol" ]; then
+    manager_refuse "model refused: board 15 agents require codex-sol; existing Cursor Grok 4.7 high extra workers are preserved"
+  fi
   MANAGER_TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%N)"
+  model_changed=no
   if manager_set_conf_value "$target_conf" MODEL_CLI "$command"; then
+    model_changed=yes
+  fi
+  policy_result="$(python3 "$CORE_ROOT/scripts/migrate-provider-policy.py" --version "$MANAGER_TIMESTAMP" \
+    --board15-only --file "$target_conf")"
+  if [ "$model_changed" = yes ] || [[ "$policy_result" = *'rewrote 1 conf(s)'* ]]; then
     manager_changed_reply "model $target $preset" "$(basename "$target_conf")"
   else
     manager_changed_reply "model $target $preset"

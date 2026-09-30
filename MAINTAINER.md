@@ -90,7 +90,9 @@ and adds the setup commands below. Missing or any other value means off.
   latest such comment in the action log and posts an owner-mentioned alarm
   comment on that ticket.
 - `agent-template model <slug> <preset>` accepts `grok-fast`, `glm-flash`, or
-  `codex-sol` and writes only that preset's exact `MODEL_CLI` command.
+  `codex-sol`. Board-15 agents accept only `codex-sol` and repair all model
+  settings, even when the primary command is already current. Existing
+  owner-approved Cursor Grok 4.7 high extra workers survive installation and updates.
 - `agent-template sections <slug> <list>` writes a comma-separated
   `WATCH_SECTIONS` list, or `*`, to one current conf.
 - `agent-template quiet on|off [<slug>|all]` writes `QUIET` to one or every

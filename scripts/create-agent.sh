@@ -86,7 +86,7 @@ Options:
   --mission-file PATH      plain-text mission, used verbatim
   --wiring poll|events|fleet|none how work reaches the agent        (default poll)
   --sections "A,B"         board columns the poll watches
-  --provider cursor|pi     starter command to write                     (default cursor)
+  --provider codex|cursor|pi     starter command to write                     (default cursor)
   --model-cli "CMD"        full command; overrides --provider
   --max-concurrent N       runs started per tick                    (default 1)
   --chat-page yes|no       enable the host chat lane               (default yes)
@@ -128,15 +128,19 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "$MODEL_CLI_SET" = "no" ]; then
+  if [ "$BOARD" = "hypertask" ] && [[ ",$BOARD_ID," = *",15,"* ]]; then
+    PROVIDER="codex"
+  fi
   case "$PROVIDER" in
+    codex) MODEL_CLI="$HOME/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p" ;;
     cursor) MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust" ;;
     pi) MODEL_CLI="pi --print --tools read,bash,edit,write --no-extensions --no-skills --provider zai --model glm-5.3-flash" ;;
-    *) die "--provider must be cursor or pi, got '$PROVIDER'" \
+    *) die "--provider must be codex, cursor or pi, got '$PROVIDER'" \
          "pick one of those choices, or pass the complete command with --model-cli" ;;
   esac
 fi
 [ -n "$MODEL_CLI" ] || die "the model command is empty" \
-  "pass --provider cursor|pi or --model-cli '<full command>'"
+  "pass --provider codex|cursor|pi or --model-cli '<full command>'"
 
 [ -n "$NAME" ] || die "--name is missing" "pass --name \"<Display Name>\""
 case "$KIND" in dev|qa|worker|cli) ;; *) die "--kind must be dev, qa, worker or cli, got '$KIND'" "pick one of those four" ;; esac
@@ -465,6 +469,8 @@ PR_REPO=\"$PR_REPO\""
 if [ "$DRY_RUN" != "yes" ]; then
   mkdir -p "$(dirname "$CONF_FILE")"
   core_write_missing_keys "$CONF_FILE" "$CONF_CONTENT"
+  python3 "$CORE_ROOT/scripts/migrate-provider-policy.py" --version "$(cat "$CORE_ROOT/VERSION")" \
+    --board15-only --file "$CONF_FILE"
   # One shared copy next to every bot's conf in this config dir: whoever
   # looks after any of them starts from the same page.
   cp -a "$CORE_ROOT/MAINTAINER.md" "$CONFIG_DIR/MAINTAINER.md" 2>/dev/null || true

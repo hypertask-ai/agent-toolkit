@@ -315,26 +315,39 @@ else
   bad mode-one-runner "output=$mode_runner"
 fi
 
-worker_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' | wc -l)"
-model="$(AGENT_SLUG=manager run_template model worker grok-fast)"
-worker_backups_after="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' | wc -l)"
-if [ "$model" = 'model worker grok-fast: changed worker.conf' ] \
-   && grep -q '^MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"$' "$CONF_DIR/worker.conf" \
-   && [ "$worker_backups_after" -eq $((worker_backups_before + 1)) ]; then
+other_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'other.conf.bak-*' | wc -l)"
+model="$(AGENT_SLUG=manager run_template model other grok-fast)"
+other_backups_after="$(find "$CONF_DIR" -maxdepth 1 -name 'other.conf.bak-*' | wc -l)"
+if [ "$model" = 'model other grok-fast: changed other.conf' ] \
+   && grep -q '^MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust"$' "$CONF_DIR/other.conf" \
+   && [ "$other_backups_after" -eq $((other_backups_before + 1)) ]; then
   ok model-uses-named-preset "MODEL_CLI changed to the exact policy command"
 else
-  bad model-uses-named-preset "output=$model value=$(sed -n 's/^MODEL_CLI=//p' "$CONF_DIR/worker.conf")"
+  bad model-uses-named-preset "output=$model value=$(sed -n 's/^MODEL_CLI=//p' "$CONF_DIR/other.conf")"
 fi
 
 worker_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' | wc -l)"
 model="$(AGENT_SLUG=manager run_template model worker codex-sol)"
 worker_backups_after="$(find "$CONF_DIR" -maxdepth 1 -name 'worker.conf.bak-*' | wc -l)"
 if [ "$model" = 'model worker codex-sol: changed worker.conf' ] \
-   && grep -q '^MODEL_CLI="/home/valentin/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p"$' "$CONF_DIR/worker.conf" \
+   && grep -qxF "MODEL_CLI=\"$TMP/home/.local/bin/hax --provider=codex --model=gpt-6.1-sol --effort=high --no-session -p\"" "$CONF_DIR/worker.conf" \
    && [ "$worker_backups_after" -eq $((worker_backups_before + 1)) ]; then
   ok model-uses-codex-sol "MODEL_CLI changed to the exact Codex subscription command"
 else
   bad model-uses-codex-sol "output=$model value=$(sed -n 's/^MODEL_CLI=//p' "$CONF_DIR/worker.conf")"
+fi
+
+before="$(sha256sum "$CONF_DIR"/*.conf "$CONF_DIR"/credentials/* | sha256sum)"
+assert_refused_without_change model-board15-refuses-old-preset 'model refused: board 15 agents require codex-sol' "$before" \
+  model worker grok-fast
+assert_refused_without_change model-board15-refuses-glm 'model refused: board 15 agents require codex-sol' "$before" \
+  model qa glm-flash
+printf 'LADDER="claude -p --model opus"\n' >> "$CONF_DIR/worker.conf"
+model="$(AGENT_SLUG=manager run_template model worker codex-sol)"
+if [ "$model" = 'model worker codex-sol: changed worker.conf' ] && ! grep -q opus "$CONF_DIR/worker.conf"; then
+  ok model-repairs-policy 'an unchanged primary command still replaces a stale ladder'
+else
+  bad model-repairs-policy "$model"
 fi
 
 qa_backups_before="$(find "$CONF_DIR" -maxdepth 1 -name 'qa.conf.bak-*' | wc -l)"
@@ -485,7 +498,7 @@ if grep -q $'who=regular\twhat=ctl stop worker' "$TMP/state/agent-board-poll/man
    && grep -qF $'who=manager\twhat=approved_change=stopped runner worker owner_request="Please freeze the worker fleet."' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -qF $'who=manager\twhat=approved_change=set board 15 to manual mode for qa.conf worker.conf owner_request="Please freeze the worker fleet."' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=mode manual --board 15' "$TMP/state/agent-board-poll/manager-actions.log" \
-   && grep -q $'who=manager\twhat=model worker grok-fast' "$TMP/state/agent-board-poll/manager-actions.log" \
+   && grep -q $'who=manager\twhat=model other grok-fast' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=sections qa AI Review, QA' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=quiet off qa' "$TMP/state/agent-board-poll/manager-actions.log" \
    && grep -q $'who=manager\twhat=feedback --as manager' "$TMP/state/agent-board-poll/manager-actions.log"; then
