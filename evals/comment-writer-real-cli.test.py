@@ -20,6 +20,14 @@ IMPROVED = (
     "<p><strong>Decision: The clearer dry-run comment is ready.</strong></p>"
     "<p>Next: no action.</p>"
 )
+PLAIN = (
+    "<p><strong>The dry-run reply is ready.</strong></p>"
+    "<p>Next: no action.</p>"
+)
+PLAIN_IMPROVED = (
+    "<p><strong>The clearer dry-run reply is ready.</strong></p>"
+    "<p>Next: no action.</p>"
+)
 
 
 def real_cli() -> Path:
@@ -64,7 +72,9 @@ class DryRunHandler(http.server.BaseHTTPRequestHandler):
         elif path == "/mcp/tasks":
             response = {"tasks": [{"id": 42348, "projectId": 5500}]}
         elif path == "/mcp/ai/improve":
-            response = {"success": True, "html": IMPROVED}
+            response = {"success": True, "html": PLAIN_IMPROVED}
+        elif path == "/mcp/ai/task-writer":
+            response = {"success": True, "html": IMPROVED, "mode": "write_with_ai"}
         elif path == "/mcp/comments" and self.command == "POST":
             response = {"success": True, "comment": {"id": 1, "text": body["text"]}}
         else:
@@ -118,23 +128,35 @@ def main():
                 "HYPERTASKS_API_URL": f"http://127.0.0.1:{api.server_port}",
             }
         )
-        try:
+        def post(text, extra):
+            api.requests.clear()
             result = subprocess.run(
-                [str(wrapper), "comment", "add", "AGTE-96", "--text", ORIGINAL],
+                [str(wrapper), "comment", "add", "AGTE-96", "--text", text],
                 capture_output=True,
                 text=True,
-                env=env,
+                env={**env, **extra},
             )
+            assert result.returncode == 0, result.stderr
+            improve = [body for method, path, body in api.requests if method == "POST" and path == "/mcp/ai/improve"]
+            writer = [body for method, path, body in api.requests if method == "POST" and path == "/mcp/ai/task-writer"]
+            comments = [body for method, path, body in api.requests if method == "POST" and path == "/mcp/comments"]
+            return improve, writer, comments
+
+        try:
+            # A marked comment skips the server improve rewrite (it drops the
+            # marker) and uses the checked writer, which keeps the marker.
+            improve, writer, comments = post(ORIGINAL, {})
+            # An unmarked reply still goes through the server improve rewrite.
+            plain_improve, _, plain_comments = post(PLAIN, {"AGENT_REPLY_ONLY": "yes"})
         finally:
             api.shutdown()
             thread.join()
-
-    assert result.returncode == 0, result.stderr
-    improve = [body for method, path, body in api.requests if method == "POST" and path == "/mcp/ai/improve"]
-    comments = [body for method, path, body in api.requests if method == "POST" and path == "/mcp/comments"]
-    assert improve == [{"project_id": 5500, "text": ORIGINAL, "command": "ImproveReadability"}], improve
+    assert improve == [], improve
+    assert len(writer) == 1, writer
     assert comments == [{"ticket_number": "AGTE-96", "text": IMPROVED}], comments
-    print("PASS real-cli-comment-dry-run       real CLI improved and posted one comment to the local dry-run API")
+    assert plain_improve == [{"project_id": 5500, "text": PLAIN, "command": "ImproveReadability"}], plain_improve
+    assert plain_comments == [{"ticket_number": "AGTE-96", "text": PLAIN_IMPROVED}], plain_comments
+    print("PASS real-cli-comment-dry-run       real CLI kept the marker on a marked comment and improved an unmarked reply")
 
 
 if __name__ == "__main__":

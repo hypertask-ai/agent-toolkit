@@ -147,12 +147,15 @@ original='<p><strong>Decision: The original release is ready.</strong></p><p>Nex
 rewritten='<p><strong>Decision: The clearer release is ready.</strong></p><p>Next: approve it.</p>'
 : > "$IMPROVE_CALLS"
 : > "$API_POST_CAPTURE"
-IMPROVED_COMMENT="$rewritten" "$TMP/htbot" comment add TEST-1 --text "$original" >/dev/null
+: > "$AI_CALLS"
+WRITER_JSON="{\"success\":true,\"html\":\"$rewritten\"}" IMPROVED_COMMENT='unused' \
+  "$TMP/htbot" comment add TEST-1 --text "$original" >/dev/null
 if [ "$(cat "$COMMENT_TEXT")" = "$rewritten" ] \
-   && [ "$(cat "$IMPROVE_CALLS")" = improve-readability ] \
+   && [ "$(cat "$IMPROVE_CALLS")" = no ] \
+   && grep -q -- '--task TEST-1 --mode write-with-ai' "$AI_CALLS" \
    && [ ! -s "$API_POST_CAPTURE" ] \
    && printf '%s' "$(cat "$COMMENT_TEXT")" | grep -q '^<p><strong>Decision:'; then
-  ok comment-rewrite-applied 'an unstamped ticket-run status uses the normal CLI writer path'
+  ok comment-rewrite-applied 'a marked status skips the server improve and uses the marker-checked writer'
 else
   bad comment-rewrite-applied "comment=$(cat "$COMMENT_TEXT") calls=$(cat "$IMPROVE_CALLS") api=$(cat "$API_POST_CAPTURE")"
 fi
@@ -202,9 +205,10 @@ else
 fi
 
 : > "$IMPROVE_CALLS"
-WRITER_FAIL=yes IMPROVED_COMMENT='unused' \
-  "$TMP/htbot" comment add TEST-3 --text "$original" >/dev/null 2>"$TMP/comment-failure.err"
-if [ "$(cat "$COMMENT_TEXT")" = "$original" ] \
+unmarked='<p><strong>The original release is ready.</strong></p><p>Next: approve it.</p>'
+WRITER_FAIL=yes IMPROVED_COMMENT='unused' AGENT_REPLY_ONLY=yes \
+  "$TMP/htbot" comment add TEST-3 --text "$unmarked" >/dev/null 2>"$TMP/comment-failure.err"
+if [ "$(cat "$COMMENT_TEXT")" = "$unmarked" ] \
    && [ "$(paste -sd, "$IMPROVE_CALLS")" = 'improve-readability,no' ] \
    && [ "$(grep -c '^AI writer failed$' "$TMP/comment-failure.err")" -eq 1 ] \
    && [ "$(grep -c '^WARNING: Hypertask AI writer failed on TEST-3; posting the original comment$' "$TMP/comment-failure.err")" -eq 1 ]; then
