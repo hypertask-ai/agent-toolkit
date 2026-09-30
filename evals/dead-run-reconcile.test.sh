@@ -94,6 +94,13 @@ PYEOF
   *) printf '{}\n' ;;
 esac
 EOF
+# Report a healthy disk so a full host disk cannot add a disk-alarm ticket
+# to the board log these cases compare exactly.
+cat > "$TMP/bin/df" <<'EOF'
+#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf 'mock 100000 50000 50000 50%% /\n'
+EOF
 chmod +x "$TMP/bin/"*
 
 cat > "$TMP/config/dev.conf" <<EOF
