@@ -577,6 +577,61 @@ print(pattern.sub(replace, text), end="")
 '
 }
 
+# An owner answer is a real comment. Move a leading @mention so the visible
+# text starts with Answer:, and point the mention label at the owner id.
+_normalize_owner_answer() {
+  local text="\$1" owner_ids="\$2"
+  TEXT="\$text" OWNER_IDS="\$owner_ids" python3 -c '
+import html, os, re
+text = os.environ["TEXT"]
+owners = [value for value in os.environ.get("OWNER_IDS", "").split(",") if value]
+owner_id = owners[0] if owners else ""
+span_re = re.compile(r"<span\\b(?=[^>]*data-type\\s*=\\s*[\"\\x27]?mention)[^>]*>.*?</span>", re.I | re.S)
+
+def plain(value):
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", value)).split())
+
+def fix_label(span):
+    if not owner_id:
+        return span
+    if re.search(r"data-label\\s*=\\s*[\"\\x27]?name-%s\\b" % re.escape(owner_id), span, re.I):
+        return span
+    rewritten, count = re.subn(
+        r"data-label\\s*=\\s*([\"\\x27])(.*?)\\1",
+        lambda match: "data-label=%sname-%s%s" % (match.group(1), owner_id, match.group(1)),
+        span, count=1, flags=re.I)
+    if count:
+        return rewritten
+    rewritten, count = re.subn(r"data-label\\s*=\\s*[^\\s>]+", "data-label=\\"name-%s\\"" % owner_id, span, count=1, flags=re.I)
+    if count:
+        return rewritten
+    return span.replace("<span", "<span data-label=\\"name-%s\\"" % owner_id, 1)
+
+mentions = [fix_label(span) for span in span_re.findall(text)]
+without = span_re.sub("", text)
+if plain(text).lower().startswith("answer:"):
+    text = span_re.sub(lambda match: fix_label(match.group(0)), text)
+elif plain(without).lower().startswith("answer:") and mentions:
+    mention_html = " " + " ".join(mentions)
+    text, _count = re.subn(r"Answer:", lambda match: match.group(0) + mention_html, without, count=1, flags=re.I)
+else:
+    body = plain(without) or "I read your question."
+    marker = body.lower().find("answer:")
+    if marker >= 0:
+        body = body[marker:]
+    if body[-1:] not in ".!?":
+        body += "."
+    if not body.lower().startswith("answer:"):
+        body = "Answer: " + body
+    lead = body.split(":", 1)[1].strip()
+    next_paragraph = re.search(r"<p>\\s*Next:.*?</p>", text, re.I | re.S)
+    nxt = next_paragraph.group(0) if next_paragraph else "<p>Next: use this answer.</p>"
+    mention_html = (" " + " ".join(mentions)) if mentions else ""
+    text = "<p><strong>Answer:%s %s</strong></p>%s" % (mention_html, html.escape(lead), nxt)
+print(text, end="")
+'
+}
+
 # Check every ticket mutation before the writer, including direct model calls.
 REF=""
 case "\${1:-} \${2:-}" in
@@ -779,6 +834,9 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
     esac
     AGENT_QA_VERDICT_BYPASS="\$QA_VERDICT"
     OWNER_IDS="\$(_board_owner_ids)"
+    if [ "\$OWNER_MENTION_REPLY" = yes ]; then
+      TEXT="\$(_normalize_owner_answer "\$TEXT" "\$OWNER_IDS")"
+    fi
     if [ "\$QUIET" = "on" ] && [ "\$VERBATIM" != "yes" ] && [ "\$OWNER_MENTION_REPLY" != "yes" ] \
        && [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
       TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
@@ -788,7 +846,15 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
     fi
     if [ "\$RAW" != yes ]; then
       USE_IMPROVE=yes
-      _outbound_text_gate "\$TEXT" "\$VERBATIM" || exit 0
+      if ! _outbound_text_gate "\$TEXT" "\$VERBATIM"; then
+        if [ "\$OWNER_MENTION_REPLY" = yes ]; then
+          exit 1
+        fi
+        exit 0
+      fi
+      if [ "\$OWNER_MENTION_REPLY" = yes ]; then
+        USE_IMPROVE=no
+      fi
     fi
     mkdir -p "\$(dirname "\$OWNER_MENTIONS")" 2>/dev/null || true
     touch "\$OWNER_MENTIONS"
@@ -869,7 +935,9 @@ try:
 except (OSError, ValueError):
     pass
 
-if new_mentions and not owner_ids:
+if owner_mention_reply and new_signature.startswith("answer:"):
+    print("OK_OWNER" if new_owner_mention else "OK")
+elif new_mentions and not owner_ids:
     print("CAP" if new_signature.startswith("question:") and today_count >= 3 else "OWNER_UNKNOWN")
 elif new_owner_mention and recent_owner_mention and not owner_mention_reply:
     print("CAP" if new_signature.startswith("question:") and today_count >= 3 else "OWNER")
@@ -892,13 +960,17 @@ else:
     fi
     case "\$VERDICT" in
       OWNER|OWNER_UNKNOWN)
-        if [ "\$QA_VERDICT" != "yes" ] && [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
+        if [ "\$OWNER_MENTION_REPLY" = yes ] && [[ "\$(_plain_comment "\$TEXT")" == Answer:* ]]; then
+          VERDICT=OK_OWNER
+        elif [ "\$QA_VERDICT" != "yes" ] && [[ "\$(_plain_comment "\$TEXT")" != Question:* ]]; then
           _comment_cap_note "owner-mention budget: comment add refused on \$REF (\$VERDICT)"
           exit 0
+        else
+          _run_activity action "owner-mention budget: throttled \$([ "\$QA_VERDICT" = yes ] && echo 'QA verdict' || echo 'Question:') on \$REF (\$VERDICT); posting without mention"
+          TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
+          VERDICT=OK
         fi
-        _run_activity action "owner-mention budget: throttled \$([ "\$QA_VERDICT" = yes ] && echo 'QA verdict' || echo 'Question:') on \$REF (\$VERDICT); posting without mention"
-        TEXT="\$(_strip_owner_mentions "\$TEXT" "\$OWNER_IDS")"
-        VERDICT=OK ;;
+        ;;
       UPDATE:*)
         UPDATE_ID="\${VERDICT#UPDATE:}"
         if OUT="\$(hypertask --token "\$TOKEN" comment update "\$UPDATE_ID" --text "\$TEXT")"; then
@@ -938,8 +1010,18 @@ else:
     FALLBACK_ARGS=("\${POST_ARGS[@]}")
     if [ -n "\$REPLY_TO_COMMENT_ID" ]; then
       if [ "\$USE_IMPROVE" = yes ]; then
+        PRE_REWRITE_TEXT="\$TEXT"
         _write_comment_with_ai "\$TEXT" "\$REF"
-        _outbound_text_gate "\$TEXT" "\$VERBATIM" || exit 0
+        if ! _outbound_text_gate "\$TEXT" "\$VERBATIM"; then
+          if [ "\$OWNER_MENTION_REPLY" = yes ]; then
+            TEXT="\$PRE_REWRITE_TEXT"
+            if ! _outbound_text_gate "\$TEXT" "\$VERBATIM"; then
+              exit 1
+            fi
+          else
+            exit 0
+          fi
+        fi
         for ((i = 0; i < \${#FALLBACK_ARGS[@]}; i++)); do
           if [ "\${FALLBACK_ARGS[\$i]}" = "--text" ]; then
             FALLBACK_ARGS[\$((i + 1))]="\$TEXT"
@@ -3432,7 +3514,7 @@ the ticket to Valentin Review. A direct reply to the owner also keeps the
 mention even when the daily owner-mention allowance was already used. If a
 Question: mention is throttled, the wrapper posts the question without the
 mention and logs the throttle to run activity. The existing maximum of three comments
-per ticket per day and one reminder per day remains. Write as $agent_name, in HTML block tags, with
+per ticket per day and one reminder per day remains. An Answer to the owner is exempt from that cap and from quiet-mode redirection. Write as $agent_name, in HTML block tags, with
 \`$board_cli comment add $ref --text '<p>Done: https://github.com/org/repo/pull/1</p>'\`.
 
 Do not ask for permission and do not stop halfway.

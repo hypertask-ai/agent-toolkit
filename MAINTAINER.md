@@ -342,7 +342,7 @@ and strips board-owner mentions from comments, logging the change. An `Answer:`
 to the owner's direct mention keeps the owner mention even after this agent used
 its daily owner-mention allowance. The review column provides attention in all
 other cases. The existing one-reminder and three-comments-per-day limits still
-apply.
+apply, except an Answer to the owner, which always posts as a real comment.
 
 The drafting agent must run all five comment kinds through the real pospeak,
 unslop, and i-have-adhd skills before posting, not only satisfy the mechanical

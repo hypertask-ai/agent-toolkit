@@ -39,7 +39,8 @@ activity, not comments. Reply-only runs default to `Answer:`. If the
 answer also requires a choice, it may end with a `Decision needed:` question.
 
 The existing limit remains three comments and one reminder per ticket per day
-unless a human writes in between. Post a reminder once and edit it in place.
+unless a human writes in between. An Answer to the owner is exempt from that
+cap and from quiet-mode redirection. Post a reminder once and edit it in place.
 With quiet mode on, mention the board owner only in an `Answer:` to a comment
 where the owner directly mentioned you. Keep that mention even if the daily
 owner-mention allowance was already used. Otherwise move the ticket to review
