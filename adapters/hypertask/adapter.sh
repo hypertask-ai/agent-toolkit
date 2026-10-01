@@ -918,10 +918,16 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
         USE_IMPROVE=no
       fi
     fi
-    mkdir -p "\$(dirname "\$OWNER_MENTIONS")" 2>/dev/null || true
-    touch "\$OWNER_MENTIONS"
-    exec 9>>"\$OWNER_MENTIONS.lock"
-    flock 9
+    if [ "\${HT_OWNER_MENTIONS_LOCKED:-}" != 1 ]; then
+      mkdir -p "\$(dirname "\$OWNER_MENTIONS")" 2>/dev/null || true
+      touch "\$OWNER_MENTIONS"
+      exec 9>>"\$OWNER_MENTIONS.lock"
+      if ! flock -w 60 9; then
+        _comment_cap_note "owner-mention lock timed out on \$REF after 60s; comment not posted"
+        exit 1
+      fi
+      export HT_OWNER_MENTIONS_LOCKED=1
+    fi
     OWNER_IDS="\$(_board_owner_ids)"
     EXISTING="\$(hypertask --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
     VERDICT="\$(EXISTING="\$EXISTING" NEW_TEXT="\$TEXT" AGENT_NAME="\$AGENT_NAME" \
