@@ -1364,7 +1364,10 @@ for key in order:
     print(json.dumps(rows[key]))
 ')"
     printf '%s\n' "$merged"
-    if [ "${DRY_RUN:-no}" != "yes" ]; then
+    # A paused tick cannot start the work it just listed. Advancing the cursor
+    # or the hourly full-scan stamp here drops those tickets until the next
+    # hour, which is how a rate-limit window ate a whole Bugs column.
+    if [ "${DRY_RUN:-no}" != "yes" ] && [ "${GITHUB_PAUSED:-no}" != "yes" ]; then
       printf '%s\n' "$merged" | sed '/^$/d' > "$pending_file.new"
       mv "$pending_file.new" "$pending_file"
       [ -z "$latest" ] || { printf '%s\n' "$latest" > "$cursor_file.new"; mv "$cursor_file.new" "$cursor_file"; }
