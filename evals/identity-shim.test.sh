@@ -22,6 +22,7 @@ args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   if [ "${args[$i]}" = "--token" ]; then token="${args[$((i + 1))]:-}"; fi
 done
+if [ -z "$token" ] && [ -n "${HT_TOKEN:-}" ]; then token="$HT_TOKEN"; fi
 if [ -z "$token" ]; then token="owner-token"; fi
 if [[ " $* " = *" comment add "* ]]; then touch "$BOARD_POSTED"; fi
 printf '%s\n' "$token"

@@ -42,7 +42,8 @@ value_after() {
     [ "${argv[$i]}" != "$wanted" ] || { printf '%s' "${argv[$((i+1))]}"; return; }
   done
 }
-token="$(value_after --token || true)"
+token="${HT_TOKEN:-}"
+if [ -z "$token" ]; then token="$(value_after --token || true)"; fi
 caller="agent-${token#token-}"
 case " $* " in
   *' task get '*) cat "$MOCK_TASKS" ;;

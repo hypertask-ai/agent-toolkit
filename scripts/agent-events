@@ -218,12 +218,14 @@ def cli_call(values: dict[str, str], action: str, url: str = "") -> dict[str, An
     if prefix is None:
         raise FileNotFoundError("webhook CLI is unavailable")
     token = Path(values["TOKEN_FILE"]).expanduser().read_text(encoding="utf-8").strip()
-    argv = [prefix[0], "--token", token, "--json", *prefix[1:], action]
+    env = os.environ.copy()
+    env["HT_TOKEN"] = token
+    argv = [prefix[0], "--json", *prefix[1:], action]
     if action == "configure":
         argv += ["--url", url, "--enabled"]
         for event in EVENTS:
             argv += ["--event", event]
-    result = subprocess.run(argv, text=True, capture_output=True, timeout=30, check=False)
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=30, check=False, env=env)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"webhook CLI exited {result.returncode}")
     payload = json.loads(result.stdout)

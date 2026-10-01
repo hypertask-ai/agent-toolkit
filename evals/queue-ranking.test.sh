@@ -70,7 +70,7 @@ case " $* " in
   *' --json project show '*) printf '{"project":{"ownerId":6}}\n' ;;
   *' --json comment list '*) printf '{"comments":[]}\n' ;;
   *' task assign '*)
-    REF="$5" python3 - "$TASKS_JSON" <<'PYEOF'
+    REF="$3" python3 - "$TASKS_JSON" <<'PYEOF'
 import json, os, sys
 path = sys.argv[1]
 doc = json.load(open(path, encoding="utf-8"))

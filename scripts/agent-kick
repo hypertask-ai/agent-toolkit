@@ -106,10 +106,12 @@ def cli_supports_webhooks() -> bool:
 def cli_configure(values: dict[str, str], url: str, rotate: bool = False) -> dict[str, Any]:
     token = Path(values["TOKEN_FILE"]).expanduser().read_text(encoding="utf-8").strip()
     action = "rotate-secret" if rotate else "configure"
-    argv = ["hypertask", "--token", token, "--json", "agents", "webhook", action]
+    env = os.environ.copy()
+    env["HT_TOKEN"] = token
+    argv = ["hypertask", "--json", "agents", "webhook", action]
     if not rotate:
         argv.extend(["--url", url, "--event", "comment.mention", "--enabled"])
-    result = subprocess.run(argv, text=True, capture_output=True, timeout=30, check=False)
+    result = subprocess.run(argv, text=True, capture_output=True, timeout=30, check=False, env=env)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"webhook CLI exited {result.returncode}")
     payload = json.loads(result.stdout)

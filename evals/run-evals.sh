@@ -293,6 +293,16 @@ if [ -z "$ONLY" ] && [ -x "$HERE/token-wrapper-guard.test.sh" ]; then
   echo "-- token wrapper guard behavioural checks --"
   run_test "$HERE/token-wrapper-guard.test.sh" bash "$HERE/token-wrapper-guard.test.sh" || :
 fi
+if [ -z "$ONLY" ] && [ -x "$HERE/ht-token-env.test.sh" ]; then
+  echo ""
+  echo "-- token stays off the command line --"
+  run_test "$HERE/ht-token-env.test.sh" bash "$HERE/ht-token-env.test.sh" || :
+fi
+if [ -z "$ONLY" ] && [ -x "$HERE/owner-mention-lock.test.sh" ]; then
+  echo ""
+  echo "-- owner-mention lock cannot deadlock a nested comment --"
+  run_test "$HERE/owner-mention-lock.test.sh" bash "$HERE/owner-mention-lock.test.sh" || :
+fi
 if [ -z "$ONLY" ] && [ -x "$HERE/hypertask-adapter.test.sh" ]; then
   echo ""
   echo "-- hypertask adapter behavioural checks --"

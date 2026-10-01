@@ -374,11 +374,11 @@ else
   bad reply-only-bypasses-inflight-work "models=$(cat "$TMP/model-runs.log") reply=$(cat "$TMP/reply-posts.log") board=$(cat "$TMP/board-native.log")"
 fi
 
-done_count="$(grep -c ' comment add ONE-2 ' "$TMP/board-native.log" || true)"
-failed_count="$(grep -c ' comment add ONE-3 ' "$TMP/board-native.log" || true)"
+done_count="$(grep -cE '(^| )comment add ONE-2 ' "$TMP/board-native.log" || true)"
+failed_count="$(grep -cE '(^| )comment add ONE-3 ' "$TMP/board-native.log" || true)"
 states="$(python3 -c 'import json,sys; print(" ".join(r["status"] for r in json.load(open(sys.argv[1]))))' "$record")"
 if [ "$done_count" -eq 1 ] && [ "$states" = 'done comment-failed running' ] \
-   && ! grep -qE ' comment add https://app\.hypertask\.ai/' "$TMP/board-native.log"; then
+   && ! grep -qE '(^| )comment add https://app\.hypertask\.ai/' "$TMP/board-native.log"; then
   ok later-tick-reports-completion "later ticks resolved ticket URLs and closed completed builds"
 else
   bad later-tick-reports-completion "done=$done_count states=$states board=$(cat "$TMP/board-native.log")"
