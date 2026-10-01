@@ -2273,6 +2273,20 @@ PYEOF
     "$(date -d "@$reset" +%H:%M 2>/dev/null || printf '%s' "$reset")" >&2
 }
 
+# Installation token for hypertask-ai/hypertask only. The value stays in the
+# child environment and is never printed.
+_ht_with_app_token() {
+  local repo="$1" token_file token
+  shift
+  token_file="${HT_GH_APP_TOKEN_FILE:-${HOME}/.local/state/gh-app-token/agents}"
+  if [ "$repo" = "hypertask-ai/hypertask" ] && [ -r "$token_file" ]; then
+    token="$(tr -d '\n' < "$token_file")"
+    GH_TOKEN="$token" "$@"
+  else
+    "$@"
+  fi
+}
+
 _ht_gh() {
   local repo="$1" error_file response_file rc include_headers="no"
   shift
@@ -2281,12 +2295,12 @@ _ht_gh() {
   response_file="$(mktemp)"
   if [ "${1:-}" = "api" ]; then
     include_headers="yes"
-    if command gh "$@" --include >"$response_file" 2>"$error_file"; then
+    if _ht_with_app_token "$repo" command gh "$@" --include >"$response_file" 2>"$error_file"; then
       rc=0
     else
       rc=$?
     fi
-  elif command gh "$@" >"$response_file" 2>"$error_file"; then
+  elif _ht_with_app_token "$repo" command gh "$@" >"$response_file" 2>"$error_file"; then
     rc=0
   else
     rc=$?
@@ -2411,7 +2425,7 @@ _ht_pr_cache_rows() (
   exec 8>>"$lock_file"
   flock 8
   now="$(date +%s)"
-  ttl="${PR_CACHE_TTL_SECONDS:-60}"
+  ttl="${PR_CACHE_TTL_SECONDS:-300}"
   [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=60
   [ "$ttl" -ge 60 ] || ttl=60
   _ht_github_paused "$repo" && return 75
