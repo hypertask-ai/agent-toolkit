@@ -223,6 +223,8 @@ if [ "$1 $2" = "pr view" ]; then
     comments='[{"author":{"login":"claude-review"},"body":"CONCERNS: preserve the existing authorization check."}]'
   elif [ "$scenario" = "revert-only" ]; then
     checks='[{"name":"revert-guard","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/88/job/1"}]'
+  elif [ "$scenario" = "empty-log" ]; then
+    checks='[{"name":"ci-tests","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/901"},{"name":"production-test-warning","status":"COMPLETED","conclusion":"FAILURE","detailsUrl":"https://github.test/actions/runs/77/job/902"}]'
   fi
   printf '{"state":"OPEN","url":"https://github.test/pull/%s","title":"HTPR-%s fix","body":"","headRefName":"agent/dev-1-htpr-%s","headRefOid":"head%s","baseRefName":"production","createdAt":"2026-01-01T00:00:00Z","statusCheckRollup":%s,"reviews":%s,"comments":%s}\n' "$number" "$number" "$number" "$number" "$checks" "$reviews" "$comments"
   exit 0
@@ -335,11 +337,25 @@ PYEOF
         printf '[{"id":51,"environment":"Production","created_at":"2026-01-03T00:00:00Z","sha":"deploy"}]\n'
       fi ;;
     */deployments/*/statuses*) printf '[{"state":"success"}]\n' ;;
+    repos/example/repo/actions/jobs/901/logs)
+      printf '%s\n' '2026-01-01T00:00:00.0000000Z not ok 12 - tests/ci-warning.test.cjs' \
+        '2026-01-01T00:00:00.0000000Z ##[error]Process completed with exit code 1.'
+      ;;
+    repos/example/repo/actions/jobs/902/logs)
+      printf '%s\n' '2026-01-01T00:00:00.0000000Z ##[error]production-test-warning failed to report the failed test'
+      ;;
+    repos/example/repo/check-runs/901/annotations|repos/example/repo/check-runs/902/annotations)
+      printf '[]\n'
+      ;;
     *) printf '{}\n' ;;
   esac
   exit 0
 fi
 if [ "$1 $2" = "run view" ]; then
+  # ci-tests and production-test-warning: gh prints nothing and exits 1.
+  if [ "$scenario" = "empty-log" ]; then
+    exit 1
+  fi
   printf 'ci-tests\tFAIL\texact failed log line\n'
   exit 0
 fi
@@ -486,6 +502,22 @@ red="$(run_gate red)"
 [[ "$red" == *'CONCERNS: preserve the existing authorization check.'* ]]
 [[ "$red" == *'exact failed log line'* ]]
 echo 'PASS open red PR returns exact checks, review feedback, and logs'
+
+set +e
+empty_log="$(run_gate empty-log)"
+empty_rc=$?
+set -e
+[ "$empty_rc" -eq 0 ]
+EMPTY_LOG="$empty_log" python3 - <<'PYEOF'
+import json, os
+result = json.loads(os.environ["EMPTY_LOG"])
+assert result["action"] == "fix", result["action"]
+assert result["failed_checks"] == ["ci-tests", "production-test-warning"]
+assert result["first_error_line"] == "not ok 12 - tests/ci-warning.test.cjs"
+assert "no error line reported" not in result["first_error_line"]
+assert "production-test-warning failed to report the failed test" in result["feedback"]
+PYEOF
+echo 'PASS empty ci-tests and production-test-warning logs still report the failing test line'
 
 status_context="$(run_gate status-context)"
 STATUS_CONTEXT="$status_context" python3 - <<'PYEOF'
@@ -1204,6 +1236,13 @@ failure_comment="$(grep -F 'PR release could not move' "$TMP/board-comments")"
 [[ "$failure_comment" == *'<a href="https://app.hypertask.ai/detail/project-15/1">HTPR-1 PR ticket</a>'* ]]
 printf '%s' "$failure_comment" | python3 "$ROOT/adapters/hypertask/plain-language/check-comment.py"
 echo 'PASS failed PR release move retains the verdict, clears both bindings, and links its health comment'
+
+rm -rf "$state/run-records" "$state/pr-live-cache"
+rm -f "$state/dev-1.released-prs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/actions" "$TMP/unassigned"
+WORKER_EXIT=1 run_actual empty-log
+grep -qF 'not ok 12 - tests/ci-warning.test.cjs' "$TMP/worker-prompts"
+grep -qF 'Fix round 1: no push: worker exited 1. Trigger: ci-tests, production-test-warning | not ok 12 - tests/ci-warning.test.cjs' "$TMP/board-comments"
+echo 'PASS a fix round that exits 1 still reports the ci-tests and production-test-warning error line'
 
 rm -rf "$state/run-records" "$state/pr-live-cache"
 rm -f "$state/dev-1.released-prs" "$TMP/board-comments" "$TMP/worker-prompts" "$TMP/actions" "$TMP/unassigned"
