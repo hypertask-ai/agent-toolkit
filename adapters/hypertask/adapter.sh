@@ -333,26 +333,48 @@ PYEOF
 adapter_install_board_cli() {
   local slug="$1" token_file="$2" dest="$3" agent_name="${4:-}"
   local agent_id="${5:-}" board_ids="${6:-}" quiet="${7:-on}"
-  local plain_language_dir native_cli native_path
+  local plain_language_dir native_path
   plain_language_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/plain-language" && pwd)"
   mkdir -p "$(dirname "$dest")"
-  native_cli="hypertask"
+  # When this file replaces the hypertask binary, keep a private copy. A model
+  # run puts an identity shim named hypertask first on PATH, and that shim
+  # sends "comment add" back into this wrapper. Calling it while the
+  # owner-mentions lock is held deadlocks. Internal calls skip that shim.
   native_path="$(command -v hypertask 2>/dev/null || true)"
   if [ -n "$native_path" ] && [ "$(readlink -f "$native_path")" = "$(readlink -m "$dest")" ]; then
     if [ ! -x "$dest.native" ]; then
       cp "$native_path" "$dest.native"
       chmod 755 "$dest.native"
     fi
-    native_cli="$dest.native"
   fi
   cat > "$dest" <<EOF
 #!/usr/bin/env bash
 # $slug: the board CLI acting as this agent.
 set -euo pipefail
-HYPERTASK_NATIVE="$native_cli"
-if [ "\$HYPERTASK_NATIVE" != hypertask ]; then
-  hypertask() { "\$HYPERTASK_NATIVE" "\$@"; }
-fi
+_ht_native() {
+  if [ -x "\$0.native" ]; then
+    HT_BIN="\$0.native"
+    return 0
+  fi
+  local entry cmd
+  local IFS=:
+  for entry in \$PATH; do
+    case "\$entry" in
+      ''|*identity-shims*) continue ;;
+    esac
+    cmd="\$entry/hypertask"
+    if [ -x "\$cmd" ]; then
+      HT_BIN="\$cmd"
+      return 0
+    fi
+  done
+  echo "ERROR: hypertask is not on PATH. Do this next: install the hypertask CLI" >&2
+  return 127
+}
+hypertask() {
+  _ht_native || return 127
+  "\$HT_BIN" "\$@"
+}
 TOKEN_FILE="$token_file"
 AGENT_NAME="$agent_name"
 AGENT_ID="$agent_id"
@@ -385,6 +407,7 @@ BOARD_API_URL="\${BOARD_API_URL:-$(_ht_api_base)}"
   exit 1
 }
 TOKEN="\$(cat "\$TOKEN_FILE")"
+export HT_TOKEN="\$TOKEN"
 
 _comment_cap_note() {
   # \$1: the message. Stderr so the model sees it now, plus the agent's own
@@ -397,7 +420,7 @@ _comment_cap_note() {
 _board_owner_ids() {
   local ids="" board project owner_id
   for board in \$(printf '%s' "\$BOARD_IDS" | tr ',' ' '); do
-    project="\$(hypertask --token "\$TOKEN" --json project show "\$board" 2>/dev/null || true)"
+    project="\$(hypertask --json project show "\$board" 2>/dev/null || true)"
     owner_id="\$(PROJECT="\$project" python3 -c '
 import json, os
 try:
@@ -522,7 +545,7 @@ if { [ "\${1:-}" = "task" ] || [ "\${1:-}" = "tasks" ]; } \
     if [ -n "\${AGENT_AI_WRITER_FIXTURE:-}" ]; then
       WRITER_OUTPUT="\$(cat "\$AGENT_AI_WRITER_FIXTURE" 2>/dev/null)" || WRITER_OUTPUT=""
     else
-      WRITER_OUTPUT="\$(hypertask --token "\$TOKEN" --json ai write "\$PROMPT" --project "\$PROJECT" --mode task-writer 2>/dev/null)" || WRITER_OUTPUT=""
+      WRITER_OUTPUT="\$(hypertask --json ai write "\$PROMPT" --project "\$PROJECT" --mode task-writer 2>/dev/null)" || WRITER_OUTPUT=""
     fi
     WRITTEN="\$(WRITER_OUTPUT="\$WRITER_OUTPUT" python3 -c '
 import json, os
@@ -564,7 +587,8 @@ if doc.get("success") is True and title and body:
   if [ "\$REWRITTEN" = yes ] && [ "\$HAS_DESCRIPTION" = no ]; then
     POST_ARGS+=(--description "\$WRITTEN_DESCRIPTION")
   fi
-  exec "\$HYPERTASK_NATIVE" --token "\$TOKEN" "\${POST_ARGS[@]}"
+  _ht_native || exit 127
+  exec "\$HT_BIN" "\${POST_ARGS[@]}"
 fi
 
 _strip_owner_mentions() {
@@ -649,7 +673,7 @@ _worker_comment() {
       _comment_cap_note "worker owner mention refused: use comment add with the ticket so the supervisor can review it"
       exit 1
     fi
-    hypertask --token "\$TOKEN" task move "\$REF" --section "Supervisor Review" || exit 1
+    hypertask task move "\$REF" --section "Supervisor Review" || exit 1
     mkdir -p "\$(dirname "\$MOVED")"
     printf '%s\t%s\n' "\$REF" "Supervisor Review" >> "\$MOVED"
     _comment_cap_note "worker owner mention rewritten for the supervisor on \$REF; moved to Supervisor Review"
@@ -662,7 +686,7 @@ case "\${1:-} \${2:-}" in
   "task assign"|"task move"|"task update"|"comment add") REF="\${3:-}" ;;
 esac
 if [ -n "\$REF" ]; then
-  TASK="\$(hypertask --token "\$TOKEN" --json task get "\$REF" 2>/dev/null)" || TASK=""
+  TASK="\$(hypertask --json task get "\$REF" 2>/dev/null)" || TASK=""
   CLI_TRUSTED=yes
   if ! TASK="\$TASK" REF="\$REF" python3 -c '
 import json, os, sys
@@ -723,7 +747,7 @@ fi
 if [ "\${AGENT_QA_MOVE:-no}" = "yes" ] && [ "\${1:-}" = "task" ] \
    && [ "\${2:-}" = "move" ] && [ -n "\${3:-}" ]; then
   REF="\$3"
-  if OUT="\$(hypertask --token "\$TOKEN" "\$@")"; then RC=0; else RC=\$?; fi
+  if OUT="\$(hypertask "\$@")"; then RC=0; else RC=\$?; fi
   printf '%s\n' "\$OUT"
   if [ "\$RC" -eq 0 ]; then
     SECTION=""
@@ -751,7 +775,7 @@ Original comment:
   if [ -n "\${AGENT_AI_WRITER_FIXTURE:-}" ]; then
     output="\$(cat "\$AGENT_AI_WRITER_FIXTURE" 2>/dev/null)" || output=""
   else
-    output="\$(hypertask --token "\$TOKEN" --json ai write "\$prompt" --task "\$ref" --mode write-with-ai 2>/dev/null)" || output=""
+    output="\$(hypertask --json ai write "\$prompt" --task "\$ref" --mode write-with-ai 2>/dev/null)" || output=""
   fi
   rewritten="\$(OUTPUT="\$output" python3 -c '
 import json, os
@@ -817,7 +841,8 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "update" ] && [ -n "\${3:-}" ]; th
       exit 0
     fi
     if [ "\$TEXT" != "\$ORIGINAL_TEXT" ]; then
-      exec "\$HYPERTASK_NATIVE" --token "\$TOKEN" comment update "\$3" --text "\$TEXT"
+      _ht_native || exit 127
+      exec "\$HT_BIN" comment update "\$3" --text "\$TEXT"
     fi
     if TEXT="\$TEXT" OWNER_IDS="\$OWNER_IDS" python3 -c '
 import os, re, sys
@@ -898,7 +923,7 @@ if [ "\${1:-}" = "comment" ] && [ "\${2:-}" = "add" ] && [ -n "\${3:-}" ]; then
     exec 9>>"\$OWNER_MENTIONS.lock"
     flock 9
     OWNER_IDS="\$(_board_owner_ids)"
-    EXISTING="\$(hypertask --token "\$TOKEN" --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
+    EXISTING="\$(hypertask --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
     VERDICT="\$(EXISTING="\$EXISTING" NEW_TEXT="\$TEXT" AGENT_NAME="\$AGENT_NAME" \
       AGENT_ID="\$AGENT_ID" OWNER_IDS="\$OWNER_IDS" REF="\$REF" \
       OWNER_MENTIONS="\$OWNER_MENTIONS" OWNER_MENTION_REPLY="\$OWNER_MENTION_REPLY" \
@@ -1010,7 +1035,7 @@ else:
         ;;
       UPDATE:*)
         UPDATE_ID="\${VERDICT#UPDATE:}"
-        if OUT="\$(hypertask --token "\$TOKEN" comment update "\$UPDATE_ID" --text "\$TEXT")"; then
+        if OUT="\$(hypertask comment update "\$UPDATE_ID" --text "\$TEXT")"; then
           _comment_cap_note "comment dedupe on \$REF: updated near-identical comment \$UPDATE_ID instead of posting a new one"
           mkdir -p "\$(dirname "\$POSTED")" 2>/dev/null || true
           printf '%s %s\n' "\$REF" "\$UPDATE_ID" >> "\$POSTED" 2>/dev/null || true
@@ -1093,7 +1118,7 @@ comment = row.get("comment") if isinstance(row.get("comment"), dict) else row
 print(comment.get("id") or "")' 2>/dev/null || true)"
       else
         _comment_cap_note "reply-stamped comment API failed on \$REF (HTTP \$STATUS); falling back to CLI without reply stamp"
-        if OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
+        if OUT="\$(hypertask "\${FALLBACK_ARGS[@]}")"; then
           RC=0
         else
           RC=\$?
@@ -1111,7 +1136,7 @@ print(comment.get("id") or "")' 2>/dev/null || true)"
           FALLBACK_ARGS[\$((i + 1))]="\$TEXT"
         fi
       done
-      if OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
+      if OUT="\$(hypertask "\${FALLBACK_ARGS[@]}")"; then
         RC=0
       else
         RC=\$?
@@ -1119,7 +1144,7 @@ print(comment.get("id") or "")' 2>/dev/null || true)"
     elif [ "\$USE_IMPROVE" = yes ]; then
       POST_ARGS+=(--improve --improve-command improve-readability)
       IMPROVE_ERR="\$(mktemp "\${TMPDIR:-/tmp}/agent-comment-improve.XXXXXX")"
-      if OUT="\$(hypertask --token "\$TOKEN" "\${POST_ARGS[@]}" 2>"\$IMPROVE_ERR")"; then
+      if OUT="\$(hypertask "\${POST_ARGS[@]}" 2>"\$IMPROVE_ERR")"; then
         RC=0
       else
         RC=\$?
@@ -1132,14 +1157,14 @@ print(comment.get("id") or "")' 2>/dev/null || true)"
               FALLBACK_ARGS[\$((i + 1))]="\$TEXT"
             fi
           done
-          if OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
+          if OUT="\$(hypertask "\${FALLBACK_ARGS[@]}")"; then
             RC=0
           else
             RC=\$?
           fi
         elif grep -qiE '(ai|writer|improv).*(fail|error|empty|unavailable)|(fail|error|empty|unavailable).*(ai|writer|improv)' "\$IMPROVE_ERR"; then
           _comment_cap_note "WARNING: Hypertask AI writer failed on \$REF; posting the original comment"
-          if OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
+          if OUT="\$(hypertask "\${FALLBACK_ARGS[@]}")"; then
             RC=0
           else
             RC=\$?
@@ -1147,7 +1172,7 @@ print(comment.get("id") or "")' 2>/dev/null || true)"
         fi
       fi
       rm -f "\$IMPROVE_ERR"
-    elif OUT="\$(hypertask --token "\$TOKEN" "\${FALLBACK_ARGS[@]}")"; then
+    elif OUT="\$(hypertask "\${FALLBACK_ARGS[@]}")"; then
       RC=0
     else
       RC=\$?
@@ -1170,7 +1195,7 @@ PYEOF
       fi
       NEWID="\$POSTED_ID"
       if [ -z "\$NEWID" ]; then
-        LISTED="\$(hypertask --token "\$TOKEN" --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
+        LISTED="\$(hypertask --json comment list "\$REF" 2>/dev/null || echo '{"comments":[]}')"
         NEWID="\$(LISTED="\$LISTED" AGENT_NAME="\$AGENT_NAME" AGENT_ID="\$AGENT_ID" python3 -c '
 import json, os
 
@@ -1205,7 +1230,8 @@ if mine:
   fi
 fi
 
-exec "\$HYPERTASK_NATIVE" --token "\$TOKEN" "\$@"
+_ht_native || exit 127
+exec "\$HT_BIN" "\$@"
 EOF
   chmod 755 "$dest"
 }
