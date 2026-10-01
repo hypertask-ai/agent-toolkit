@@ -2592,8 +2592,29 @@ row_labels() {
   printf '%s' "$1" | python3 -c 'import json,sys;print(",".join(json.load(sys.stdin).get("labels") or []))'
 }
 
-# rank_order : indices of the eligible tickets, best ownership rank first. The
-# adapter may order new queued work inside rank 3; board order breaks every tie.
+# section_watch_slot <section> : index of this column in WATCH_SECTIONS.
+# The list is a priority order, not a set. "*" has no order. Unknown columns sort last.
+section_watch_slot() {
+  local section="$1" raw="$WATCH_SECTIONS" i=0 part folded pfold
+  [ "$raw" = "*" ] && { printf '0'; return; }
+  folded="$(printf '%s' "$section" | tr '[:upper:]' '[:lower:]')"
+  local IFS=','
+  for part in $raw; do
+    part="${part#"${part%%[![:space:]]*}"}"
+    part="${part%"${part##*[![:space:]]}"}"
+    pfold="$(printf '%s' "$part" | tr '[:upper:]' '[:lower:]')"
+    if [ "$pfold" = "$folded" ]; then
+      printf '%s' "$i"
+      return
+    fi
+    i=$((i + 1))
+  done
+  printf '500'
+}
+
+# rank_order : indices of the eligible tickets, best ownership rank first.
+# New work (rank 3) is ordered by WATCH_SECTIONS first, then the adapter queue key.
+# Board order breaks every remaining tie.
 rank_order() {
   local i
   for i in "${!ELIGIBLE[@]}"; do
@@ -3942,6 +3963,13 @@ print(json.dumps({"owner_id": owner.get("id") or "", "owner_slug": owner.get("sl
     if [[ "$adapter_order" =~ ^[0-9]+\ [0-9]+([.][0-9]+)?$ ]]; then
       queue_order="$adapter_order"
     fi
+  fi
+  if [ "$rank" = "3" ] && [ "$is_reply_only" = "no" ]; then
+    slot="$(section_watch_slot "$section")"
+    read -r q_hi q_lo <<<"$queue_order"
+    case "$q_hi" in ''|*[!0-9]*) q_hi=1 ;; esac
+    case "$q_lo" in ''|*[!0-9.]*) q_lo=0 ;; esac
+    queue_order="$((slot * 2 + q_hi)) $q_lo"
   fi
 
   picked=$((picked + 1))
