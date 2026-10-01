@@ -3151,26 +3151,107 @@ print(json.dumps({"failed": failed, "pending": pending, "review": review}))
 import json, re, sys
 seen = set()
 for check in json.load(sys.stdin)["failed"]:
-    match = re.search(r"/actions/runs/([0-9]+)", check.get("url") or "")
-    if match and (check["name"], match.group(1)) not in seen:
-        seen.add((check["name"], match.group(1)))
-        print("%s\t%s" % (check["name"], match.group(1)))
+    url = check.get("url") or ""
+    run = re.search(r"/actions/runs/([0-9]+)", url)
+    job = re.search(r"/job/([0-9]+)", url)
+    run_id = run.group(1) if run else ""
+    job_id = job.group(1) if job else ""
+    if (run_id or job_id) and (check["name"], run_id, job_id) not in seen:
+        seen.add((check["name"], run_id, job_id))
+        print("%s\t%s\t%s" % (check["name"], run_id, job_id))
 ')"
   logs=""
-  while IFS=$'\t' read -r check_name run_id; do
-    [ -n "$run_id" ] || continue
-    if run_log="$(_ht_gh "$repo" run view "$run_id" --repo "$repo" --log-failed 2>&1)"; then
-      rc=0
-    else
-      rc=$?
-      [ "$rc" -ne 75 ] || return 75
+  while IFS=$'\t' read -r check_name run_id job_id; do
+    [ -n "$run_id$job_id" ] || continue
+    run_log=""
+    if [ -n "$run_id" ]; then
+      # gh run view --log-failed exits 1, or exits 0 with an empty body, for
+      # failed ci-tests and production-test-warning jobs. Keep going either way.
+      if run_log="$(_ht_gh "$repo" run view "$run_id" --repo "$repo" --log-failed 2>&1)"; then
+        :
+      else
+        rc=$?
+        [ "$rc" -ne 75 ] || return 75
+      fi
+    fi
+    if ! printf '%s\n' "$run_log" | python3 -c '
+import re, sys
+text = sys.stdin.read()
+raise SystemExit(0 if re.search(r"(?:##\[error\]|(?:^|\b)(?:error|failed?|fatal|exception)(?:\b|:)|(?:^|\s)not ok\s+\d+)", text, re.I) else 1)
+'; then
+      if [ -n "$job_id" ]; then
+        job_file="$(mktemp)"
+        ann_file="$(mktemp)"
+        if _ht_gh "$repo" api "repos/$repo/actions/jobs/$job_id/logs" >"$job_file"; then
+          :
+        else
+          rc=$?
+          if [ "$rc" -eq 75 ]; then
+            rm -f "$job_file" "$ann_file"
+            return 75
+          fi
+        fi
+        if _ht_gh "$repo" api "repos/$repo/check-runs/$job_id/annotations" >"$ann_file"; then
+          :
+        else
+          rc=$?
+          if [ "$rc" -eq 75 ]; then
+            rm -f "$job_file" "$ann_file"
+            return 75
+          fi
+        fi
+        run_log="$(python3 - "$job_file" "$ann_file" <<'PY'
+import json, re, sys
+
+def strip_stamp(line):
+    return re.sub(r"^\d{4}-\d{2}-\d{2}T\S+\s*", "", line).strip()
+
+job_path, ann_path = sys.argv[1], sys.argv[2]
+try:
+    job = open(job_path, encoding="utf-8", errors="replace").read()
+except OSError:
+    job = ""
+try:
+    ann_text = open(ann_path, encoding="utf-8", errors="replace").read()
+except OSError:
+    ann_text = ""
+chosen = []
+for raw in job.splitlines():
+    line = strip_stamp(raw)
+    if not line:
+        continue
+    if re.search(r"(?:^|\s)not ok\s+\d+\b", line, re.I) or "##[error]" in line.lower():
+        if line not in chosen:
+            chosen.append(line)
+try:
+    anns = json.loads(ann_text) if ann_text.strip()[:1] in "[{" else []
+except json.JSONDecodeError:
+    anns = []
+if isinstance(anns, dict):
+    anns = anns.get("annotations") or []
+for ann in anns if isinstance(anns, list) else []:
+    if str(ann.get("annotation_level") or "").lower() != "failure":
+        continue
+    msg = " ".join(str(ann.get("message") or "").split())
+    if msg and msg not in chosen:
+        chosen.append(msg)
+if not chosen:
+    chosen = [strip_stamp(line) for line in job.splitlines() if line.strip()][-80:]
+not_ok = [line for line in chosen if re.search(r"not ok\s+\d+", line, re.I)]
+rest = [line for line in chosen if line not in not_ok]
+print("\n".join((not_ok + rest)[:80]))
+PY
+)"
+        rm -f "$job_file" "$ann_file"
+      fi
     fi
     logs="${logs}${logs:+$'\n\n'}[$check_name, last 80 failed-log lines]"$'\n'"$(printf '%s\n' "$run_log" | tail -n 80)"
   done <<< "$run_rows"
   first_error="$(LOGS="$logs" python3 -c '
 import os, re
 lines = [line.strip() for line in os.environ["LOGS"].splitlines() if line.strip() and not line.startswith("[")]
-match = next((line for line in lines if re.search(r"(?:^|\b)(?:error|failed?|fatal|exception)(?:\b|:)", line, re.I)), None)
+not_ok = next((line for line in lines if re.search(r"not ok\s+\d+", line, re.I)), None)
+match = not_ok or next((line for line in lines if re.search(r"(?:^|\b)(?:error|failed?|fatal|exception)(?:\b|:)", line, re.I)), None)
 print((match or (lines[0] if lines else "no error line reported"))[:500])
 ')"
   action="$(printf '%s' "$feedback" | python3 -c 'import json,sys;d=json.load(sys.stdin);print("fix" if d["failed"] or d["review"] else "wait")')"
