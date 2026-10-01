@@ -114,3 +114,41 @@ else
   printf 'FAIL %-36s changed ticket disappeared after the ranking boundary\n' fast-tick-ranking-tail
   exit 1
 fi
+
+# A rate-limit pause must not consume the delta or the hourly full scan.
+# Otherwise the tickets skipped as "GitHub is paused" never return.
+printf '2026-01-01T00:00:01Z\n' > "$TMP/state/agent-board-poll/fast.updated-cursor.15"
+full_stamp="$(date +%s)"
+printf '%s\n' "$full_stamp" > "$TMP/state/agent-board-poll/fast.full-rescan.15"
+: > "$TMP/state/agent-board-poll/fast.ranking-pending.15.jsonl"
+mkdir -p "$TMP/state/agent-board-poll/pr-cache"
+printf '%s\n' "$((full_stamp + 3600))" > "$TMP/state/agent-board-poll/pr-cache/example__repo.json.rate-limit"
+set +e
+HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
+  TASKS_JSON="$TMP/tasks.json" API_CALLS="$TMP/api.calls" \
+  PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once fast >/dev/null
+pause_rc=$?
+set -e
+cursor_after="$(cat "$TMP/state/agent-board-poll/fast.updated-cursor.15")"
+full_after="$(cat "$TMP/state/agent-board-poll/fast.full-rescan.15")"
+if [ "$pause_rc" = 75 ] \
+   && [ "$cursor_after" = "2026-01-01T00:00:01Z" ] \
+   && [ "$full_after" = "$full_stamp" ]; then
+  printf 'PASS %-36s %s\n' fast-tick-pause-keeps-cursor 'a paused tick leaves the cursor and full scan stamp alone'
+else
+  printf 'FAIL %-36s rc=%s cursor=%s full=%s\n' fast-tick-pause-keeps-cursor "$pause_rc" "$cursor_after" "$full_after"
+  exit 1
+fi
+rm -f "$TMP/state/agent-board-poll/pr-cache/example__repo.json.rate-limit"
+resumed="$(HOME="$TMP/home" AGENT_CONFIG_DIR="$TMP/home/.config/agents" \
+  XDG_STATE_HOME="$TMP/state" COMPANY_SKILLS_DIR="$TMP/company" \
+  TASKS_JSON="$TMP/tasks.json" API_CALLS="$TMP/api.calls" \
+  PATH="$TMP/bin:$PATH" "$ROOT/scripts/agent-board-poll" --once --dry-run fast)"
+if printf '%s\n' "$resumed" | grep -qF 'would pick up FAST-200'; then
+  printf 'PASS %-36s %s\n' fast-tick-pause-resumes 'the ticket skipped during the pause is still eligible once GitHub resumes'
+else
+  printf 'FAIL %-36s paused ticket was not eligible after the pause lifted\n' fast-tick-pause-resumes
+  printf '%s\n' "$resumed" | tail -n 20
+  exit 1
+fi

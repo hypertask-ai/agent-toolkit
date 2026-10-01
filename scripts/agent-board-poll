@@ -3331,7 +3331,8 @@ for key in order:
     print(json.dumps(rows[key]))
 ')"
 fi
-if [ -z "$TARGET_TICKET" ] && declare -F adapter_persist_tick_candidates >/dev/null 2>&1; then
+if [ -z "$TARGET_TICKET" ] && [ "${GITHUB_PAUSED:-no}" != "yes" ] \
+   && declare -F adapter_persist_tick_candidates >/dev/null 2>&1; then
   printf '%s\n' "$CANDIDATES" | adapter_persist_tick_candidates
 fi
 fi
@@ -3406,7 +3407,8 @@ while IFS= read -r row; do
 
   task_id="$(row_field "$row" id)"
   row_board="$(row_field "$row" board)"; [ -n "$row_board" ] || row_board="${BOARD_ID%%,*}"
-  if [ -z "$TARGET_TICKET" ] && declare -F adapter_mark_tick_candidate >/dev/null 2>&1; then
+  if [ -z "$TARGET_TICKET" ] && [ "${GITHUB_PAUSED:-no}" != "yes" ] \
+     && declare -F adapter_mark_tick_candidate >/dev/null 2>&1; then
     adapter_mark_tick_candidate "$task_id" "$row_board"
   fi
   ref="$(row_field "$row" ref)"
