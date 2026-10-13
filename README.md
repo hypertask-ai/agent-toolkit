@@ -10,3 +10,7 @@ Clone this repository and run `./install.sh`. Existing hosts update through
 
 See [SKILL.md](SKILL.md) for the operator-facing guide and
 [MAINTAINER.md](MAINTAINER.md) for host maintenance.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, ideas, and our contribution policy.
