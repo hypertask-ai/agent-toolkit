@@ -1608,7 +1608,7 @@ import sys
 repo, commit, output = sys.argv[1:]
 prefix = ""
 tops = {"SKILL.md", "MAINTAINER.md", "CONF.md", "VERSION", "CHANGELOG.md", "repos.allow"}
-dirs = ("scripts/", "adapters/", "evals/", "repo-skeleton/", "project-template/")
+dirs = ("scripts/", "adapters/", "evals/", "skills/", "repo-skeleton/", "project-template/")
 listed = subprocess.check_output(
     ["git", "-C", repo, "ls-tree", "-r", "--name-only", commit], text=True
 )

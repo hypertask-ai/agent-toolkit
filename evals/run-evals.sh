@@ -512,6 +512,13 @@ if [ -z "$ONLY" ] && [ -x "$HERE/owner-rule-proposal.test.sh" ]; then
   run_test "$HERE/owner-rule-proposal.test.sh" bash "$HERE/owner-rule-proposal.test.sh" || :
 fi
 
+if [ -z "$ONLY" ] && [ -f "$HERE/setup-agents.test.py" ]; then
+  echo ""
+  echo "-- public setup-agents offline provisioning checks --"
+  run_test "$HERE/setup-agents.test.py" env PYTHONDONTWRITEBYTECODE=1 python3 -m pytest --import-mode=importlib -q -p no:cacheprovider "$HERE/setup-agents.test.py" || :
+  run_test "$HERE/scan-setup-agents.py" python3 "$HERE/scan-setup-agents.py" || :
+fi
+
 if [ -z "$ONLY" ]; then
   echo ""
   printf '%d subtest file(s) run, %d failed\n' "$SUBTESTS_RUN" "${#SUBTEST_FAILURES[@]}"

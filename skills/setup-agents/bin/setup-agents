@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""Plan or provision named project sessions. Dry run is the default."""
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import runpy
+import shlex
+import shutil
+import subprocess
+import sys
+from datetime import datetime, timezone
+
+sys.dont_write_bytecode = True
+
+import yaml
+
+from kit_runtime import BOARD_PROJECT, CONTRACT, REFERENCE, load_config
+
+KIT = Path(__file__).resolve().parents[1]
+TEMPLATES = KIT / "templates"
+
+
+def slug(value):
+    if not value.strip() or any(c in value for c in "\r\n\t|${}") or CONTRACT["CREDENTIAL"].search(value):
+        raise ValueError("invalid name (value not echoed)")
+    result = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    if not result or len(result) > 64:
+        raise ValueError("name must have a short alphanumeric slug")
+    return result
+
+
+def command(args):
+    result = subprocess.run([str(v) for v in args], capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError("setup command failed (output withheld)")
+    return result.stdout.strip()
+
+
+def defaults(repo, board):
+    if not CONTRACT["REPO"].fullmatch(repo):
+        raise ValueError("repo must be owner/name")
+    project = slug(repo.split("/")[1])
+    prefix = re.sub(r"[^A-Z0-9]", "", project.upper())[:12]
+    if not prefix or not prefix[0].isalpha():
+        prefix = "PROJ"
+    return {
+        "schema_version": 1, "project": project, "repo": repo, "base_branch": "main",
+        "ticket_source": {"type": BOARD_PROJECT, "base_url": "${TICKET_BASE_URL}",
+                          "board_id": board, "credential_ref": "${SETUP_AGENT_IDENTITY_PROFILE}"},
+        "ticket_prefix": prefix, "test_command": "git diff --check",
+        "pr_title_rule": {"type": "descriptive", "min_length": 8},
+        "deploy": {"type": "manual", "trigger": "owner_approved", "command": None},
+        "live_check": {"command": "false"}, "flags": {"enabled": False},
+        "ship": {"repo": repo, "base_branch": "main", "board_id": board,
+                 "ticket_prefixes": [prefix], "ticket_url_template": "https://board.example.invalid/detail/project-{projectId}/{number}",
+                 "columns": {"claim": "Todo", "in_progress": "In Progress", "handoff": "AI Review",
+                             "decision": "Owner Review", "done": "Done", "blocked": "Blocked"},
+                 "done_allowed": False, "proof_type": "web",
+                 "identity_profile_ref": "${SETUP_AGENT_IDENTITY_PROFILE}",
+                 "dev_model_rule": "Use the project's existing development tools"},
+    }
+
+
+def safe_path(path):
+    for part in (path, *path.parents):
+        if part.is_symlink():
+            raise ValueError("symlinked setup destination refused")
+
+
+def check_file(path, content):
+    safe_path(path)
+    if path.exists() and (not path.is_file() or path.read_text() != content):
+        raise ValueError("existing project file differs; preserve it and reconcile before apply")
+
+
+def write(path, content, mode=0o600):
+    check_file(path, content)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode), "w") as stream:
+            stream.write(content)
+
+
+def check_link(path, target):
+    safe_path(path.parent)
+    if path.is_symlink():
+        if path.resolve() != target.resolve():
+            raise ValueError("unrelated setup link refused")
+    elif path.exists():
+        raise ValueError("existing project skill or credential refused; nothing replaced")
+
+
+def link(path, target):
+    check_link(path, target)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.is_symlink():
+        path.symlink_to(target)
+
+
+def render(name, values):
+    text = (TEMPLATES / name).read_text()
+    for key, value in values.items():
+        text = text.replace("{{" + key + "}}", str(value))
+    return text
+
+
+def apply(args, config, root, agents, adapter):
+    state = Path.home() / ".local/state/setup-agents"
+    safe_path(state)
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    safe_path(state / "apply.lock")
+    with (state / "apply.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        provision(args, config, root, agents, adapter, state)
+
+
+def provision(args, config, root, agents, adapter, state):
+    home = Path.home()
+    safe_path(state / "runs.log")
+    unlazy = home / ".agents/skills/unlazy"
+    guard = os.environ.get("SETUP_AGENTS_BROWSER_GUARD")
+    if guard and (not Path(guard).is_file() or not os.access(guard, os.X_OK)):
+        raise ValueError("configured browser guard is missing")
+    if not (unlazy / "SKILL.md").is_file() or not (unlazy / "scripts/gate-check.mjs").is_file():
+        raise ValueError("install unlazy before applying")
+    if any(not shutil.which(tool) for tool in ("tmux", "claude", "git", "node", "jq")):
+        raise ValueError("install tmux, claude, git, node and jq before applying")
+    safe_path(root)
+    if root.exists():
+        origin = command(["git", "-C", root, "remote", "get-url", "origin"])
+        expected = config["repo"]
+        if origin not in (f"git@github.com:{expected}.git", f"https://github.com/{expected}.git", f"https://github.com/{expected}"):
+            raise ValueError("checkout origin does not match config.repo")
+    elif not shutil.which("gh"):
+        raise ValueError("install gh to clone the project repo")
+    if args.board == "new":
+        # Reuse the recorded board after an interrupted or repeated setup.
+        board_file = state / (config["project"] + "-board.json")
+        safe_path(board_file)
+        if board_file.exists():
+            saved = json.loads(board_file.read_text())
+            if saved["repo"] != config["repo"]:
+                raise ValueError("saved board belongs to another repo")
+            board = saved["board"]
+        else:
+            # An existing setup must not be silently redirected to another board.
+            safe_path(root / ".claude/setup-agents/project.yaml")
+            if (root / ".claude/setup-agents/project.yaml").exists():
+                raise ValueError("new-board setup conflicts with existing rules; use an existing board/config")
+            board = adapter["create_board"](config["project"])
+            write(board_file, json.dumps({"repo": config["repo"], "board": board}) + "\n")
+        config["ticket_source"].pop("board_id_env", None)
+        config["ticket_source"]["board_id"] = config["ship"]["board_id"] = board
+    ship = config["ship"]
+    if not args.config:
+        prefix = adapter["board_prefix"](ship["board_id"])
+        config["ticket_prefix"] = prefix
+        ship["ticket_prefixes"] = [prefix]
+    project_dir = root / ".claude/setup-agents"
+    values = dict(config, board=ship["board_id"], title_rule=json.dumps(config["pr_title_rule"]),
+                  deploy_rule=json.dumps(config["deploy"]), live_command=config["live_check"]["command"],
+                  columns=json.dumps(ship["columns"]), done_allowed=ship.get("done_allowed", False),
+                  proof_type=ship.get("proof_type", "web"), dev_model_rule=ship.get("dev_model_rule", "Project tools"))
+    files = {
+        root / "CLAUDE.md": render("CLAUDE.md", values),
+        root / ".claude/CLAUDE.md": render("project.md", values),
+        project_dir / "project.yaml": yaml.safe_dump(config, sort_keys=False),
+        project_dir / "GATES.md": render("GATES.md", values),
+    }
+    preserved = {}
+    for path in (root / "CLAUDE.md", root / ".claude/CLAUDE.md"):
+        safe_path(path)
+        if path.exists():
+            original = path.read_text()
+            if path == root / "CLAUDE.md":
+                files[path] = original if "@.claude/CLAUDE.md" in original else original.rstrip() + "\n\n@.claude/CLAUDE.md\n"
+            else:
+                marker = "<!-- setup-agents project rules -->\n"
+                if marker in original:
+                    prefix, generated = original.split(marker, 1)
+                    if generated != files[path]:
+                        raise ValueError("generated rules changed; preserve and reconcile before apply")
+                    files[path] = original
+                else:
+                    files[path] = original.rstrip() + "\n\n" + marker + files[path]
+            preserved[path] = original
+    links = {root / ".claude/skills/unlazy": unlazy,
+             root / ".claude/skills/setup-agents": KIT}
+    files[root / ".claude/skills/ship/SKILL.md"] = render("ship.md", values)
+    for path, target in list(links.items()):
+        if path.is_dir() and not path.is_symlink() and (path / "SKILL.md").is_file():
+            if (path / "SKILL.md").read_text() == (target / "SKILL.md").read_text():
+                del links[path]
+    profiles = []
+    for name, role in agents:
+        agent_slug = slug(name)
+        credentials = home / ".config/agent-kit/credentials" / config["project"]
+        token_file = credentials / (agent_slug + "-agent-token")
+        session_file = adapter["session_path"](agent_slug)
+        safe_path(token_file)
+        if token_file.exists() and (not token_file.is_file() or token_file.stat().st_mode & 0o777 != 0o600
+                                    or not re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\n?", token_file.read_text())):
+            raise ValueError("existing credential invalid or not private; refusing to replace it")
+        links[session_file] = token_file
+        profile = project_dir / (agent_slug + "-identity.yaml")
+        files[profile] = yaml.safe_dump({"project": config["project"], "name": name, "token_file": str(token_file)})
+        env = {"KIT_HOME": str(KIT), "KIT_CONFIG": str(project_dir / "project.yaml"),
+               "SHIP_SESSION_NAME": name, "SETUP_AGENT_ROLE": role, "SETUP_AGENT_NAME": name,
+               "SETUP_AGENT_LEAD": args.lead,
+               "TICKET_BASE_URL": os.environ.get("TICKET_BASE_URL", adapter["DEFAULT_BASE_URL"]),
+               "KIT_PROJECT": config["project"], "KIT_BOARD_ID": str(ship["board_id"]),
+               "KIT_REPO": config["repo"], "KIT_BASE_BRANCH": config["base_branch"],
+               "KIT_TICKET_PREFIXES": " ".join(ship["ticket_prefixes"]),
+               "KIT_TICKET_URL_TEMPLATE": ship["ticket_url_template"]}
+        env.update({"KIT_COLUMN_" + key.upper(): value for key, value in ship["columns"].items()})
+        ref = ship.get("identity_profile_ref", "${SETUP_AGENT_IDENTITY_PROFILE}")
+        env[REFERENCE.fullmatch(ref)[1]] = str(profile)
+        prompt = "Follow /ship."
+        if role == "lead":
+            prompt = "Run /loop 5m Read the project board, follow up on active claims, report blockers and keep the runners alive. Read .claude/CLAUDE.md first."
+        exports = "".join(f"export {key}={shlex.quote(value)}\n" for key, value in env.items())
+        launch = "#!/usr/bin/env bash\nset +x\nset -euo pipefail\n" + exports
+        launch += "cd " + shlex.quote(str(root)) + "\n"
+        invocation = "claude --name " + shlex.quote(name) + " " + shlex.quote(prompt)
+        if role == "lead":
+            launch += "while true; do\n  " + invocation + " || true\n  sleep 30\ndone\n"
+        else:
+            launch += "exec " + invocation + "\n"
+        files[project_dir / (agent_slug + ".sh")] = launch
+        profiles.append((agent_slug, token_file, name))
+    settings = root / ".claude/settings.local.json"
+    safe_path(settings)
+    data = json.loads(settings.read_text()) if settings.exists() else {}
+    if guard:
+        wrapper = "#!/usr/bin/env bash\nset +x\nset -euo pipefail\n"
+        wrapper += '[ "${SETUP_AGENT_ROLE:-}" = runner ] || exit 0\n'
+        wrapper += "exec " + shlex.quote(str(Path(guard).resolve())) + "\n"
+        files[project_dir / "runner-guard.sh"] = wrapper
+        hook = {"matcher": "Bash", "hooks": [{"type": "command", "command": shlex.quote(str(project_dir / "runner-guard.sh"))}]}
+        hooks = data.setdefault("hooks", {}).setdefault("PreToolUse", [])
+        if hook not in hooks:
+            hooks.append(hook)
+    # The local settings file is merged, not treated as a generated template.
+    for path, content in files.items():
+        if path not in preserved:
+            check_file(path, content)
+    for path, target in links.items():
+        check_link(path, target)
+    safe_path(state / "runs.log")
+    if not root.exists():
+        command(["gh", "repo", "clone", config["repo"], root])
+    for agent_slug, token_file, name in profiles:
+        if not token_file.exists():
+            token = adapter["mint"](name, ship["board_id"])
+            write(token_file, token + "\n")
+            del token
+    for path, content in files.items():
+        if path in preserved:
+            if path.read_text() != preserved[path]:
+                raise ValueError("project rules changed during apply; refusing overwrite")
+            if content != preserved[path]:
+                path.write_text(content)
+        else:
+            write(path, content, 0o700 if path.suffix == ".sh" else 0o600)
+    for path, target in links.items():
+        link(path, target)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    with settings.open("w") as stream:
+        json.dump(data, stream, indent=2)
+        stream.write("\n")
+    settings.chmod(0o600)
+    session = "setup-" + config["project"]
+    exists = subprocess.run(["tmux", "has-session", "-t", session], capture_output=True).returncode == 0
+    for agent_slug, _, _ in profiles:
+        title = session + "-" + agent_slug
+        if exists:
+            panes = command(["tmux", "list-panes", "-s", "-t", session, "-F", "#{pane_title} #{pane_dead}"])
+            if title + " 0" in panes.splitlines():
+                continue
+            pane = command(["tmux", "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", session,
+                            str(project_dir / (agent_slug + ".sh"))])
+        else:
+            pane = command(["tmux", "new-session", "-d", "-P", "-F", "#{pane_id}", "-s", session,
+                            "-c", root, str(project_dir / (agent_slug + ".sh"))])
+            exists = True
+        command(["tmux", "select-pane", "-t", pane, "-T", title])
+        command(["tmux", "select-layout", "-t", session, "tiled"])
+    with (state / "runs.log").open("a") as stream:
+        for agent_slug, _, _ in profiles:
+            stream.write(f"{agent_slug} ready {datetime.now(timezone.utc).isoformat()} setup-agents\n")
+    print(f"Ready: {len(profiles)} agents; tmux session {session}. Token values were not displayed.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true")
+    mode.add_argument("--apply", action="store_true")
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--repo")
+    parser.add_argument("--board", help="board id or new")
+    parser.add_argument("--runners", type=int, default=2)
+    parser.add_argument("--lead")
+    parser.add_argument("--new-agent")
+    parser.add_argument("--role", choices=("runner", "lead"), help="default inferred from the new agent name")
+    parser.add_argument("--root", type=Path, help="checkout; default ~/projects/<repo name>")
+    args = parser.parse_args()
+    if not 0 <= args.runners <= 32:
+        raise ValueError("runners must be between 0 and 32")
+    if args.config:
+        os.environ["KIT_CONFIG"] = str(args.config.resolve())
+        config, _ = load_config()
+    elif args.repo and args.board:
+        board = 1 if args.board == "new" else int(args.board)
+        config = defaults(args.repo, board)
+    else:
+        raise ValueError("pass --config or --repo and --board; the skill asks only repo, board, runners and lead name")
+    adapter_path = KIT / "adapters" / config["ticket_source"]["type"] / "setup.py"
+    if not adapter_path.is_file():
+        raise ValueError("setup is not available for this board adapter")
+    adapter = runpy.run_path(str(adapter_path))
+    if not args.config:
+        config["ship"]["ticket_url_template"] = adapter["TICKET_URL_TEMPLATE"]
+    if args.board and args.board != "new":
+        board = int(args.board)
+        config["ticket_source"].pop("board_id_env", None)
+        config["ticket_source"]["board_id"] = config["ship"]["board_id"] = board
+    problems, _ = CONTRACT["validate"](config)
+    if problems or config["ship"]["board_id"] < 1:
+        raise ValueError("invalid setup project config")
+    if args.repo and args.repo != config["repo"]:
+        raise ValueError("repo override conflicts with project config")
+    slug(config["project"])
+    if not re.fullmatch(r"[a-z0-9-]+", config["project"]):
+        raise ValueError("project must be a lowercase slug")
+    args.lead = args.lead or config["project"].title() + " Lead"
+    slug(args.lead)
+    if args.new_agent:
+        role = args.role or ("lead" if "lead" in args.new_agent.lower().split() else "runner")
+        agents = [(args.new_agent, role)]
+    else:
+        agents = [(args.lead, "lead")] + [(config["project"].title() + f" Runner {n}", "runner") for n in range(1, args.runners + 1)]
+    slugs = [slug(name) for name, _ in agents]
+    if len(set(slugs)) != len(slugs):
+        raise ValueError("agent names collide after normalization")
+    root = (args.root or Path.home() / "projects" / config["repo"].split("/")[1]).expanduser().absolute()
+    if args.apply:
+        os.umask(0o077)
+        apply(args, config, root, agents, adapter)
+        return 0
+    print(f"Dry run: project {config['project']}; repo {config['repo']}; base {config['base_branch']}")
+    print("Board: " + ("create a new board in the first accessible workspace" if args.board == "new" else str(config["ship"]["board_id"])))
+    for name, role in agents:
+        print(f"Agent: {name} ({role}); {slug(name)}; private project credential and named-session link")
+    print(f"Checkout: {root}; preserve existing files or refuse conflicts")
+    print("Install: two-layer CLAUDE.md, /ship, /unlazy, /setup-agents, config, identity profiles and GATES.md")
+    print("Runtime: lead keep-alive /loop 5m, optional browser guard, named tmux panes; ready log after success")
+    print("Test: " + config["test_command"])
+    print("PR: " + json.dumps(config["pr_title_rule"]))
+    print("Deploy: " + json.dumps(config["deploy"]))
+    print("Live check: " + config["live_check"]["command"])
+    print("No files, agents, tokens, board writes, hooks or panes created. Use --apply only with owner approval.")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, AttributeError, yaml.YAMLError):
+        print("setup-agents: setup refused or failed; no credentials echoed. Check config, dependencies, paths and existing files before retrying.", file=sys.stderr)
+        sys.exit(2)
