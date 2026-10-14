@@ -207,7 +207,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-for item in SKILL.md MAINTAINER.md CONF.md VERSION CHANGELOG.md repos.allow scripts adapters evals repo-skeleton project-template; do
+for item in SKILL.md MAINTAINER.md CONF.md VERSION CHANGELOG.md repos.allow scripts adapters evals skills repo-skeleton project-template; do
   [ -e "$SRC/$item" ] || fail "$SRC/$item is missing" \
     "run install.sh from inside the template folder in the repo"
 done
@@ -357,7 +357,7 @@ cp -a "$AGENT_CONF_DIR/repos.allow" "$DEST/repos.allow"
 # far, not a real error. Stage the new tree next to DEST, then swap each
 # directory in with a rename: a path lookup during the swap either finds the
 # whole old directory or the whole new one, never a partially written file.
-for dir in scripts adapters evals repo-skeleton project-template; do
+for dir in scripts adapters evals skills repo-skeleton project-template; do
   stage="$(mktemp -d "$DEST/.$dir.XXXXXX")"
   cp -a "$SRC/$dir/." "$stage/"
   if [ -d "$DEST/$dir" ]; then
@@ -411,7 +411,7 @@ from pathlib import Path
 
 root = Path(os.environ["DEST"])
 paths = [root / name for name in ("SKILL.md", "MAINTAINER.md", "CONF.md", "VERSION", "CHANGELOG.md", "repos.allow")]
-for name in ("scripts", "adapters", "evals", "repo-skeleton", "project-template"):
+for name in ("scripts", "adapters", "evals", "skills", "repo-skeleton", "project-template"):
     paths.extend(path for path in (root / name).rglob("*") if path.is_file())
 lines = []
 for path in sorted(paths):

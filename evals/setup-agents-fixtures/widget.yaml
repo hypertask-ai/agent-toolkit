@@ -1,0 +1,56 @@
+schema_version: 1
+project: widget
+repo: example-org/widget
+base_branch: main
+ticket_source:
+  type: hypertask
+  base_url: ${TICKET_BASE_URL}
+  board_id: 42
+  credential_ref: ${WIDGET_IDENTITY_PROFILE}
+ticket_prefix: WIDG
+ship:
+  ticket_prefixes:
+  - WIDG
+  board_id: 42
+  repo: example-org/widget
+  base_branch: main
+  ticket_url_template: https://app.hypertask.ai/detail/project-42/{number}
+  columns:
+    claim: Todo
+    in_progress: Doing
+    handoff: AI Review
+    decision: Owner Review
+    done: Done
+    blocked: Agent Blocked (Infra)
+  done_allowed: false
+  proof_type: windows
+  identity_profile_ref: ${WIDGET_IDENTITY_PROFILE}
+  dev_model_rule: Use the project's existing development tools
+pr_title_rule:
+  type: descriptive
+  min_length: 8
+  reject_generic_pattern: (?i)^(update|fix|wip|changes?|misc)\.?$
+test_command: printf project-tests
+deploy:
+  type: github_release
+  trigger: successful_main_ci
+  command: null
+  tagging_workflow: auto-release.yml
+  release_workflow: release.yml
+  recovery_dispatch_command: gh workflow run release.yml --repo example-org/widget
+    --ref ${RELEASE_TAG}
+  tag_pattern: vX.Y.Z
+  require_merge_sha: true
+  user_installs_release: true
+live_check:
+  command: widgetctl.exe status
+  execution_host_ref: ${WIDGET_TEST_HOST_PROFILE}
+  platform: windows
+  require_changed_path_evidence: true
+  evidence:
+  - screenshots
+  - gui_interaction
+  - release_sha
+  main_desktop_restart_allowed: false
+flags:
+  enabled: false

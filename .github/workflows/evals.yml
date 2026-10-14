@@ -26,5 +26,7 @@ jobs:
           awk '$2 == "hypertask-linux-x86_64"' checksums.txt | sha256sum --check
           chmod 755 hypertask-linux-x86_64
           echo "HYPERTASK_REAL_CLI=$RUNNER_TEMP/hypertask-cli/hypertask-linux-x86_64" >> "$GITHUB_ENV"
+      - name: Install offline setup-agents test dependencies
+        run: python3 -m pip install pytest PyYAML
       - name: Run evals
         run: evals/run-evals.sh

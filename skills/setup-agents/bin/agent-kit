@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Validate a generic offline project setup contract."""
+
+from pathlib import Path
+import re
+from urllib.parse import urlsplit
+
+import yaml
+
+BOARD_SOURCE = "hypertask"
+ENV_NAME = r"[A-Z_][A-Z0-9_]*"
+REFERENCE = re.compile(r"\$\{(" + ENV_NAME + r")\}")
+REPO = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_][A-Za-z0-9_.-]*")
+CREDENTIAL = re.compile(
+    r"(?<![A-Za-z0-9])(?:gh[po]_|github[_]pat_|sk-|xox[a-z]*-|AKIA)|"
+    r"(?<![A-Za-z0-9])[a-fA-F0-9]{33,}(?![A-Za-z0-9])|"
+    r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{33,}={0,2}(?![A-Za-z0-9+/])|"
+    r"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/@]+:[^\s/@]+@"
+)
+
+# Each mapping declares required fields and optional fields, with exact YAML types.
+SCHEMA = ({
+    "schema_version": int, "project": str, "repo": str, "base_branch": str,
+    "ticket_source": dict, "ticket_prefix": str, "pr_title_rule": dict,
+    "test_command": str, "deploy": dict, "live_check": dict, "flags": dict,
+}, {"ship": dict})
+SHIP_FIELDS = {
+    "ticket_prefixes": [str], "columns": dict, "board_id": int, "repo": str,
+    "base_branch": str, "ticket_url_template": str,
+}
+POLICIES = {
+    "ship": (SHIP_FIELDS, {"done_allowed": bool, "proof_type": str,
+                           "identity_profile_ref": str, "dev_model_rule": str}),
+    "pr_title_rule": ({"type": str}, {
+        "template": str, "allowed_types": [str], "min_length": int,
+        "reject_generic_pattern_ref": str, "reject_generic_pattern": str,
+    }),
+    "deploy": ({"type": str, "trigger": str}, {
+        "command": (str, type(None)), "environment": str,
+        "verify_command": str, "require_merge_sha": bool,
+        "tagging_workflow": str, "release_workflow": str,
+        "recovery_dispatch_command": str, "tag_pattern": str,
+        "user_installs_release": bool,
+    }),
+    "live_check": ({"command": str}, {
+        "proof_command": str, "execution_host_ref": str, "platform": str,
+        "require_authenticated_session": bool, "require_changed_path_evidence": bool,
+        "evidence": [str], "main_desktop_restart_allowed": bool,
+    }),
+    "flags": ({"enabled": bool}, {
+        "feature_name_template": str, "qa_audiences": [str],
+        "owner_controls_rollout": bool,
+    }),
+}
+
+
+def check_mapping(value, schema, path, problems):
+    if type(value) is not dict:
+        problems.append(f"{path}: expected a mapping")
+        return
+    required, optional = schema
+    for key in required:
+        if key not in value:
+            problems.append(f"{path}.{key}: required")
+    for key, item in value.items():
+        label = f"{path}.{key}" if key in required or key in optional else path
+        expected = required.get(key, optional.get(key))
+        if expected is None:
+            problems.append(f"{path}: unknown key (not echoed)")
+        elif isinstance(expected, list):
+            if type(item) is not list or any(type(v) is not expected[0] for v in item):
+                problems.append(f"{label}: expected a list of strings")
+        elif type(item) not in (expected if isinstance(expected, tuple) else (expected,)):
+            problems.append(f"{label}: wrong type")
+        elif type(item) is str and not item.strip():
+            problems.append(f"{label}: must not be empty")
+
+
+def scan_values(value, problems, references, seen):
+    if isinstance(value, (dict, list)):
+        if id(value) in seen:
+            problems.append("config: recursive or repeated YAML aliases are not supported")
+            return
+        seen.add(id(value))
+        values = list(value.keys()) + list(value.values()) if isinstance(value, dict) else value
+        for item in values:
+            scan_values(item, problems, references, seen)
+    elif isinstance(value, (str, int, float)):
+        text = str(value)
+        references.update(REFERENCE.findall(text))
+        if CREDENTIAL.search(REFERENCE.sub("", text)):
+            problems.append("config: credential-like value refused (not echoed); use ${NAME}")
+
+
+def validate(config):
+    problems, references = [], set()
+    scan_values(config, problems, references, set())
+    check_mapping(config, SCHEMA, "config", problems)
+    if type(config) is not dict:
+        return problems, references
+    if type(config.get("schema_version")) is int and config["schema_version"] != 1:
+        problems.append("config.schema_version: must be 1")
+    if type(config.get("repo")) is str and not REPO.fullmatch(config["repo"]):
+        problems.append("config.repo: expected owner/name")
+    for key, schema in POLICIES.items():
+        if key in config:
+            policy = schema
+            if key == "ship":
+                required, optional = schema
+                policy = ({**required, **optional}, {})
+            check_mapping(config[key], policy, f"config.{key}", problems)
+    ship = config.get("ship")
+    if type(ship) is dict:
+        prefixes = ship.get("ticket_prefixes")
+        if type(prefixes) is list and (not prefixes or any(
+                type(v) is not str or not re.fullmatch(r"[A-Z][A-Z0-9]*", v)
+                for v in prefixes)):
+            problems.append("config.ship.ticket_prefixes: expected nonempty uppercase prefixes")
+        columns = ship.get("columns")
+        column_keys = (
+            "claim", "in_progress", "handoff", "decision", "done", "blocked")
+        check_mapping(columns, ({key: str for key in column_keys}, {}),
+                      "config.ship.columns", problems)
+        if type(columns) is dict and any(type(v) is str and (
+                v in (".", "..") or "/" in v or "\n" in v or "\r" in v)
+                for v in columns.values()):
+            problems.append("config.ship.columns: expected safe single-line column names")
+        if type(ship.get("board_id")) is int and ship["board_id"] < 1:
+            problems.append("config.ship.board_id: expected a positive integer")
+        if type(ship.get("repo")) is str and not REPO.fullmatch(ship["repo"]):
+            problems.append("config.ship.repo: expected owner/name")
+        url = ship.get("ticket_url_template")
+        if type(url) is str and (not url.startswith("https://") or
+                "{number}" not in url or
+                REFERENCE.search(url)):
+            problems.append("config.ship.ticket_url_template: expected HTTPS with ticket placeholders")
+        if "proof_type" in ship and ship["proof_type"] not in ("web", "windows"):
+            problems.append("config.ship.proof_type: expected web or windows")
+        if "identity_profile_ref" in ship and not REFERENCE.fullmatch(str(ship["identity_profile_ref"])):
+            problems.append("config.ship.identity_profile_ref: expected ${NAME}")
+        for key in ("repo", "base_branch"):
+            if ship.get(key) != config.get(key):
+                problems.append(f"config.ship.{key}: must match config.{key}")
+        if type(prefixes) is list and config.get("ticket_prefix") not in prefixes:
+            problems.append("config.ship.ticket_prefixes: must include config.ticket_prefix")
+    title = config.get("pr_title_rule")
+    if type(title) is dict:
+        if title.get("type") == "ticket_and_type":
+            if not isinstance(title.get("template"), str) or not title["template"].strip():
+                problems.append("config.pr_title_rule.template: required for ticket_and_type")
+        elif title.get("type") == "descriptive":
+            if type(title.get("min_length")) is not int or title["min_length"] < 1:
+                problems.append("config.pr_title_rule.min_length: expected a positive integer")
+        else:
+            problems.append("config.pr_title_rule.type: expected ticket_and_type or descriptive")
+        for field in ("reject_generic_pattern",):
+            if type(title.get(field)) is str:
+                try:
+                    re.compile(title[field])
+                except re.error:
+                    problems.append(f"config.pr_title_rule.{field}: invalid regex")
+    prefix = config.get("ticket_prefix")
+    if type(prefix) is str and not re.fullmatch(r"[A-Z][A-Z0-9]*", prefix):
+        problems.append("config.ticket_prefix: expected an uppercase prefix")
+    source = config.get("ticket_source")
+    if type(source) is dict:
+        if source.get("type") == BOARD_SOURCE:
+            check_mapping(source, ({"type": str, "base_url": str, "credential_ref": str}, {
+                "board_id": int, "board_id_env": str,
+            }), "config.ticket_source", problems)
+            if ("board_id" in source) == ("board_id_env" in source):
+                problems.append("config.ticket_source: set exactly one of board_id and board_id_env")
+            env = source.get("board_id_env")
+            if "board_id_env" in source:
+                if not isinstance(env, str) or not re.fullmatch(ENV_NAME, env):
+                    problems.append("config.ticket_source.board_id_env: expected an environment name")
+                else:
+                    references.add(env)
+            url = source.get("base_url")
+            if isinstance(url, str) and not REFERENCE.fullmatch(url):
+                try:
+                    parsed = urlsplit(url)
+                    valid = parsed.scheme == "https" and bool(parsed.hostname) and not parsed.username
+                except ValueError:
+                    valid = False
+                if not valid:
+                    problems.append("config.ticket_source.base_url: expected an HTTPS URL or ${NAME}")
+            credential = source.get("credential_ref")
+            if isinstance(credential, str) and not REFERENCE.fullmatch(credential):
+                problems.append("config.ticket_source.credential_ref: expected ${NAME}")
+        elif source.get("type") == "github_issues":
+            check_mapping(source, ({"type": str, "issues_repo": str}, {
+                "labels": [str], "credential_ref": str,
+            }), "config.ticket_source", problems)
+            repo = source.get("issues_repo")
+            if isinstance(repo, str) and not REPO.fullmatch(repo):
+                problems.append("config.ticket_source.issues_repo: expected owner/name")
+        else:
+            problems.append("config.ticket_source.type: unsupported ticket source")
+    return problems, references
+
+
+def doctor(path, quiet=False):
+    try:
+        config = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError, RecursionError):
+        return None
+    problems, _ = validate(config)
+    if problems:
+        return None
+    return config

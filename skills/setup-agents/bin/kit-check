@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""Project-owned ship checks; GitHub reads use gh, never protected checkers."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+from urllib.parse import quote
+
+import yaml
+
+from kit_runtime import expand, load_config, ticket
+
+
+def gh(*args):
+    result = subprocess.run(["gh", *args], capture_output=True, text=True)
+    if result.returncode:
+        raise ValueError("GitHub read failed (details not echoed)")
+    return json.loads(result.stdout)
+
+
+def title_ok(config, title):
+    rule = config["pr_title_rule"]
+    if rule["type"] == "descriptive":
+        if len(title.strip()) < rule["min_length"]:
+            raise ValueError("title is shorter than the project's minimum")
+        if rule.get("reject_generic_pattern") and re.search(rule["reject_generic_pattern"], title.strip()):
+            raise ValueError("generic title refused by project rule")
+        if rule.get("reject_generic_pattern_ref"):
+            raise ValueError("title pattern reference must be made explicit as reject_generic_pattern")
+    else:
+        template = re.escape(rule["template"])
+        prefixes = "|".join(map(re.escape, config["ship"]["ticket_prefixes"]))
+        types = "|".join(map(re.escape, rule.get("allowed_types", [])))
+        if not types:
+            raise ValueError("ticket_and_type requires allowed_types")
+        pattern = template.replace(re.escape("{ticket}"), r"(?:" + prefixes + r")-[0-9]+")
+        pattern = pattern.replace(re.escape("{type}"), "(?:" + types + ")")
+        pattern = pattern.replace(re.escape("{summary}"), r"\S.*")
+        if not re.fullmatch(pattern, title):
+            raise ValueError("title does not match the project's ticket/type template")
+
+
+def state_dir(config, value):
+    ticket(config, value)
+    root = Path(os.environ.get("AGENT_KIT_STATE", str(Path.home() / ".config/agent-kit")))
+    project = config["project"]
+    if not re.fullmatch(r"[a-z0-9-]+", project):
+        raise ValueError("project must be a safe state directory name")
+    return root / "evidence" / project / value
+
+
+def pr_read(config, value, number):
+    if not str(number).isdigit() or int(number) < 1:
+        raise ValueError("PR must be a positive number")
+    ship = config["ship"]
+    pr = gh("pr", "view", str(number), "--repo", ship["repo"], "--json",
+            "title,body,baseRefName,url,state,mergeCommit")
+    if pr["baseRefName"] != ship["base_branch"] or pr["url"] != f"https://github.com/{ship['repo']}/pull/{number}":
+        raise ValueError("PR is not on the configured repo/base")
+    title_ok(config, pr["title"])
+    if not re.search(r"(?<![A-Z0-9-])" + re.escape(value) + r"(?![A-Z0-9-])", pr["title"] + "\n" + pr["body"]):
+        raise ValueError("PR title or body must link the configured ticket")
+    if config["pr_title_rule"]["type"] == "ticket_and_type" and not pr["title"].startswith(value + " "):
+        raise ValueError("PR title names another ticket")
+    return pr
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("title").add_argument("title")
+    for name in ("pr", "merged", "deployed"):
+        command = commands.add_parser(name)
+        command.add_argument("ticket")
+        command.add_argument("pr", nargs=None if name == "pr" else "?")
+    commands.add_parser("proof").add_argument("ticket")
+    commands.add_parser("done-allowed")
+    args = parser.parse_args()
+    config, _ = load_config()
+    if args.command == "title":
+        title_ok(config, args.title)
+    elif args.command == "done-allowed":
+        if config["ship"].get("done_allowed") is not True:
+            raise ValueError("agents may not move this project's tickets to Done")
+    else:
+        directory = state_dir(config, args.ticket)
+        if args.command == "proof":
+            text = (directory / "proof.md").read_text(encoding="utf-8")
+            if text.startswith("---\n"):
+                text = text.split("---\n", 2)[1]
+            proof = yaml.safe_load(text)
+            if not isinstance(proof, dict):
+                raise ValueError("proof.md requires YAML evidence fields")
+            proof_type = config["ship"].get("proof_type")
+            if proof_type not in ("web", "windows"):
+                raise ValueError("unknown proof type")
+            sha_key = "release_sha" if proof_type == "windows" else "merge_sha"
+            if not re.fullmatch(r"[0-9a-f]{40}", str(proof.get(sha_key, ""))):
+                raise ValueError("proof requires a full " + sha_key)
+            screenshots = proof.get("screenshots")
+            if not isinstance(screenshots, list) or not screenshots:
+                raise ValueError("proof requires at least one screenshot path")
+            for screenshot in screenshots:
+                if not isinstance(screenshot, str) or Path(screenshot).suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                    raise ValueError("proof requires screenshot paths")
+                path = Path(screenshot)
+                if not path.is_absolute():
+                    path = directory / path
+                if not path.is_file() or not path.stat().st_size:
+                    raise ValueError("screenshot file missing or empty")
+            if proof_type == "windows":
+                host = expand(config["live_check"]["execution_host_ref"])
+                if proof.get("execution_host") != host:
+                    raise ValueError("Windows proof must name the configured test host, never the main PC")
+                if not isinstance(proof.get("gui_interaction"), str) or not proof["gui_interaction"].strip():
+                    raise ValueError("Windows proof requires changed-path GUI interaction")
+                if not isinstance(proof.get("changed_paths"), list) or not proof["changed_paths"] or any(
+                        not isinstance(path, str) or not path.strip() for path in proof["changed_paths"]):
+                    raise ValueError("Windows proof requires changed paths")
+            release_record = directory / "release.json"
+            if proof_type == "windows" and release_record.exists() and proof["release_sha"] != json.loads(release_record.read_text())["release_sha"]:
+                raise ValueError("proof release sha differs from the verified release")
+        else:
+            number = args.pr
+            if number is None:
+                binding = json.loads((directory / "pr.json").read_text())
+                if binding["repo"] != config["ship"]["repo"] or binding["base"] != config["ship"]["base_branch"]:
+                    raise ValueError("PR binding belongs to another repo/base")
+                number = binding["pr"]
+            pr = pr_read(config, args.ticket, number)
+            if args.command == "pr":
+                directory.mkdir(parents=True, exist_ok=True)
+                (directory / "pr.json").write_text(json.dumps({"pr": number, "repo": config["ship"]["repo"], "base": config["ship"]["base_branch"]}) + "\n")
+            else:
+                sha = (pr.get("mergeCommit") or {}).get("oid", "")
+                if pr["state"] != "MERGED" or not re.fullmatch(r"[0-9a-f]{40}", sha):
+                    raise ValueError("PR is not merged with a merge sha")
+                if args.command == "deployed":
+                    if config["deploy"]["type"] != "github_release":
+                        raise ValueError("kit deployed currently supports github_release only; use project deployment authority")
+                    repo = config["ship"]["repo"]
+                    pages = gh("api", f"repos/{repo}/releases", "--paginate", "--slurp")
+                    for release in (release for page in pages for release in page):
+                        if release["draft"] or release["prerelease"]:
+                            continue
+                        tag = quote(release["tag_name"], safe="")
+                        release_sha = gh("api", f"repos/{repo}/commits/{tag}")["sha"]
+                        if not re.fullmatch(r"[0-9a-f]{40}", release_sha):
+                            raise ValueError("release tag did not resolve to a commit")
+                        comparison = gh("api", f"repos/{repo}/compare/{sha}...{release_sha}")
+                        if comparison["status"] in ("ahead", "identical"):
+                            directory.mkdir(parents=True, exist_ok=True)
+                            (directory / "release.json").write_text(json.dumps({"release_sha": release_sha, "merge_sha": sha, "tag": release["tag_name"]}) + "\n")
+                            break
+                    else:
+                        raise ValueError("no published release tag contains the merge sha")
+    print(args.command + " ok")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, UnicodeError, yaml.YAMLError, KeyError, TypeError):
+        print("kit-check: config, binding or evidence missing/invalid (details not echoed)", file=sys.stderr)
+        sys.exit(2)
+    except ValueError as error:
+        message = "invalid GitHub or evidence JSON" if isinstance(error, json.JSONDecodeError) else str(error)
+        print("kit-check: " + message, file=sys.stderr)
+        sys.exit(2)

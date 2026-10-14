@@ -6,6 +6,10 @@ version: 3.6.0
 
 # /create-agent : provision an agent identity
 
+## One way to set up project agents
+
+`/setup-agents` (in `skills/setup-agents/` of this repo) is the one way to set up a lead and runners for a project on a Hypertask board. `/create-agent` stays for a single identity without a project.
+
 This skill is about the method, not about any one tool. An agent is a name, a
 mission, a skills index, a model CLI and somewhere to work. A tracker is
 optional, and when there is one it sits behind an adapter.
