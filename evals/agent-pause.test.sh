@@ -56,7 +56,7 @@ elif grep -q 'has no AGENT_ID' "$TMP/out"; then
 else bad non-yes-default; fi
 # Every paused spelling must stop the poll before required-key validation.
 for value in YES TrUe 1 ON unexpected '   '; do
-  printf 'PAUSED=%q\n' "$value" > "$conf"
+  printf 'PAUSED="%s"\n' "$value" > "$conf"
   if "$ROOT/scripts/agent-board-poll" --once test-agent > "$TMP/out" 2>&1 \
      && grep -q ' paused$' "$XDG_STATE_HOME/agent-board-poll/test-agent.log"; then
     ok "pause-value-${value// /space}"
@@ -66,7 +66,7 @@ for value in YES TrUe 1 ON unexpected '   '; do
   elif [ "$value" = unexpected ]; then bad pause-unknown-warns; fi
 done
 for value in NO FaLsE 0 OFF ''; do
-  printf 'PAUSED=%q\n' "$value" > "$conf"
+  printf 'PAUSED="%s"\n' "$value" > "$conf"
   if "$ROOT/scripts/agent-board-poll" --once test-agent > "$TMP/out" 2>&1; then
     bad "running-value-${value:-empty}"
   elif grep -q 'has no AGENT_ID' "$TMP/out"; then

@@ -8,7 +8,6 @@ import hmac
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 import threading
@@ -21,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config_files import config_files, is_paused
+from config_files import read_conf as read_agent_conf, config_files, is_paused
 from typing import Any
 
 MAX_BODY = 1024 * 1024
@@ -33,21 +32,7 @@ active: dict[str, int] = {}
 
 
 def parse_config(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return values
-    for raw in lines:
-        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", raw.strip())
-        if not match:
-            continue
-        try:
-            parsed = shlex.split(match.group(2), posix=True)
-        except ValueError:
-            continue
-        values[match.group(1)] = parsed[0] if parsed else ""
-    return values
+    return read_agent_conf(path)
 
 
 def host_config() -> tuple[Path, dict[str, str]]:

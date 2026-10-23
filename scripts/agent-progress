@@ -17,6 +17,9 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config_files import read_conf as read_agent_conf
 from typing import Any, Iterator
 
 SCHEMA_VERSION = 1
@@ -676,20 +679,7 @@ def chat_notify(line: str, ticket: str, board: str, token_file: str) -> bool:
 
 
 def host_config_value(path: Path, wanted: str) -> str:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ""
-    for line in lines:
-        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line)
-        if not match or match.group(1) != wanted:
-            continue
-        try:
-            values = shlex.split(match.group(2), posix=True)
-        except ValueError:
-            return ""
-        return values[0] if values else ""
-    return ""
+    return read_agent_conf(path).get(wanted, "")
 
 
 def alarm_telegram_notify(line: str) -> bool:

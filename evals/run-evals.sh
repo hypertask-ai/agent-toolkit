@@ -521,6 +521,13 @@ fi
 
 if [ -z "$ONLY" ]; then
   echo ""
+  echo "-- conf data and generated shell security checks --"
+  run_test "$HERE/conf-data.test.sh" bash "$HERE/conf-data.test.sh" || :
+  run_test "$HERE/conf-sinks.test.sh" bash "$HERE/conf-sinks.test.sh" || :
+fi
+
+if [ -z "$ONLY" ]; then
+  echo ""
   printf '%d subtest file(s) run, %d failed\n' "$SUBTESTS_RUN" "${#SUBTEST_FAILURES[@]}"
   if [ "${#SUBTEST_FAILURES[@]}" -gt 0 ]; then
     printf 'failing subtest files: %s\n' "${SUBTEST_FAILURES[*]}"

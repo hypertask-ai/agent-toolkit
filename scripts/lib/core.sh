@@ -129,6 +129,19 @@ core_state_dir() {
 }
 
 # ---------- conf files ----------
+# One-line double-quoted data, decoded identically by Bash and config_files.py.
+core_conf_assignment() {
+  local key="$1" value="$2"
+  case "$value" in
+    *$'\n'*|*$'\r'*) die "conf $key must be single-line text" "remove newlines from $key" ;;
+  esac
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//\$/\\\$}"
+  value="${value//\`/\\\`}"
+  printf '%s="%s"\n' "$key" "$value"
+}
+
 # Write a KEY=value file without clobbering values that are already there.
 core_write_missing_keys() {
   local path="$1" content="$2"
@@ -170,10 +183,7 @@ core_read_conf() {
   local path="$1"
   [ -f "$path" ] || die "no conf at $path" \
     "run create-agent.sh for this agent, or pass the right slug"
-  if grep -qvE '^\s*(#.*)?$|^[A-Z][A-Z0-9_]*=' "$path"; then
-    die "conf $path has a line that is not KEY=value or a comment" \
-        "remove it; the conf is sourced by the runner and must stay declarative"
-  fi
+  python3 "$CORE_ROOT/scripts/config_files.py" "$path" || return 1
   # shellcheck disable=SC1090
   . "$path"
 }
@@ -218,7 +228,7 @@ core_guard_token_wrappers() {
   while IFS= read -r conf; do
     (
       # shellcheck disable=SC1090
-      . "$conf" 2>/dev/null
+      core_read_conf "$conf" || exit 1
       [ -n "${AGENT_SLUG:-}" ] && [ -n "${TOKEN_FILE:-}" ] || exit 0
       printf '%s\t%s\t%s\n' "$AGENT_SLUG" "$TOKEN_FILE" "${BOARD_CLI:-}"
     ) >> "$confs"

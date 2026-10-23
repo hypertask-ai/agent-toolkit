@@ -127,6 +127,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+for key in NAME KIND BOARD BOARD_ID REPO PR_REPO SYNC_PROJECTS SKILLS_REPO SKILLS_INDEX MISSION_FILE WIRING SECTIONS MODEL_CLI MAX_CONCURRENT_RUNS CHAT_PAGE ROLE BIN_DIR SYSTEMD_USER_DIR; do
+  case "${!key}" in
+    *$'\n'*|*$'\r'*) die "$key must be single-line text" "remove newlines from $key" ;;
+  esac
+done
+
 if [ "$MODEL_CLI_SET" = "no" ]; then
   case "$PROVIDER" in
     cursor) MODEL_CLI="cursor-agent -p --output-format text --model cursor-grok-4.6-high-fast -f --trust" ;;
@@ -159,10 +165,11 @@ if [ "$KIND" = "cli" ]; then DISPLAY_NAME="$NAME CLI"; fi
 # index does not force --skills-index/--skills-repo again either.
 EXISTING_CONF="$(core_find_conf "$SLUG" || true)"
 if [ "$RESUME" = "yes" ] && [ -f "$EXISTING_CONF" ]; then
-  [ -n "$REPO" ] || REPO="$(sed -n 's/^AGENT_REPO="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
-  [ -n "$PR_REPO" ] || PR_REPO="$(sed -n 's/^PR_REPO="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
-  [ -n "$SKILLS_INDEX" ] || SKILLS_INDEX="$(sed -n 's/^SKILLS_INDEX="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
-  [ -n "$BOARD_ID" ] || BOARD_ID="$(sed -n 's/^BOARD_ID="\(.*\)"$/\1/p' "$EXISTING_CONF" | tail -1)"
+  python3 "$CORE_ROOT/scripts/config_files.py" "$EXISTING_CONF" || exit 1
+  [ -n "$REPO" ] || REPO="$(python3 "$CORE_ROOT/scripts/config_files.py" "$EXISTING_CONF" AGENT_REPO)"
+  [ -n "$PR_REPO" ] || PR_REPO="$(python3 "$CORE_ROOT/scripts/config_files.py" "$EXISTING_CONF" PR_REPO)"
+  [ -n "$SKILLS_INDEX" ] || SKILLS_INDEX="$(python3 "$CORE_ROOT/scripts/config_files.py" "$EXISTING_CONF" SKILLS_INDEX)"
+  [ -n "$BOARD_ID" ] || BOARD_ID="$(python3 "$CORE_ROOT/scripts/config_files.py" "$EXISTING_CONF" BOARD_ID)"
 fi
 
 [ -n "$PR_REPO" ] || die "--pr-repo is missing: every agent needs a memory repository" \
@@ -265,6 +272,10 @@ elif [ "$KIND" = "qa" ]; then
 else
   MISSION="You are $DISPLAY_NAME. Step one, before anything else: read $SKILLS_INDEX_INSTRUCTION, in that order, and record the skill whose trigger matches this task in the run log, not a ticket comment. Then follow that skill exactly, including its scripts. If no skill matches, say so and stop. Corrections go into the skill file, never into chat memory, committed in the same run, never a pull request. A fact (a number, a name, a date, a path) goes into a doc or the ticket, never into a skill; a rule (always or never do X) goes into the skill file. Unsure which: would it still be true for a different customer? Yes is a rule, no is a fact. A session looking after you reads MAINTAINER.md next to this conf."
 fi
+
+case "$MISSION" in
+  *$'\n'*|*$'\r'*) die "AGENT_MISSION must be single-line text" "remove newlines from the mission file" ;;
+esac
 
 # ---------- existing identity ----------
 AGENT_ID=""
@@ -435,33 +446,31 @@ fi
 
 # ---------- 3. conf ----------
 step 3 "write $CONF_FILE (0600; existing values are kept, only missing keys are added)"
-CONF_CONTENT="$(cat <<EOF
-AGENT_NAME="$DISPLAY_NAME"
-AGENT_SLUG="$SLUG"
-AGENT_KIND="$KIND"
-AGENT_ID="${AGENT_ID:-}"
-AGENT_REPO="$REPO"
-AGENT_MISSION="$MISSION"
-BOARD_ADAPTER="$BOARD"
-BOARD_ID="$BOARD_ID"
-TOKEN_FILE="$TOKEN_FILE"
-BOARD_CLI="$BOARD_CLI"
-WATCH_SECTIONS="$SECTIONS"
-SKILLS_INDEX="$SKILLS_INDEX"
-MODEL_CLI="$MODEL_CLI"
-MAX_CONCURRENT_RUNS="$MAX_CONCURRENT_RUNS"
-WIRING="$WIRING"
-CHAT="$CHAT"
-ROOM_DAILY_TURN_BUDGET="20"
-QUIET="$QUIET"
-ANSWERER_FALLBACK=""
-MANAGER="off"
-MAINTAINER="off"
-GRAFT="off"
-EOF
+CONF_CONTENT="$(
+  core_conf_assignment AGENT_NAME "$DISPLAY_NAME"
+  core_conf_assignment AGENT_SLUG "$SLUG"
+  core_conf_assignment AGENT_KIND "$KIND"
+  core_conf_assignment AGENT_ID "${AGENT_ID:-}"
+  core_conf_assignment AGENT_REPO "$REPO"
+  core_conf_assignment AGENT_MISSION "$MISSION"
+  core_conf_assignment BOARD_ADAPTER "$BOARD"
+  core_conf_assignment BOARD_ID "$BOARD_ID"
+  core_conf_assignment TOKEN_FILE "$TOKEN_FILE"
+  core_conf_assignment BOARD_CLI "$BOARD_CLI"
+  core_conf_assignment WATCH_SECTIONS "$SECTIONS"
+  core_conf_assignment SKILLS_INDEX "$SKILLS_INDEX"
+  core_conf_assignment MODEL_CLI "$MODEL_CLI"
+  core_conf_assignment MAX_CONCURRENT_RUNS "$MAX_CONCURRENT_RUNS"
+  core_conf_assignment WIRING "$WIRING"
+  core_conf_assignment CHAT "$CHAT"
+  core_conf_assignment ROOM_DAILY_TURN_BUDGET "20"
+  core_conf_assignment QUIET "$QUIET"
+  core_conf_assignment ANSWERER_FALLBACK ""
+  core_conf_assignment MANAGER "off"
+  core_conf_assignment MAINTAINER "off"
+  core_conf_assignment GRAFT "off"
+  core_conf_assignment PR_REPO "$PR_REPO"
 )"
-CONF_CONTENT="$CONF_CONTENT
-PR_REPO=\"$PR_REPO\""
 if [ "$DRY_RUN" != "yes" ]; then
   mkdir -p "$(dirname "$CONF_FILE")"
   core_write_missing_keys "$CONF_FILE" "$CONF_CONTENT"

@@ -21,7 +21,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(sys.argv[1]) / "scripts"))
-from config_files import config_files
+from config_files import read_conf as read_agent_conf, config_files
 from typing import Any
 
 ALARM_LABEL = "manager-only"
@@ -52,26 +52,7 @@ def iso(value: dt.datetime) -> str:
 
 
 def parse_env(path: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return result
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.removeprefix("export ").split("=", 1)
-        key = key.strip()
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
-            continue
-        try:
-            words = shlex.split(value.strip(), posix=True)
-        except ValueError:
-            continue
-        if len(words) == 1:
-            result[key] = words[0]
-    return result
+    return read_agent_conf(path)
 
 
 def read_json(path: Path, fallback: Any) -> Any:

@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config_files import config_files
+from config_files import read_conf as read_agent_conf, config_files, quoted
 
 POLICY_KEYS = ("LADDER", "RESEARCH_CLI", "TRIAGE_HARD_CLI")
 FALLBACK_KEYS = ("PROVIDER_ORDER", "PROVIDER_CODEX_CLI", "PROVIDER_CURSOR_CLI")
@@ -18,19 +18,7 @@ CURSOR_COMMAND = "cursor-agent -p --output-format text --model cursor-grok-4.6-h
 
 
 def read_conf(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", raw)
-        if not match:
-            continue
-        key, value = match.groups()
-        try:
-            parsed = shlex.split(value, posix=True)
-        except ValueError:
-            continue
-        if len(parsed) == 1:
-            values[key] = parsed[0]
-    return values
+    return read_agent_conf(path)
 
 
 def option(argv: list[str], name: str) -> str:
@@ -63,10 +51,6 @@ def command_provider(command: str) -> str:
 
 def had_314_policy(command: str) -> bool:
     return command_provider(command) in {"cursor", "codex", "claude"}
-
-
-def quoted(value: str) -> str:
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`") + '"'
 
 
 def migrate(path: Path, version: str, dry_run: bool) -> bool:

@@ -10,14 +10,13 @@ import html
 import json
 import os
 import re
-import shlex
 import subprocess
 import tempfile
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config_files import config_files
+from config_files import read_conf as read_agent_conf, config_files
 from typing import Any
 
 STALE_SECTIONS = {"ai review", "qa", "ht manager review", "supervisor review", "inbox"}
@@ -348,20 +347,7 @@ class Health:
 
     @staticmethod
     def conf_value(path: Path, wanted: str) -> str:
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return ""
-        for line in lines:
-            match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", line)
-            if not match or match.group(1) != wanted:
-                continue
-            try:
-                values = shlex.split(match.group(2), posix=True)
-            except ValueError:
-                return ""
-            return values[0] if values else ""
-        return ""
+        return read_agent_conf(path).get(wanted, "")
 
     def runner_alarms(self) -> dict[str, str]:
         active: dict[str, str] = {}
