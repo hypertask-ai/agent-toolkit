@@ -38,7 +38,7 @@ EOF
 cat > "$TEMPLATE/scripts/migrate-provider-policy.py" <<'EOF'
 #!/usr/bin/env python3
 EOF
-cp "$ROOT/scripts/migrate-quiet-mode.py" "$TEMPLATE/scripts/migrate-quiet-mode.py"
+cp "$ROOT/scripts/migrate-quiet-mode.py" "$ROOT/scripts/config_files.py" "$TEMPLATE/scripts/"
 cat > "$TEMPLATE/evals/run-evals.sh" <<'EOF'
 #!/usr/bin/env bash
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

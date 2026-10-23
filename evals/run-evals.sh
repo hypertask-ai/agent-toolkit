@@ -519,10 +519,14 @@ if [ -z "$ONLY" ] && [ -f "$HERE/setup-agents.test.py" ]; then
   run_test "$HERE/scan-setup-agents.py" python3 "$HERE/scan-setup-agents.py" || :
 fi
 
-if [ -z "$ONLY" ]; then
+if [ -z "$ONLY" ] && [ -x "$HERE/conf-data.test.sh" ]; then
   echo ""
-  echo "-- conf data and generated shell security checks --"
+  echo "-- conf data security checks --"
   run_test "$HERE/conf-data.test.sh" bash "$HERE/conf-data.test.sh" || :
+fi
+if [ -z "$ONLY" ] && [ -x "$HERE/conf-sinks.test.sh" ]; then
+  echo ""
+  echo "-- generated shell security checks --"
   run_test "$HERE/conf-sinks.test.sh" bash "$HERE/conf-sinks.test.sh" || :
 fi
 

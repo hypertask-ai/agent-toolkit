@@ -44,5 +44,24 @@ else
   bad crashing-subtest-reported "status=$status output=$(cat "$TMP/output")"
 fi
 
+subtests=8
+for test_file in conf-data.test.sh conf-sinks.test.sh; do
+  printf '#!/usr/bin/env bash\nprintf "PASS %s stub passed\\n"\n' "$test_file" > "$TMP/evals/$test_file"
+  chmod +x "$TMP/evals/$test_file"
+  subtests=$((subtests + 1))
+  set +e
+  EVAL_TEST_TIMEOUT_SECONDS=0 bash "$TMP/evals/run-evals.sh" > "$TMP/output" 2>&1
+  status=$?
+  set -e
+  if [ "$status" -eq 1 ] \
+     && grep -q "^PASS $test_file stub passed$" "$TMP/output" \
+     && grep -q "^$subtests subtest file(s) run, 1 failed$" "$TMP/output" \
+     && grep -q '^failing subtest files: command-policy.test.sh$' "$TMP/output"; then
+    ok "$test_file-wired" "the copied runner runs each available conf check after a crash"
+  else
+    bad "$test_file-wired" "status=$status output=$(cat "$TMP/output")"
+  fi
+done
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
