@@ -214,6 +214,7 @@ done
 
 # shellcheck disable=SC1091
 . "$SRC/scripts/lib/feedback.sh"
+CORE_ROOT="$SRC"
 # shellcheck disable=SC1091
 . "$SRC/scripts/lib/instructions.sh"
 
@@ -222,7 +223,7 @@ migrate_product_confs() {
   for slug in dev-1 dev-2 qa-1; do
     source="$AGENT_CONF_DIR/$slug.conf"
     [ -f "$source" ] || continue
-    board="$(sed -n 's/^BOARD_ID="\([^"]*\)"$/\1/p' "$source" | head -1)"
+    board="$(python3 "$SRC/scripts/config_files.py" "$source" BOARD_ID)" || return 1
     [ "${board%%,*}" = 15 ] || continue
     target="$AGENT_CONF_DIR/Hypertask Product/$slug.conf"
     [ ! -e "$target" ] || fail "both flat and board-folder settings exist for $slug" \
@@ -674,7 +675,8 @@ EOF
     case "$conf" in "$AGENT_CONF_DIR"/*) ;; *) continue ;; esac
     [ -f "$conf" ] || continue
     slug="$(basename "$conf" .conf)"
-    if grep -qE '^WIRING="?events"?$' "$conf"; then
+    wiring="$(python3 "$SRC/scripts/config_files.py" "$conf" WIRING)" || exit 1
+    if [ "$wiring" = events ]; then
       core_write_event_timer_dropin "$SYSTEMD_USER_DIR" "$slug"
     else
       core_remove_event_timer_dropin "$SYSTEMD_USER_DIR" "$slug"

@@ -24,15 +24,17 @@ else
   [[ "$reason" != *$'\n'* && "$reason" != *$'\r'* ]] || die "reason contains a newline" "use one line of text"
 fi
 conf="$(core_find_conf "$slug")" || die "no conf found for agent '$slug'" "check the slug"
-python3 - "$conf" "$resume" "$reason" <<'PYEOF'
+python3 - "$conf" "$resume" "$reason" "$CORE_ROOT/scripts" <<'PYEOF'
 import datetime
 import fcntl
 import os
 from pathlib import Path
 import re
-import shlex
 import sys
 import tempfile
+
+sys.path.insert(0, sys.argv[4])
+from config_files import parse_conf, quoted
 
 path = Path(sys.argv[1])
 resume = sys.argv[2] == "yes"
@@ -44,14 +46,16 @@ with open(str(path) + ".lock", "a+") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     with path.open() as conf:
         fcntl.flock(conf, fcntl.LOCK_EX)
-        lines = [line for line in conf.read().splitlines(keepends=True)
+        original = conf.read()
+        parse_conf(original, path)
+        lines = [line for line in original.splitlines(keepends=True)
                  if not re.match(r"^(PAUSED|PAUSED_REASON|PAUSED_AT)=", line)]
         text = "".join(lines)
         if not resume:
             if text and not text.endswith("\n"):
                 text += "\n"
             now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
-            text += f'PAUSED="yes"\nPAUSED_REASON={shlex.quote(reason)}\nPAUSED_AT="{now}"\n'
+            text += f'PAUSED="yes"\nPAUSED_REASON={quoted(reason)}\nPAUSED_AT="{now}"\n'
         with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=".pause-", delete=False) as tmp:
             tmp.write(text)
             os.chmod(tmp.name, os.fstat(conf.fileno()).st_mode & 0o777)

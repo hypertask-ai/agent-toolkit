@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import re
-import shlex
 import shutil
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from config_files import parse_conf, quoted
 
 EXCLUDED_NAME_PART = bytes((119, 97, 122, 105, 103)).decode()
 
@@ -18,26 +21,14 @@ def eligible(path: Path) -> bool:
 
 
 def conf_value(text: str, key: str) -> str:
-    matches = re.findall(rf"^{re.escape(key)}=(.*)$", text, re.MULTILINE)
-    if not matches:
-        return ""
-    try:
-        parsed = shlex.split(matches[-1], posix=True)
-    except ValueError:
-        return ""
-    return parsed[0] if parsed else ""
-
-
-def quoted(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    escaped = escaped.replace("$", "\\$").replace("`", "\\`")
-    return f'"{escaped}"'
+    return parse_conf(text, "quiet-mode conf").get(key, "")
 
 
 def migrate(path: Path, version: str, dry_run: bool) -> bool:
     if not eligible(path):
         return False
     text = path.read_text(encoding="utf-8")
+    parse_conf(text, path)
     updated, count = re.subn(r'^QUIET=.*$', 'QUIET="on"', text, flags=re.MULTILINE)
     if count == 0:
         updated = text + ("" if not text or text.endswith("\n") else "\n") + 'QUIET="on"\n'

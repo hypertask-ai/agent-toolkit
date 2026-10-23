@@ -19,7 +19,7 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config_files import config_files
+from config_files import read_conf as read_agent_conf, config_files
 from typing import Any
 
 MAX_BYTES = 256 * 1024
@@ -59,7 +59,7 @@ def read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def parse_env(path: Path) -> dict[str, str]:
+def parse_credentials(path: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -81,6 +81,10 @@ def parse_env(path: Path) -> dict[str, str]:
         if len(words) == 1:
             result[key] = words[0]
     return result
+
+
+def parse_env(path: Path) -> dict[str, str]:
+    return read_agent_conf(path)
 
 
 def role_of(config: dict[str, str], slug: str) -> str | None:
@@ -506,7 +510,7 @@ def publish(document: dict[str, Any], credentials_path: Path, endpoint: str, rou
     if len(payload) > limit:
         raise RuntimeError("snapshot exceeds the publishing limit")
     runtime_credentials = Path(os.environ.get("AGENT_RUNTIME_CONFIG", "~/.config/hypertask-agent-runtime.env")).expanduser()
-    credentials = {**parse_env(credentials_path), **parse_env(runtime_credentials), **os.environ}
+    credentials = {**parse_credentials(credentials_path), **parse_credentials(runtime_credentials), **os.environ}
     base = credentials.get("HYPERTASK_APP_BASE") or endpoint
     suffix = "?project=hypertask" if route == "/api/factory-status" else ""
     url = urllib.parse.urljoin(base.rstrip("/") + "/", route.lstrip("/")) + suffix

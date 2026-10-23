@@ -347,9 +347,18 @@ adapter_install_board_cli() {
       chmod 755 "$dest.native"
     fi
   fi
+  local q_slug q_token_file q_agent_name q_agent_id q_board_ids q_quiet q_plain_language_dir q_api_base
+  printf -v q_slug '%q' "$slug"
+  printf -v q_token_file '%q' "$token_file"
+  printf -v q_agent_name '%q' "$agent_name"
+  printf -v q_agent_id '%q' "$agent_id"
+  printf -v q_board_ids '%q' "$board_ids"
+  printf -v q_quiet '%q' "$quiet"
+  printf -v q_plain_language_dir '%q' "$plain_language_dir"
+  printf -v q_api_base '%q' "$(_ht_api_base)"
   cat > "$dest" <<EOF
 #!/usr/bin/env bash
-# $slug: the board CLI acting as this agent.
+# The board CLI acting as this agent.
 set -euo pipefail
 _ht_native() {
   if [ -x "\$0.native" ]; then
@@ -375,33 +384,35 @@ hypertask() {
   _ht_native || return 127
   "\$HT_BIN" "\$@"
 }
-TOKEN_FILE="$token_file"
-AGENT_NAME="$agent_name"
-AGENT_ID="$agent_id"
-BOARD_IDS="$board_ids"
-QUIET="$quiet"
+AGENT_WRAPPER_SLUG=$q_slug
+TOKEN_FILE=$q_token_file
+AGENT_NAME=$q_agent_name
+AGENT_ID=$q_agent_id
+BOARD_IDS=$q_board_ids
+QUIET=$q_quiet
 VERBATIM="\${AGENT_COMMENT_VERBATIM:-no}"
 REPLY_TO_COMMENT_ID="\${AGENT_REPLY_TO_COMMENT_ID:-}"
 OWNER_MENTION_REPLY="no"
 if [ "\${AGENT_REPLY_ONLY:-no}" = "yes" ] && [ "\${AGENT_OWNER_MENTION_REPLY:-no}" = "yes" ]; then
   OWNER_MENTION_REPLY="yes"
 fi
-RUN_LOG="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.log"
-POSTED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.posted-comments"
-MOVED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.moved-tickets"
-OWNER_MENTIONS="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/$slug.owner-mentions"
-PLAIN_LANGUAGE_DIR="$plain_language_dir"
+RUN_LOG="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/\$AGENT_WRAPPER_SLUG.log"
+POSTED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/\$AGENT_WRAPPER_SLUG.posted-comments"
+MOVED="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/\$AGENT_WRAPPER_SLUG.moved-tickets"
+OWNER_MENTIONS="\${XDG_STATE_HOME:-\$HOME/.local/state}/agent-board-poll/\$AGENT_WRAPPER_SLUG.owner-mentions"
+PLAIN_LANGUAGE_DIR=$q_plain_language_dir
 PLAIN_LANGUAGE_CHECK="\$PLAIN_LANGUAGE_DIR/check-comment.py"
 WORKER_COMMENT_POLICY="\$PLAIN_LANGUAGE_DIR/worker-comment.py"
 SUPERVISOR=no
-if python3 "\$WORKER_COMMENT_POLICY" --is-supervisor "$slug"; then SUPERVISOR=yes; fi
+if python3 "\$WORKER_COMMENT_POLICY" --is-supervisor "\$AGENT_WRAPPER_SLUG"; then SUPERVISOR=yes; fi
 OUTBOUND_TEXT_GATE="\$PLAIN_LANGUAGE_DIR/outbound-text-gate.sh"
 POSPEAK_SKILL="\${AGENT_POSPEAK_SKILL:-\$PLAIN_LANGUAGE_DIR/pospeak.md}"
 TICKET_FORMAT_RULE="\${AGENT_TICKET_FORMAT_RULE:-\$PLAIN_LANGUAGE_DIR/ticket-format.md}"
 UNSLOP_SKILL="\${AGENT_UNSLOP_SKILL:-\$PLAIN_LANGUAGE_DIR/unslop.md}"
 ADHD_SKILL="\${AGENT_ADHD_SKILL:-\$PLAIN_LANGUAGE_DIR/i-have-adhd.md}"
-TICKET_LINK_FORMATTER="$plain_language_dir/../../../scripts/ticket_links.py"
-BOARD_API_URL="\${BOARD_API_URL:-$(_ht_api_base)}"
+TICKET_LINK_FORMATTER="\$PLAIN_LANGUAGE_DIR/../../../scripts/ticket_links.py"
+DEFAULT_BOARD_API_URL=$q_api_base
+BOARD_API_URL="\${BOARD_API_URL:-\$DEFAULT_BOARD_API_URL}"
 [ -r "\$TOKEN_FILE" ] || {
   echo "ERROR: cannot read \$TOKEN_FILE. Do this next: capture the agent token into that file" >&2
   exit 1
@@ -738,7 +749,7 @@ else:
 fi
 
 if [ "\${1:-} \${2:-}" = "task move" ] && _worker_board15 "\${3:-}"; then
-  if [[ " $* " == *" Valentin Review "* ]]; then
+  if [[ " \$* " == *" Valentin Review "* ]]; then
     set -- task move "\$3" --section "Supervisor Review"
   fi
 fi
@@ -1557,7 +1568,7 @@ adapter_qa_agent_ids() {
   local board="$1" conf
   while IFS= read -r conf; do
     ( unset AGENT_ID AGENT_KIND BOARD_ID
-      . "$conf"
+      core_read_conf "$conf" || exit 1
       [ "${AGENT_KIND:-}" = qa ] || exit 0
       case ",${BOARD_ID:-}," in
         *",$board,"*) [ -n "${AGENT_ID:-}" ] && printf '%s\n' "$AGENT_ID" ;;
@@ -2801,7 +2812,7 @@ PYEOF
       (
         unset AGENT_SLUG AGENT_ID AGENT_KIND AGENT_ROLE ROLE PR_REPO GH_LOGIN GITHUB_LOGIN
         # shellcheck disable=SC1090
-        . "$owner_conf"
+        core_read_conf "$owner_conf" || exit 1
         [ "${PR_REPO:-}" = "$repo" ] || exit 0
         owner_slug="${AGENT_SLUG:-$(basename "$owner_conf" .conf)}"
         github_login=""

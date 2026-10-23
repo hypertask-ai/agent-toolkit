@@ -203,7 +203,10 @@ esac
 HOST_CONFIG="${AGENT_TEMPLATE_HOST_CONFIG:-$HOME/.config/agent-template/config}"
 host_config_value() {
   local key="$1" fallback="$2" value
-  value="$(sed -n "s/^${key}=//p" "$HOST_CONFIG" 2>/dev/null | tail -n1 | tr -d '\"' || true)"
+  value=""
+  if [ -f "$HOST_CONFIG" ]; then
+    value="$(python3 "$CORE_ROOT/scripts/config_files.py" "$HOST_CONFIG" "$key")" || return 1
+  fi
   printf '%s\n' "${value:-$fallback}"
 }
 
@@ -258,26 +261,11 @@ manager_current_conf() {
   config_dir="$(dirname "$resolved")"
   [ "$(basename "$resolved")" = "$slug.conf" ] || return 1
   grep -q '^BOARD_ADAPTER=' "$conf" || return 1
-  grep -qvE '^\s*(#.*)?$|^[A-Z][A-Z0-9_]*=' "$conf" && return 1
+  python3 "$CORE_ROOT/scripts/config_files.py" "$conf" || return 1
   printf '%s' "$conf"
 }
 manager_conf_value() {
-  python3 - "$1" "$2" <<'PYEOF'
-import re, shlex, sys
-path, wanted = sys.argv[1:]
-value = ""
-with open(path, encoding="utf-8") as handle:
-    for raw in handle:
-        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", raw.rstrip("\n"))
-        if not match or match.group(1) != wanted:
-            continue
-        try:
-            parsed = shlex.split(match.group(2), posix=True)
-        except ValueError:
-            raise SystemExit(1)
-        value = parsed[0] if parsed else ""
-print(value, end="")
-PYEOF
+  python3 "$CORE_ROOT/scripts/config_files.py" "$1" "$2"
 }
 manager_set_conf_value() {
   local conf="$1" key="$2" value="$3" backup
@@ -290,15 +278,18 @@ manager_set_conf_value() {
   [ "$(manager_conf_value "$conf" "$key")" != "$value" ] || return 1
   backup="$conf.bak-${MANAGER_TIMESTAMP:?}"
   cp -a "$conf" "$backup"
-  CONF_KEY="$key" CONF_VALUE="$value" python3 - "$conf" <<'PYEOF'
+  CONF_KEY="$key" CONF_VALUE="$value" python3 - "$conf" "$CORE_ROOT/scripts" <<'PYEOF'
 import os, re, stat, tempfile
 from pathlib import Path
 
-path = Path(__import__("sys").argv[1])
+import sys
+sys.path.insert(0, sys.argv[2])
+from config_files import quoted
+
+path = Path(sys.argv[1])
 key = os.environ["CONF_KEY"]
 value = os.environ["CONF_VALUE"]
-escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
-replacement = f'{key}="{escaped}"\n'
+replacement = f"{key}={quoted(value)}\n"
 lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
 found = False
 for index, line in enumerate(lines):
@@ -363,7 +354,7 @@ manager_authorize() {
   MANAGER_CONFIG_DIR="$(dirname "$conf")"
   while IFS= read -r root; do
     case "$conf" in "$root"/*.conf|"$root"/*/*.conf) MANAGER_CONFIG_DIR="$root"; break ;; esac
-  done < <(core_conf_dirs)
+  done <<< "$(core_conf_dirs)"
   MANAGER_NAME="$(manager_conf_value "$conf" AGENT_NAME)"
   MANAGER_BOARD_CLI="$(manager_conf_value "$conf" BOARD_CLI)"
 }
@@ -507,7 +498,7 @@ maintainer_authorize() {
   MANAGER_CONFIG_DIR="$(dirname "$conf")"
   while IFS= read -r root; do
     case "$conf" in "$root"/*.conf|"$root"/*/*.conf) MANAGER_CONFIG_DIR="$root"; break ;; esac
-  done < <(core_conf_dirs)
+  done <<< "$(core_conf_dirs)"
   MANAGER_NAME="$(manager_conf_value "$conf" AGENT_NAME)"
   MANAGER_BOARD_CLI="$(manager_conf_value "$conf" BOARD_CLI)"
 }
@@ -1864,7 +1855,7 @@ PYEOF
     synced_repos=""
     while IFS= read -r conf; do
       [ -f "$conf" ] || continue
-      repo="$(sed -n 's/^AGENT_REPO="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$conf" | tail -n1)"
+      repo="$(manager_conf_value "$conf" AGENT_REPO)" || continue
       [ -n "$repo" ] || continue
       [ -d "$repo" ] || continue
       case " $synced_repos " in *" $repo "*) continue ;; esac
@@ -1915,7 +1906,7 @@ PYEOF
         SKIPPED=$((SKIPPED + 1))
         continue
       fi
-      slug="$(grep -m1 '^HT_AGENT_SLUG=' "$f" | sed -E 's/^HT_AGENT_SLUG=//; s/^"//; s/"$//' || true)"
+      slug="$(manager_conf_value "$f" HT_AGENT_SLUG)" || continue
       [ -n "$slug" ] || slug="$base"
       unit="hypertask-agent-worker@$slug.service"
       unit_state="$(systemctl --user is-enabled "$unit" 2>/dev/null || true)"
@@ -1924,25 +1915,20 @@ PYEOF
         SKIPPED=$((SKIPPED + 1))
         continue
       fi
-      PY_OUT="$(HOME="$HOME" python3 - "$f" "$slug" <<'PYEOF'
+      PY_OUT="$(HOME="$HOME" python3 - "$f" "$slug" "$CORE_ROOT/scripts" <<'PYEOF'
 import os, re, sys
 
 path, slug = sys.argv[1], sys.argv[2]
 home = os.environ["HOME"]
 
-fields = {}
-with open(path, encoding="utf-8") as fh:
-    for line in fh:
-        m = re.match(r'^([A-Z][A-Z0-9_]*)=(.*)$', line.rstrip("\n"))
-        if not m:
-            continue
-        key, val = m.group(1), m.group(2)
-        if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
-            val = val[1:-1]
-        fields[key] = val
+sys.path.insert(0, sys.argv[3])
+from pathlib import Path
+from config_files import parse_conf, quoted
+
+fields = parse_conf(Path(path).read_text(encoding="utf-8"), path)
 
 def esc(v):
-    return v.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
+    return quoted(v)[1:-1]
 
 provider = fields.get("HT_PROVIDER", "")
 model = fields.get("HT_MODEL", "")

@@ -418,13 +418,15 @@ git init --bare -q "$TMP/wrong-origin.git"
 git -C "$TMP/repo" remote set-url origin "$TMP/wrong-origin.git"
 git config --file "$TMP/home/.gitconfig" url."file://$TMP/remote.git".insteadOf https://github.com/example/repo.git
 
-# Source only the adapter for focused LIVE and feedback tests. The fake board
-# API above is used through the real _ht_get parser.
+# Load the adapter with its core conf reader for focused LIVE and feedback tests.
+# The fake board API above is used through the real _ht_get parser.
 PATH="$TMP/bin:$PATH"
 HOME="$TMP/home"
 PR_REPO="example/repo"
 export PR_GATE_NOW="2026-09-18T22:00:00Z"
+CORE_ROOT="$ROOT"
 # shellcheck source=/dev/null
+. "$ROOT/scripts/lib/core.sh"
 . "$ROOT/adapters/hypertask/adapter.sh"
 . "$ROOT/scripts/lib/adapters/hypertask.sh"
 [[ "$(SECTION_SCENARIO=both adapter_resolve_release_section "$TMP/bin/hypertask" 15 Review)" = 'Supervisor Review' ]]

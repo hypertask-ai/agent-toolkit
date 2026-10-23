@@ -115,22 +115,7 @@ PYEOF
 }
 
 instruction_conf_value() {
-  python3 - "$1" "$2" <<'PYEOF'
-import re
-import shlex
-import sys
-
-path, wanted = sys.argv[1:]
-value = ""
-with open(path, encoding="utf-8") as handle:
-    for raw in handle:
-        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", raw.rstrip("\n"))
-        if not match or match.group(1) != wanted:
-            continue
-        parsed = shlex.split(match.group(2), posix=True)
-        value = parsed[0] if parsed else ""
-print(value, end="")
-PYEOF
+  python3 "$CORE_ROOT/scripts/config_files.py" "$1" "$2"
 }
 
 instruction_file_is_queued() {

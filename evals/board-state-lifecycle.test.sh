@@ -587,7 +587,7 @@ if actor != 'human':
     rows[1]['agent'] = {'id': actor}
 json.dump({'comments': rows}, open(sys.argv[1], 'w'))
 PYEOF
-  verdict="$(env "${run_env[@]}" AGENT_CONFIG_DIR="$TMP/config" ROOT="$ROOT" TOKEN_FILE="$TMP/token" bash -c '
+  verdict="$(env "${run_env[@]}" AGENT_CONFIG_DIR="$TMP/config" ROOT="$ROOT" CORE_ROOT="$ROOT" TOKEN_FILE="$TMP/token" bash -c '
     . "$ROOT/scripts/lib/core.sh"
     . "$ROOT/adapters/hypertask/adapter.sh"
     adapter_latest_qa_verdict "$TOKEN_FILE" task-1 15 "$(adapter_qa_agent_ids 15)"

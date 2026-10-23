@@ -25,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from config_files import config_files, is_paused
+from config_files import read_conf as read_agent_conf, config_files, is_paused
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -45,17 +45,7 @@ RUN_END_PATTERN = re.compile(r"run (?:done|FAILED) (\S+)")
 
 
 def parse_conf(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        match = re.match(r"^([A-Z][A-Z0-9_]*)=(.*)$", raw.strip())
-        if not match:
-            continue
-        try:
-            parsed = shlex.split(match.group(2), posix=True)
-        except ValueError:
-            continue
-        values[match.group(1)] = parsed[0] if parsed else ""
-    return values
+    return read_agent_conf(path)
 
 
 def api_base(values: dict[str, str]) -> str:

@@ -2662,7 +2662,7 @@ answerer_agent_rows() {
       (
         unset AGENT_ID AGENT_SLUG BOARD_ADAPTER BOARD_ID
         # shellcheck disable=SC1090
-        . "$agent_conf"
+        core_read_conf "$agent_conf" || exit 1
         [ "${BOARD_ADAPTER:-}" = "$current_adapter" ] || exit 0
         [ -n "${AGENT_ID:-}" ] || exit 0
         token="$(adapter_mention_token "$AGENT_ID" 2>/dev/null)" || exit 0
